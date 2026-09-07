@@ -7,8 +7,7 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use ferrum2_shadowsocks::{
     ClientTcpOutbound, DetectionReason, FlowTerminal, PlainDuplex, ProtocolReason,
-    REQUEST_FIRST_READ_LEN, RESPONSE_FIRST_READ_LEN, ShadowsocksError, ShadowsocksTcpInbound,
-    TcpReplayStore,
+    ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore,
 };
 
 use common::{
@@ -24,11 +23,11 @@ async fn request_fixed_region_is_single_operation_then_variable_accepts_one_byte
     let random = ScriptedRandom::new([]);
     let salt = salt_from_u64(900);
     let request = valid_request_wire(NOW, &salt);
-    let one_byte = request[REQUEST_FIRST_READ_LEN..]
+    let one_byte = request[common::AES128_REQUEST_READ_LEN..]
         .iter()
         .map(|byte| vec![*byte])
         .collect::<Vec<_>>();
-    let variable = &request[REQUEST_FIRST_READ_LEN..];
+    let variable = &request[common::AES128_REQUEST_READ_LEN..];
     let mixed = vec![
         variable[..1].to_vec(),
         variable[1..4].to_vec(),
@@ -37,7 +36,7 @@ async fn request_fixed_region_is_single_operation_then_variable_accepts_one_byte
 
     for fragments in [one_byte, mixed] {
         let replay = TcpReplayStore::new(1024).expect("capacity");
-        let mut reads = vec![request[..REQUEST_FIRST_READ_LEN].to_vec()];
+        let mut reads = vec![request[..common::AES128_REQUEST_READ_LEN].to_vec()];
         let fragment_count = fragments.len();
         reads.extend(fragments);
         let (io, observation) = RecordingIo::new(reads);
@@ -46,7 +45,7 @@ async fn request_fixed_region_is_single_operation_then_variable_accepts_one_byte
         inbound.accept_stream(io).await.expect("fragmented request");
 
         let observed = observation.lock().expect("observation");
-        assert_eq!(observed.read_lengths[0], REQUEST_FIRST_READ_LEN);
+        assert_eq!(observed.read_lengths[0], common::AES128_REQUEST_READ_LEN);
         assert_eq!(observed.read_calls, 1 + fragment_count);
     }
 }
@@ -58,7 +57,7 @@ async fn response_fixed_region_is_single_operation_then_payload_accepts_one_byte
     let request_salt = salt_from_u64(901);
     let response_salt = salt_from_u64(902);
     let (response, _) = response_wire_and_frames(&request_salt, &response_salt, b"fragmented", &[]);
-    let payload = &response[RESPONSE_FIRST_READ_LEN..];
+    let payload = &response[common::AES128_RESPONSE_READ_LEN..];
     let one_byte = payload.iter().map(|byte| vec![*byte]).collect::<Vec<_>>();
     let mixed = vec![
         payload[..1].to_vec(),
@@ -67,7 +66,11 @@ async fn response_fixed_region_is_single_operation_then_payload_accepts_one_byte
     ];
 
     for fragments in [one_byte, mixed] {
-        let mut reads = vec![response[..RESPONSE_FIRST_READ_LEN].to_vec()];
+        let mut reads = vec![
+            response[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                .initial_response_read_bytes()]
+                .to_vec(),
+        ];
         let fragment_count = fragments.len();
         reads.extend(fragments);
         let (io, observation) = RecordingIo::new(reads);
@@ -89,7 +92,7 @@ async fn response_fixed_region_is_single_operation_then_payload_accepts_one_byte
 
         assert_eq!(&destination[..read], b"fragmented");
         let observed = observation.lock().expect("observation");
-        assert_eq!(observed.read_lengths[0], RESPONSE_FIRST_READ_LEN);
+        assert_eq!(observed.read_lengths[0], common::AES128_RESPONSE_READ_LEN);
         assert_eq!(observed.read_calls, 1 + fragment_count);
     }
 }
@@ -270,8 +273,8 @@ async fn mid_request_variable_eof_is_detection_before_replay_mutation() {
     let salt = salt_from_u64(909);
     let request = valid_request_wire(NOW, &salt);
     let (io, observation) = RecordingIo::new([
-        request[..REQUEST_FIRST_READ_LEN].to_vec(),
-        request[REQUEST_FIRST_READ_LEN..REQUEST_FIRST_READ_LEN + 3].to_vec(),
+        request[..common::AES128_REQUEST_READ_LEN].to_vec(),
+        request[common::AES128_REQUEST_READ_LEN..common::AES128_REQUEST_READ_LEN + 3].to_vec(),
     ]);
     let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
 
@@ -293,8 +296,8 @@ async fn mid_response_first_payload_eof_is_detection_and_terminal_is_frozen() {
     let response_salt = salt_from_u64(911);
     let (response, _) = response_wire_and_frames(&request_salt, &response_salt, b"payload", &[]);
     let (io, observation) = RecordingIo::new([
-        response[..RESPONSE_FIRST_READ_LEN].to_vec(),
-        response[RESPONSE_FIRST_READ_LEN..RESPONSE_FIRST_READ_LEN + 3].to_vec(),
+        response[..common::AES128_RESPONSE_READ_LEN].to_vec(),
+        response[common::AES128_RESPONSE_READ_LEN..common::AES128_RESPONSE_READ_LEN + 3].to_vec(),
     ]);
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
@@ -340,8 +343,8 @@ async fn mid_subsequent_length_eof_is_protocol_and_terminal_is_frozen() {
     let request = valid_request_wire(NOW, &salt);
     let frames = request_data_frames(&salt, &[b"length"]);
     let (io, observation) = RecordingIo::new([
-        request[..REQUEST_FIRST_READ_LEN].to_vec(),
-        request[REQUEST_FIRST_READ_LEN..].to_vec(),
+        request[..common::AES128_REQUEST_READ_LEN].to_vec(),
+        request[common::AES128_REQUEST_READ_LEN..].to_vec(),
         frames[0][..3].to_vec(),
     ]);
     let inbound = ShadowsocksTcpInbound::new(&keys, &clock, &random, &replay);
@@ -375,7 +378,7 @@ async fn short_fixed_response_remains_detection() {
     let keys = provider();
     let clock = FakeClock::new(NOW, 0);
     let request_salt = salt_from_u64(906);
-    let (io, observation) = RecordingIo::new([vec![0; RESPONSE_FIRST_READ_LEN - 1]]);
+    let (io, observation) = RecordingIo::new([vec![0; common::AES128_RESPONSE_READ_LEN - 1]]);
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let outbound = ClientTcpOutbound::new(server_target(), &keys, &connector, &clock, &random);

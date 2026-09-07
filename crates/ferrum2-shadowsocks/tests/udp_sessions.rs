@@ -744,3 +744,246 @@ fn concurrent_expiry_and_request_commit_never_returns_a_stale_capability() {
         }
     }
 }
+
+#[test]
+fn server_prepared_tokens_and_capabilities_reject_another_owner_without_mutation() {
+    for profile in MethodProfile::ALL {
+        let keys = udp_provider(profile);
+        let clock = FakeClock::new(1_700_000_000, 0);
+        let client_random = FillRandom::new(0x10);
+        let server_random = FillRandom::new(0x80);
+        let mut client = UdpClientSession::new(&keys, &client_random, |_| false).expect("client");
+        let server = UdpServer::new(&keys).expect("server");
+        let other = UdpServer::new(&keys).expect("same key, different owner");
+        let request = request_wire(&mut client, &clock, &client_random, b"request");
+        let mut scratch = UdpPacketScratch::new();
+        let different_keys = ferrum2_crypto::MethodSinglePskProvider::new(
+            ferrum2_crypto::MethodPsk::try_from_slice(profile, &vec![0x47; profile.key_bytes()])
+                .expect("different key"),
+        );
+        let different_key_server = UdpServer::new(&different_keys).expect("different key owner");
+        let pending = server
+            .prepare_request(&clock, &request, &mut scratch)
+            .expect("authenticated");
+        assert_eq!(
+            different_key_server.existing_capability(&pending),
+            Err(UdpPacketError::Generation)
+        );
+        let (_, commit) = pending.into_parts();
+        assert!(matches!(
+            different_key_server.commit_request(
+                commit,
+                "127.0.0.1:49152".parse().expect("peer"),
+                instant(0),
+                &server_random
+            ),
+            Err(UdpPacketError::Generation)
+        ));
+        assert_eq!(different_key_server.session_count(), Ok(0));
+        let pending = server
+            .prepare_request(&clock, &request, &mut scratch)
+            .expect("authenticated");
+        assert_eq!(
+            other.existing_capability(&pending),
+            Err(UdpPacketError::Generation)
+        );
+        let (_, commit) = pending.into_parts();
+        let peer = "127.0.0.1:49152".parse().expect("peer");
+        assert!(matches!(
+            other.commit_request(commit, peer, instant(0), &server_random),
+            Err(UdpPacketError::Generation)
+        ));
+        assert_eq!(other.session_count(), Ok(0));
+        let capability = accept(&server, &clock, &server_random, &request, peer, 10_000);
+        let other_capability = accept(&other, &clock, &server_random, &request, peer, 10_000);
+        assert_ne!(capability, other_capability);
+        assert_eq!(
+            other.session_snapshot(capability),
+            Err(UdpPacketError::Generation)
+        );
+        assert_eq!(
+            other.remove_session(capability, instant(90_000)),
+            Err(UdpPacketError::Generation)
+        );
+        let before = other.session_snapshot(other_capability).expect("snapshot");
+        let mut output = vec![0xa5; 65_507];
+        assert!(matches!(
+            other.encode_response(
+                capability,
+                &clock,
+                &server_random,
+                &datagram(b"response"),
+                0,
+                &mut output,
+                &mut scratch
+            ),
+            Err(UdpPacketError::Generation)
+        ));
+        assert_eq!(output, vec![0xa5; 65_507]);
+        assert_eq!(
+            other.session_snapshot(other_capability).expect("unchanged"),
+            before
+        );
+        let moved = server;
+        assert!(
+            moved
+                .session_snapshot(capability)
+                .expect("move keeps identity")
+                .is_some()
+        );
+    }
+}
+
+#[test]
+fn accepted_server_activity_never_regresses_or_shortens_retention() {
+    let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let client_random = FillRandom::new(0x10);
+    let server_random = FillRandom::new(0x80);
+    let mut client = UdpClientSession::new(&keys, &client_random, |_| false).expect("client");
+    let server = UdpServer::new(&keys).expect("server");
+    let peer = "127.0.0.1:49152".parse().expect("peer");
+    let first = request_wire(&mut client, &clock, &client_random, b"first");
+    let capability = accept(&server, &clock, &server_random, &first, peer, 10_000);
+    let second = request_wire(&mut client, &clock, &client_random, b"second");
+    assert_eq!(
+        accept(&server, &clock, &server_random, &second, peer, 5_000),
+        capability
+    );
+    assert_eq!(
+        server
+            .session_snapshot(capability)
+            .expect("snapshot")
+            .expect("live")
+            .last_activity(),
+        instant(10_000)
+    );
+    assert_eq!(
+        server.remove_session(capability, instant(69_999)),
+        Ok(false)
+    );
+    assert_eq!(server.remove_session(capability, instant(70_000)), Ok(true));
+    assert_eq!(server.session_snapshot(capability), Ok(None));
+    let replacement = accept(&server, &clock, &server_random, &first, peer, 70_000);
+    assert_ne!(replacement, capability);
+    assert_eq!(server.session_snapshot(capability), Ok(None));
+}
+
+#[test]
+fn client_tokens_bind_instance_even_when_wire_session_ids_match() {
+    let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let client_random = FillRandom::new(0x10);
+    let server_random = FillRandom::new(0x80);
+    let mut client = UdpClientSession::new(&keys, &client_random, |_| false).expect("client");
+    let other = UdpClientSession::new(&keys, &client_random, |_| false).expect("same wire ID");
+    let server = UdpServer::new(&keys).expect("server");
+    let peer = "127.0.0.1:49152".parse().expect("peer");
+    let request = request_wire(&mut client, &clock, &client_random, b"request");
+    let capability = accept(&server, &clock, &server_random, &request, peer, 0);
+    let response = response_wire(&server, capability, &clock, &server_random, b"response");
+    let mut scratch = UdpPacketScratch::new();
+    let (_, commit) = client
+        .prepare_response(&clock, &response, &mut scratch)
+        .expect("response")
+        .into_parts();
+    assert_eq!(
+        other.commit_response(commit, instant(0)),
+        Err(UdpPacketError::Binding)
+    );
+    assert_eq!(
+        other
+            .association_snapshot()
+            .expect("empty")
+            .association_count(),
+        0
+    );
+    let (_, commit) = client
+        .prepare_response(&clock, &response, &mut scratch)
+        .expect("response")
+        .into_parts();
+    let moved = client;
+    moved
+        .commit_response(commit, instant(10_000))
+        .expect("owner survives move");
+    let response = response_wire(&server, capability, &clock, &server_random, b"next");
+    accept_response(&moved, &clock, &response, &mut scratch, 5_000).expect("older sample");
+    assert_eq!(
+        moved
+            .association_snapshot()
+            .expect("snapshot")
+            .current_last_valid(),
+        Some(instant(10_000))
+    );
+}
+
+#[test]
+fn current_and_old_batch_activity_is_monotonic_and_failed_batch_rolls_back() {
+    let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let client_random = FillRandom::new(0x10);
+    let mut client = UdpClientSession::new(&keys, &client_random, |_| false).expect("client");
+    let servers = [
+        UdpServer::new(&keys).expect("first"),
+        UdpServer::new(&keys).expect("second"),
+        UdpServer::new(&keys).expect("third"),
+    ];
+    let randoms = [
+        FillRandom::new(0x80),
+        FillRandom::new(0x90),
+        FillRandom::new(0xa0),
+    ];
+    let peer = "127.0.0.1:49152".parse().expect("peer");
+    let capabilities: [_; 3] = std::array::from_fn(|index| {
+        let request = request_wire(&mut client, &clock, &client_random, b"request");
+        accept(&servers[index], &clock, &randoms[index], &request, peer, 0)
+    });
+    let mut scratch = UdpPacketScratch::new();
+    for (index, now) in [(0, 10_000), (1, 20_000), (0, 5_000), (1, 15_000)] {
+        let response = response_wire(
+            &servers[index],
+            capabilities[index],
+            &clock,
+            &randoms[index],
+            b"response",
+        );
+        let commit = client
+            .prepare_response_borrowed(&clock, &response, &mut scratch)
+            .expect("response")
+            .into_commit();
+        UdpClientSession::commit_responses(&[&client], vec![commit], instant(now))
+            .expect("batch accepts");
+    }
+    let before = client.association_snapshot().expect("snapshot");
+    assert_eq!(before.current_last_valid(), Some(instant(20_000)));
+    assert_eq!(before.old_last_valid(), Some(instant(10_000)));
+    let third = response_wire(
+        &servers[2],
+        capabilities[2],
+        &clock,
+        &randoms[2],
+        b"response",
+    );
+    let commit = client
+        .prepare_response_borrowed(&clock, &third, &mut scratch)
+        .expect("response")
+        .into_commit();
+    assert_eq!(
+        UdpClientSession::commit_responses(&[&client], vec![commit], instant(69_999)),
+        Err(UdpPacketError::AssociationLimit)
+    );
+    assert_eq!(client.association_snapshot().expect("unchanged"), before);
+    let commit = client
+        .prepare_response_borrowed(&clock, &third, &mut scratch)
+        .expect("response")
+        .into_commit();
+    UdpClientSession::commit_responses(&[&client], vec![commit], instant(70_000))
+        .expect("full old retention elapsed");
+    assert_eq!(
+        client
+            .association_snapshot()
+            .expect("rotated")
+            .old_last_valid(),
+        Some(instant(20_000))
+    );
+}

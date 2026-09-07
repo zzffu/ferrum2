@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
+test-support = []
 tokio = ["dep:tokio"]
 
 [dependencies]
@@ -21,6 +22,7 @@ thiserror.workspace = true
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
+ferrum2-shadowsocks = { path = ".", features = ["test-support"] }
 hex.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

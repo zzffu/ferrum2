@@ -7,6 +7,7 @@ use shadowsocks_crypto::v2::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+use super::owner::CryptoOwnerId;
 use super::session::{
     UdpOutboundSession, UdpSessionId, generate_distinct_udp_session_id, generate_udp_session_id,
 };
@@ -33,6 +34,7 @@ enum UdpCryptoInner {
 /// body under the session-derived key. ChaCha envelopes authenticate the
 /// identity with the body under the direct PSK and a fresh CSPRNG nonce.
 pub struct UdpCrypto {
+    owner: CryptoOwnerId,
     inner: UdpCryptoInner,
 }
 
@@ -75,7 +77,8 @@ impl fmt::Debug for UdpCrypto {
 }
 
 impl UdpCrypto {
-    pub(crate) fn from_method_key(psk: &MethodPskBytes) -> Self {
+    pub(crate) fn from_method_key(psk: &MethodPskBytes) -> Result<Self, UdpCryptoError> {
+        let owner = CryptoOwnerId::allocate()?;
         let inner = match psk {
             MethodPskBytes::Aes128(psk) => UdpCryptoInner::Aes {
                 profile: MethodProfile::Blake3Aes128Gcm2022,
@@ -104,7 +107,7 @@ impl UdpCrypto {
                 .unwrap_or_else(|_| unreachable!("XChaCha20 PSKs have a fixed width")),
             ),
         };
-        Self { inner }
+        Ok(Self { owner, inner })
     }
 
     /// Returns the immutable method profile bound to this owner.
@@ -147,16 +150,20 @@ impl UdpCrypto {
             UdpCryptoInner::Aes { .. } => Some(self.aes_body_cipher(&session_id)),
             UdpCryptoInner::ChaCha20Poly1305(_) => None,
         };
-        UdpOutboundSession::new(self.profile(), session_id, aes_body_cipher)
+        UdpOutboundSession::new(self.owner, self.profile(), session_id, aes_body_cipher)
     }
 
-    fn crypt_aes_header(&self, header: &mut [u8; UDP_IDENTITY_BYTES], encrypt: bool) {
-        match (&self.inner, encrypt) {
-            (UdpCryptoInner::Aes { header: cipher, .. }, true) => cipher.encrypt(header),
-            (UdpCryptoInner::Aes { header: cipher, .. }, false) => cipher.decrypt(header),
-            (UdpCryptoInner::ChaCha20Poly1305(_), _) => {
-                unreachable!("AES header operation requires an AES method")
-            }
+    fn encrypt_aes_header(&self, header: &mut [u8; UDP_IDENTITY_BYTES]) {
+        match &self.inner {
+            UdpCryptoInner::Aes { header: cipher, .. } => cipher.encrypt(header),
+            UdpCryptoInner::ChaCha20Poly1305(_) => unreachable!("AES header requires AES"),
+        }
+    }
+
+    fn decrypt_aes_header(&self, header: &mut [u8; UDP_IDENTITY_BYTES]) {
+        match &self.inner {
+            UdpCryptoInner::Aes { header: cipher, .. } => cipher.decrypt(header),
+            UdpCryptoInner::ChaCha20Poly1305(_) => unreachable!("AES header requires AES"),
         }
     }
 
@@ -217,7 +224,8 @@ impl UdpCrypto {
     ///
     /// The packet ID advances only after the complete wire result is present
     /// in `output`. Random, capacity, primitive, or counter failure leaves the
-    /// counter unchanged and returns no externally ownable length.
+    /// counter unchanged and returns no externally ownable length. Sessions
+    /// created by another owner are rejected before touching output or randomness.
     pub fn seal(
         &self,
         outbound: &mut UdpOutboundSession,
@@ -225,6 +233,9 @@ impl UdpCrypto {
         output: &mut [u8],
         random: &(impl SecureRandom + ?Sized),
     ) -> Result<UdpSealResult, UdpCryptoError> {
+        if outbound.owner != self.owner {
+            return Err(UdpCryptoError::OwnerMismatch);
+        }
         if outbound.profile != self.profile() {
             return Err(UdpCryptoError::MethodMismatch);
         }
@@ -361,6 +372,10 @@ pub enum UdpCryptoError {
     CounterExhausted,
     /// The outbound session belongs to another cryptographic method.
     MethodMismatch,
+    /// The outbound session was created by another primitive owner.
+    OwnerMismatch,
+    /// No further process-local owner identity can be allocated.
+    OwnerExhausted,
 }
 
 impl fmt::Display for UdpCryptoError {
@@ -372,6 +387,8 @@ impl fmt::Display for UdpCryptoError {
             Self::RandomUnavailable => "secure random unavailable",
             Self::OperationFailed => "UDP encryption failed",
             Self::CounterExhausted => "UDP packet counter exhausted",
+            Self::OwnerMismatch => "UDP cryptographic owner mismatch",
+            Self::OwnerExhausted => "UDP cryptographic owner exhausted",
             Self::MethodMismatch => "UDP cryptographic method mismatch",
         };
         formatter.write_str(message)
@@ -408,7 +425,7 @@ fn seal_aes_udp(
 ) -> Result<(), UdpCryptoError> {
     let mut identity = Zeroizing::new(udp_identity(session_id, packet_id));
     let mut protected_header = *identity;
-    crypto.crypt_aes_header(&mut protected_header, true);
+    crypto.encrypt_aes_header(&mut protected_header);
     output[..UDP_IDENTITY_BYTES].copy_from_slice(&protected_header);
 
     let mut nonce = Zeroizing::new([0_u8; AEAD_NONCE_BYTES]);
@@ -464,7 +481,7 @@ fn open_aes_udp(
     let body_len = aes_udp_body_len(wire, plaintext_output)?;
     let mut identity = Zeroizing::new([0_u8; UDP_IDENTITY_BYTES]);
     identity.copy_from_slice(&wire[..UDP_IDENTITY_BYTES]);
-    crypto.crypt_aes_header(&mut identity, false);
+    crypto.decrypt_aes_header(&mut identity);
 
     let mut session_bytes = [0_u8; UDP_SESSION_ID_BYTES];
     session_bytes.copy_from_slice(&identity[..UDP_SESSION_ID_BYTES]);
@@ -599,12 +616,12 @@ mod tests {
 
     fn aes128_udp_crypto() -> UdpCrypto {
         let psk = MethodPskBytes::Aes128(Zeroizing::new([0x11; AES_128_KEY_BYTES]));
-        UdpCrypto::from_method_key(&psk)
+        UdpCrypto::from_method_key(&psk).expect("owner identity")
     }
 
     fn aes256_udp_crypto() -> UdpCrypto {
         let psk = MethodPskBytes::Aes256(Zeroizing::new([0x33; WIDE_KEY_BYTES]));
-        UdpCrypto::from_method_key(&psk)
+        UdpCrypto::from_method_key(&psk).expect("owner identity")
     }
 
     #[test]
@@ -617,7 +634,7 @@ mod tests {
         let original = output;
         assert!(matches!(
             aes256_udp_crypto().seal(&mut outbound, b"body", &mut output, &SystemRandom),
-            Err(UdpCryptoError::MethodMismatch)
+            Err(UdpCryptoError::OwnerMismatch)
         ));
         assert_eq!(output, original);
 
@@ -649,7 +666,7 @@ mod tests {
     fn udp_open_cache_is_key_bound_and_authentication_failure_does_not_poison() {
         let first = aes128_udp_crypto();
         let second_psk = MethodPskBytes::Aes128(Zeroizing::new([0x44; AES_128_KEY_BYTES]));
-        let second = UdpCrypto::from_method_key(&second_psk);
+        let second = UdpCrypto::from_method_key(&second_psk).expect("owner identity");
         let session_id = UdpSessionId::from_bytes([0x55; UDP_SESSION_ID_BYTES]);
         let mut first_outbound = first.new_outbound_session(session_id.clone());
         let mut second_outbound = second.new_outbound_session(session_id);

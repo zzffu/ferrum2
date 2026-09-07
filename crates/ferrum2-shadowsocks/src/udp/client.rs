@@ -9,10 +9,14 @@ use ferrum2_crypto::{
     UdpSessionId,
 };
 
+use super::owner::ProtocolOwnerId;
 use super::replay::UdpReplayWindow;
-use super::wire::{encode_packet, open_packet_borrowed, udp_crypto, udp_wire_len};
+use super::wire::{
+    PacketDirection, UdpPacketDirection, encode_packet, open_packet_borrowed, udp_crypto,
+    udp_wire_len,
+};
 use super::{UDP_ASSOCIATION_RETENTION, UdpPacketError, UdpPacketScratch};
-use crate::tcp::wire::{REQUEST_TYPE, RESPONSE_TYPE, ValidatedTarget};
+use crate::tcp::wire::ValidatedTarget;
 
 #[derive(Clone)]
 struct ClientAssociation {
@@ -54,6 +58,7 @@ impl ClientAssociationSnapshot {
 
 /// One bounded socket-free SIP022 UDP client protocol session.
 pub struct UdpClientSession {
+    owner: ProtocolOwnerId,
     crypto: UdpCrypto,
     outbound: UdpOutboundSession,
     associations: Mutex<ClientAssociations>,
@@ -71,6 +76,7 @@ impl UdpClientSession {
             .generate_outbound_session(random, is_live)
             .map_err(|_| UdpPacketError::Random)?;
         Ok(Self {
+            owner: ProtocolOwnerId::allocate()?,
             crypto,
             outbound,
             associations: Mutex::new(ClientAssociations::default()),
@@ -93,7 +99,7 @@ impl UdpClientSession {
     ) -> Result<usize, UdpPacketError> {
         udp_wire_len(
             self.crypto.profile(),
-            false,
+            UdpPacketDirection::Request,
             target,
             payload_len,
             padding_len,
@@ -138,8 +144,7 @@ impl UdpClientSession {
             &mut self.outbound,
             clock,
             random,
-            REQUEST_TYPE,
-            None,
+            PacketDirection::Request,
             target,
             payload,
             padding_len,
@@ -172,11 +177,12 @@ impl UdpClientSession {
             clock,
             wire,
             scratch,
-            RESPONSE_TYPE,
-            Some(self.outbound.session_id()),
+            PacketDirection::Response {
+                binding: self.outbound.session_id(),
+            },
         )?;
         Ok(BorrowedPendingUdpResponse {
-            owner_id: self.outbound.session_id().clone(),
+            owner_id: self.owner,
             session_id: opened.session_id,
             packet_id: opened.packet_id,
             target: opened.target,
@@ -193,7 +199,7 @@ impl UdpClientSession {
         commit: UdpResponseCommit,
         now: MonotonicInstant,
     ) -> Result<(), UdpPacketError> {
-        if commit.owner_id != *self.outbound.session_id() {
+        if commit.owner_id != self.owner {
             return Err(UdpPacketError::Binding);
         }
         let mut associations = self
@@ -213,7 +219,7 @@ impl UdpClientSession {
             return Err(UdpPacketError::Bounds);
         }
         for (index, session) in sessions.iter().enumerate() {
-            if commits[index].owner_id != *session.outbound.session_id()
+            if commits[index].owner_id != session.owner
                 || sessions[..index]
                     .iter()
                     .any(|other| std::ptr::eq(*other, *session))
@@ -286,7 +292,7 @@ fn commit_client_association(
         .filter(|association| association.session_id == session_id)
     {
         current.replay.commit(packet_id)?;
-        current.last_valid = now;
+        current.last_valid = current.last_valid.max(now);
         return Ok(());
     }
     if let Some(old) = associations
@@ -295,7 +301,7 @@ fn commit_client_association(
         .filter(|association| association.session_id == session_id)
     {
         old.replay.commit(packet_id)?;
-        old.last_valid = now;
+        old.last_valid = old.last_valid.max(now);
         return Ok(());
     }
 
@@ -332,7 +338,7 @@ fn commit_client_association(
 
 /// Fully authenticated response awaiting its runtime-state commit.
 pub struct PendingUdpResponse {
-    owner_id: UdpSessionId,
+    owner_id: ProtocolOwnerId,
     session_id: UdpSessionId,
     packet_id: u64,
     datagram: Datagram,
@@ -368,7 +374,7 @@ impl fmt::Debug for PendingUdpResponse {
 
 /// Fully authenticated borrowed response awaiting exact runtime reservation.
 pub struct BorrowedPendingUdpResponse<'a> {
-    owner_id: UdpSessionId,
+    owner_id: ProtocolOwnerId,
     session_id: UdpSessionId,
     packet_id: u64,
     target: ValidatedTarget<'a>,
@@ -456,7 +462,7 @@ impl fmt::Debug for BorrowedPendingUdpResponse<'_> {
 
 /// Move-only authenticated response identity committed after reservation.
 pub struct UdpResponseCommit {
-    owner_id: UdpSessionId,
+    owner_id: ProtocolOwnerId,
     session_id: UdpSessionId,
     packet_id: u64,
 }

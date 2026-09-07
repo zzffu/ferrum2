@@ -741,6 +741,7 @@ dependencies = [
  "bytes",
  "ferrum2-core",
  "ferrum2-crypto",
+ "ferrum2-shadowsocks",
  "hex",
  "serde_json",
  "thiserror",

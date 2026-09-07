@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use ferrum2_core::TargetAddr;
 use ferrum2_crypto::MethodProfile;
-use ferrum2_shadowsocks::{MAX_UDP_WIRE_LEN, max_udp_payload_len};
+use ferrum2_shadowsocks::{MAX_UDP_WIRE_LEN, UdpPacketDirection, max_udp_payload_len};
 use ferrum2_socks5::{MAX_SOCKS_UDP_DATAGRAM_BYTES, encode_udp_datagram};
 
 use super::dns_resource::{
@@ -198,9 +198,13 @@ pub(super) fn run_self_check() -> Result<String, String> {
     {
         return Err("65,507-byte application payload incorrectly fit SOCKS IPv4".to_owned());
     }
-    let ss_response_maximum =
-        max_udp_payload_len(MethodProfile::Blake3Aes128Gcm2022, true, &ipv4_target, 0)
-            .map_err(|_| "SS response maximum could not be derived".to_owned())?;
+    let ss_response_maximum = max_udp_payload_len(
+        MethodProfile::Blake3Aes128Gcm2022,
+        UdpPacketDirection::Response,
+        &ipv4_target,
+        0,
+    )
+    .map_err(|_| "SS response maximum could not be derived".to_owned())?;
     if ss_response_maximum != PROFILE_UDP_SS_MAX_APPLICATION_PAYLOAD_BYTES
         || ss_response_maximum + PROFILE_SS_AES_RESPONSE_OVERHEAD_BYTES != MAX_UDP_WIRE_LEN
         || ProfileScenario::UdpMaxWire65507.upstream_wire_bytes() != Some(MAX_UDP_WIRE_LEN)

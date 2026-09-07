@@ -9,13 +9,14 @@ use ferrum2_crypto::{
     UdpSessionId,
 };
 
+use super::owner::ProtocolOwnerId;
 use super::replay::UdpReplayWindow;
-use super::wire::{encode_packet, open_packet, udp_crypto};
+use super::wire::{PacketDirection, encode_packet, open_packet, udp_crypto};
 use super::{UDP_ASSOCIATION_RETENTION, UdpPacketError, UdpPacketScratch};
-use crate::tcp::wire::{REQUEST_TYPE, RESPONSE_TYPE};
 
 /// Fully authenticated and semantically validated request awaiting reservation.
 pub struct PendingUdpRequest {
+    owner: ProtocolOwnerId,
     session_id: UdpSessionId,
     packet_id: u64,
     datagram: Datagram,
@@ -32,6 +33,7 @@ impl PendingUdpRequest {
         (
             self.datagram,
             UdpRequestCommit {
+                owner: self.owner,
                 session_id: self.session_id,
                 packet_id: self.packet_id,
             },
@@ -50,6 +52,7 @@ impl fmt::Debug for PendingUdpRequest {
 
 /// Move-only authenticated identity used only after runtime reservation.
 pub struct UdpRequestCommit {
+    owner: ProtocolOwnerId,
     session_id: UdpSessionId,
     packet_id: u64,
 }
@@ -63,7 +66,7 @@ impl fmt::Debug for UdpRequestCommit {
 /// Opaque generation-bound response capability.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub struct ServerResponseCapability {
-    slot: u64,
+    owner: ProtocolOwnerId,
     generation: u64,
 }
 
@@ -167,6 +170,7 @@ impl ServerSessionSnapshot {
 
 /// One socket-free server-side packet, replay, routing, and generation owner.
 pub struct UdpServer {
+    owner: ProtocolOwnerId,
     crypto: UdpCrypto,
     state: Mutex<ServerState>,
 }
@@ -175,6 +179,7 @@ impl UdpServer {
     /// Creates protocol state without creating sockets or runtime resources.
     pub fn new<K: MethodKeyProvider>(keys: &K) -> Result<Self, UdpPacketError> {
         Ok(Self {
+            owner: ProtocolOwnerId::allocate()?,
             crypto: udp_crypto(keys)?,
             state: Mutex::new(ServerState::default()),
         })
@@ -187,8 +192,9 @@ impl UdpServer {
         wire: &[u8],
         scratch: &mut UdpPacketScratch,
     ) -> Result<PendingUdpRequest, UdpPacketError> {
-        let opened = open_packet(&self.crypto, clock, wire, scratch, REQUEST_TYPE, None)?;
+        let opened = open_packet(&self.crypto, clock, wire, scratch, PacketDirection::Request)?;
         Ok(PendingUdpRequest {
+            owner: self.owner,
             session_id: opened.session_id,
             packet_id: opened.packet_id,
             datagram: opened.datagram,
@@ -200,6 +206,9 @@ impl UdpServer {
         &self,
         pending: &PendingUdpRequest,
     ) -> Result<Option<ServerResponseCapability>, UdpPacketError> {
+        if pending.owner != self.owner {
+            return Err(UdpPacketError::Generation);
+        }
         let state = self
             .state
             .lock()
@@ -220,7 +229,11 @@ impl UdpServer {
         now: MonotonicInstant,
         random: &(impl SecureRandom + ?Sized),
     ) -> Result<AcceptedUdpRequest, UdpPacketError> {
+        if commit.owner != self.owner {
+            return Err(UdpPacketError::Generation);
+        }
         let UdpRequestCommit {
+            owner: _,
             session_id,
             packet_id,
         } = commit;
@@ -252,7 +265,7 @@ impl UdpServer {
                     let mut replay = UdpReplayWindow::new();
                     replay.commit(packet_id)?;
                     let capability = ServerResponseCapability {
-                        slot: generation,
+                        owner: self.owner,
                         generation,
                     };
                     let protocol = Arc::new(Mutex::new(ServerSession {
@@ -290,7 +303,7 @@ impl UdpServer {
             }
             session.replay.commit(packet_id)?;
             session.peer = peer;
-            session.last_activity = now;
+            session.last_activity = session.last_activity.max(now);
             return Ok(AcceptedUdpRequest { capability });
         }
     }
@@ -321,8 +334,7 @@ impl UdpServer {
             &mut session.outbound,
             clock,
             random,
-            RESPONSE_TYPE,
-            Some(&binding),
+            PacketDirection::Response { binding: &binding },
             datagram.target(),
             datagram.payload(),
             padding_len,
@@ -412,6 +424,9 @@ impl UdpServer {
         &self,
         capability: ServerResponseCapability,
     ) -> Result<Option<ServerSessionLookup>, UdpPacketError> {
+        if capability.owner != self.owner {
+            return Err(UdpPacketError::Generation);
+        }
         let state = self
             .state
             .lock()

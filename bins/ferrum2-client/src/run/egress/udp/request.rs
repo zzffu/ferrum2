@@ -8,7 +8,7 @@ use ferrum2_crypto::{MethodKeyProvider as _, SecureRandom, UdpSessionId};
 #[cfg(test)]
 use ferrum2_shadowsocks::MethodKeyAdapter;
 use ferrum2_shadowsocks::{
-    MAX_UDP_WIRE_LEN, UdpClientSession, max_udp_payload_len_for_encoded_target,
+    MAX_UDP_WIRE_LEN, UdpClientSession, UdpPacketDirection, max_udp_payload_len_for_encoded_target,
 };
 use ferrum2_socks5::MAX_SOCKS_UDP_DATAGRAM_BYTES;
 use tokio::time::Instant;
@@ -105,8 +105,13 @@ pub(in crate::run) fn composed_udp_request_limit(
     encoded_target_len: usize,
 ) -> usize {
     let socks = MAX_SOCKS_UDP_DATAGRAM_BYTES.saturating_sub(3 + encoded_target_len);
-    let request =
-        max_udp_payload_len_for_encoded_target(method, false, encoded_target_len, 0).unwrap_or(0);
+    let request = max_udp_payload_len_for_encoded_target(
+        method,
+        UdpPacketDirection::Request,
+        encoded_target_len,
+        0,
+    )
+    .unwrap_or(0);
     socks.min(request)
 }
 
@@ -116,8 +121,13 @@ pub(in crate::run) fn composed_udp_response_limit(
     encoded_target_len: usize,
 ) -> usize {
     let socks = MAX_SOCKS_UDP_DATAGRAM_BYTES.saturating_sub(3 + encoded_target_len);
-    let response =
-        max_udp_payload_len_for_encoded_target(method, true, encoded_target_len, 0).unwrap_or(0);
+    let response = max_udp_payload_len_for_encoded_target(
+        method,
+        UdpPacketDirection::Response,
+        encoded_target_len,
+        0,
+    )
+    .unwrap_or(0);
     socks.min(response)
 }
 
@@ -148,8 +158,17 @@ pub(in crate::run) fn composed_udp_plan_limit(
             } else {
                 7
             };
-            let payload =
-                max_udp_payload_len_for_encoded_target(profile, response, target_len, 0).ok()?;
+            let payload = max_udp_payload_len_for_encoded_target(
+                profile,
+                if response {
+                    UdpPacketDirection::Response
+                } else {
+                    UdpPacketDirection::Request
+                },
+                target_len,
+                0,
+            )
+            .ok()?;
             total.checked_add(MAX_UDP_WIRE_LEN.checked_sub(payload)?)
         });
     overhead

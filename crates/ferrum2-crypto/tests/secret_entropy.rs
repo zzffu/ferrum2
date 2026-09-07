@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use ferrum2_crypto::{
-    AeadError, Clock, ClockError, KeyProviderError, KeySelector, MethodKeyProvider, MethodProfile,
+    Clock, ClockError, KeyProviderError, KeySelector, MethodKeyProvider, MethodProfile,
     MethodProfileMismatchError, MethodPsk, MethodPskLengthError, MethodSaltLengthError,
-    MethodSinglePskProvider, MethodTcpSalt, MonotonicInstant, NonceCounter, RandomError,
-    SecureRandom, SystemClock, SystemRandom, TcpSealer, UdpOutboundSession, UdpSessionId,
+    MethodSinglePskProvider, MethodTcpSalt, MonotonicInstant, RandomError, SecureRandom,
+    SystemClock, SystemRandom, TcpSealer, UdpOutboundSession, UdpSessionId,
     generate_method_request_salt, generate_method_response_salt,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -226,7 +226,8 @@ fn udp_session_ids_retry_live_collisions_without_exposing_partial_state() {
     let provider = MethodSinglePskProvider::new(MethodPsk::aes128([0x11; 16]));
     let crypto = provider
         .with_method_key(KeySelector::Default, |key| key.udp_crypto())
-        .expect("default key");
+        .expect("default key")
+        .expect("owner identity");
 
     for collisions in 0..8 {
         let random = ScriptedRandom::new((0..=collisions).map(|draw| Ok([draw as u8 + 1; 8])));
@@ -309,22 +310,6 @@ fn profile_salt_entropy_uses_complete_width_and_full_width_collision_checks() {
     }
 }
 
-#[test]
-fn nonce_overflow_returns_no_nonce_and_preserves_state() {
-    let mut counter = NonceCounter::from_le_bytes([0xff; 12]);
-    assert_eq!(counter.checked_take(), Err(AeadError::NonceExhausted));
-    assert_eq!(counter.current_bytes(), [0xff; 12]);
-}
-
-#[test]
-fn nonce_counter_has_explicit_clear_and_drop_zeroizing_contract() {
-    assert_zeroize_on_drop::<NonceCounter>();
-
-    let mut counter = NonceCounter::from_le_bytes([0x5a; 12]);
-    counter.zeroize();
-    assert_eq!(counter.current_bytes(), [0; 12]);
-}
-
 struct ScriptedClock {
     wall: u64,
     monotonic: MonotonicInstant,
@@ -366,4 +351,54 @@ fn clock_seam_keeps_wall_and_monotonic_time_independent() {
     random
         .fill(&mut destination)
         .expect("OS random is available");
+}
+
+#[test]
+fn udp_lineage_rejects_other_owners_before_output_randomness_or_counter_changes() {
+    for profile in MethodProfile::ALL {
+        let provider = |byte| {
+            MethodSinglePskProvider::new(
+                MethodPsk::try_from_slice(profile, &vec![byte; profile.key_bytes()]).expect("PSK"),
+            )
+        };
+        let create = |provider: &MethodSinglePskProvider| {
+            provider
+                .with_method_key(KeySelector::Default, |key| key.udp_crypto())
+                .expect("key")
+                .expect("owner")
+        };
+        let first = create(&provider(0x11));
+        let same_key = create(&provider(0x11));
+        let different_key = create(&provider(0x22));
+        let mut outbound = first
+            .generate_outbound_session(&SystemRandom, |_| false)
+            .expect("session");
+        let mut output = [0xa5; 128];
+        for other in [same_key, different_key] {
+            let no_random = ScriptedRandom::new::<1>([]);
+            assert!(matches!(
+                other.seal(&mut outbound, b"payload", &mut output, &no_random),
+                Err(ferrum2_crypto::UdpCryptoError::OwnerMismatch)
+            ));
+            assert_eq!(output, [0xa5; 128]);
+        }
+        let moved = first;
+        assert_eq!(
+            moved
+                .seal(&mut outbound, b"payload", &mut output, &SystemRandom)
+                .expect("original owner survives movement")
+                .packet_id(),
+            0
+        );
+        let mut second_session = moved
+            .generate_outbound_session(&SystemRandom, |_| false)
+            .expect("another session");
+        assert_eq!(
+            moved
+                .seal(&mut second_session, b"payload", &mut output, &SystemRandom)
+                .expect("one owner creates multiple lineages")
+                .packet_id(),
+            0
+        );
+    }
 }

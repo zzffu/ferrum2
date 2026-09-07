@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use shadowsocks_crypto::v2::udp::UdpCipher as ShadowsocksUdpCipher;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use super::owner::CryptoOwnerId;
 use super::{UDP_SESSION_ID_BYTES, UdpCryptoError};
 use crate::method::MethodProfile;
 use crate::random::{RandomError, SecureRandom};
@@ -150,6 +151,7 @@ impl ZeroizeOnDrop for UdpPacketCounter {}
 /// bounded lookup and response binding, but cannot clone, reset, replace, or
 /// detach the lineage used by [`crate::UdpCrypto::seal`].
 pub struct UdpOutboundSession {
+    pub(super) owner: CryptoOwnerId,
     pub(super) profile: MethodProfile,
     pub(super) session_id: UdpSessionId,
     pub(super) counter: UdpPacketCounter,
@@ -158,11 +160,13 @@ pub struct UdpOutboundSession {
 
 impl UdpOutboundSession {
     pub(super) fn new(
+        owner: CryptoOwnerId,
         profile: MethodProfile,
         session_id: UdpSessionId,
         aes_body_cipher: Option<ShadowsocksUdpCipher>,
     ) -> Self {
         Self {
+            owner,
             profile,
             session_id,
             counter: UdpPacketCounter::new(),

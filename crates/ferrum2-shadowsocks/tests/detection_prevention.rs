@@ -1,8 +1,8 @@
 mod common;
 
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, DetectionReason, FlowTerminal, PlainDuplex, REQUEST_FIRST_READ_LEN,
-    RESPONSE_FIRST_READ_LEN, ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore,
+    ClientTcpOutbound, DetectionReason, FlowTerminal, PlainDuplex, ShadowsocksError,
+    ShadowsocksTcpInbound, TcpReplayStore,
 };
 
 use common::{
@@ -47,62 +47,102 @@ async fn each_initial_request_failure_uses_one_fixed_read_and_terminal_before_ab
 
     let cases = vec![
         (
-            vec![valid[..REQUEST_FIRST_READ_LEN - 1].to_vec()],
+            vec![
+                valid[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()
+                    - 1]
+                    .to_vec(),
+            ],
             None,
             DetectionReason::ShortRead,
         ),
         (Vec::new(), Some(0), DetectionReason::ReadFailed),
         (
-            vec![bad_tag[..REQUEST_FIRST_READ_LEN].to_vec()],
+            vec![
+                bad_tag[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+            ],
             None,
             DetectionReason::Authentication,
         ),
         (
-            vec![bad_type[..REQUEST_FIRST_READ_LEN].to_vec()],
+            vec![
+                bad_type[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+            ],
             None,
             DetectionReason::InvalidType,
         ),
         (
-            vec![bad_time[..REQUEST_FIRST_READ_LEN].to_vec()],
+            vec![
+                bad_time[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+            ],
             None,
             DetectionReason::TimestampSkew,
         ),
         (
             vec![
-                bad_length[..REQUEST_FIRST_READ_LEN].to_vec(),
-                bad_length[REQUEST_FIRST_READ_LEN..].to_vec(),
+                bad_length[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+                bad_length[ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()..]
+                    .to_vec(),
             ],
             None,
             DetectionReason::AddressBounds,
         ),
         (
             vec![
-                valid[..REQUEST_FIRST_READ_LEN].to_vec(),
-                valid[REQUEST_FIRST_READ_LEN..REQUEST_FIRST_READ_LEN + 1].to_vec(),
+                valid[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+                valid[ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()
+                    ..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                        .initial_request_read_bytes()
+                        + 1]
+                    .to_vec(),
             ],
             None,
             DetectionReason::ShortRead,
         ),
         (
             vec![
-                bad_variable_tag[..REQUEST_FIRST_READ_LEN].to_vec(),
-                bad_variable_tag[REQUEST_FIRST_READ_LEN..].to_vec(),
+                bad_variable_tag[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+                bad_variable_tag[ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()..]
+                    .to_vec(),
             ],
             None,
             DetectionReason::Authentication,
         ),
         (
             vec![
-                bad_padding[..REQUEST_FIRST_READ_LEN].to_vec(),
-                bad_padding[REQUEST_FIRST_READ_LEN..].to_vec(),
+                bad_padding[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+                bad_padding[ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()..]
+                    .to_vec(),
             ],
             None,
             DetectionReason::PaddingBounds,
         ),
         (
             vec![
-                empty_request[..REQUEST_FIRST_READ_LEN].to_vec(),
-                empty_request[REQUEST_FIRST_READ_LEN..].to_vec(),
+                empty_request[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+                empty_request[ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()..]
+                    .to_vec(),
             ],
             None,
             DetectionReason::EmptyRequest,
@@ -128,12 +168,14 @@ async fn each_initial_request_failure_uses_one_fixed_read_and_terminal_before_ab
             .expect("case rejected");
         assert_eq!(error, ShadowsocksError::Detection(expected));
         let observed = observation.lock().expect("observation");
-        assert_eq!(observed.read_lengths[0], REQUEST_FIRST_READ_LEN);
+        assert_eq!(observed.read_lengths[0], common::AES128_REQUEST_READ_LEN);
         assert_eq!(
             observed
                 .read_lengths
                 .iter()
-                .filter(|length| **length == REQUEST_FIRST_READ_LEN)
+                .filter(|length| **length
+                    == ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                        .initial_request_read_bytes())
                 .count(),
             1
         );
@@ -439,7 +481,12 @@ async fn every_scripted_in_flow_response_detection_is_single_fixed_io_terminal_b
     let cases = vec![
         (
             "short fixed",
-            vec![valid[..RESPONSE_FIRST_READ_LEN - 1].to_vec()],
+            vec![
+                valid[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()
+                    - 1]
+                    .to_vec(),
+            ],
             None,
             DetectionReason::ShortRead,
         ),
@@ -451,45 +498,76 @@ async fn every_scripted_in_flow_response_detection_is_single_fixed_io_terminal_b
         ),
         (
             "fixed auth",
-            vec![fixed_auth[..RESPONSE_FIRST_READ_LEN].to_vec()],
+            vec![
+                fixed_auth[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()]
+                    .to_vec(),
+            ],
             None,
             DetectionReason::Authentication,
         ),
         (
             "fixed type",
-            vec![bad_type[..RESPONSE_FIRST_READ_LEN].to_vec()],
+            vec![
+                bad_type[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()]
+                    .to_vec(),
+            ],
             None,
             DetectionReason::InvalidType,
         ),
         (
             "fixed time",
-            vec![bad_time[..RESPONSE_FIRST_READ_LEN].to_vec()],
+            vec![
+                bad_time[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()]
+                    .to_vec(),
+            ],
             None,
             DetectionReason::TimestampSkew,
         ),
         (
             "fixed binding",
-            vec![bad_binding[..RESPONSE_FIRST_READ_LEN].to_vec()],
+            vec![
+                bad_binding[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()]
+                    .to_vec(),
+            ],
             None,
             DetectionReason::ResponseBinding,
         ),
         (
             "fixed bounds",
-            vec![zero_payload[..RESPONSE_FIRST_READ_LEN].to_vec()],
+            vec![
+                zero_payload[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()]
+                    .to_vec(),
+            ],
             None,
             DetectionReason::FrameBounds,
         ),
         (
             "payload transport",
-            vec![valid[..RESPONSE_FIRST_READ_LEN].to_vec()],
+            vec![
+                valid[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()]
+                    .to_vec(),
+            ],
             Some(1),
             DetectionReason::ReadFailed,
         ),
         (
             "payload short",
             vec![
-                valid[..RESPONSE_FIRST_READ_LEN].to_vec(),
-                valid[RESPONSE_FIRST_READ_LEN..RESPONSE_FIRST_READ_LEN + 3].to_vec(),
+                valid[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()]
+                    .to_vec(),
+                valid[ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()
+                    ..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                        .initial_response_read_bytes()
+                        + 3]
+                    .to_vec(),
             ],
             None,
             DetectionReason::ShortRead,
@@ -497,8 +575,12 @@ async fn every_scripted_in_flow_response_detection_is_single_fixed_io_terminal_b
         (
             "payload auth",
             vec![
-                payload_auth[..RESPONSE_FIRST_READ_LEN].to_vec(),
-                payload_auth[RESPONSE_FIRST_READ_LEN..].to_vec(),
+                payload_auth[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()]
+                    .to_vec(),
+                payload_auth[ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_response_read_bytes()..]
+                    .to_vec(),
             ],
             None,
             DetectionReason::Authentication,
@@ -543,7 +625,9 @@ async fn every_scripted_in_flow_response_detection_is_single_fixed_io_terminal_b
                 observed
                     .read_lengths
                     .iter()
-                    .filter(|length| **length == RESPONSE_FIRST_READ_LEN)
+                    .filter(|length| **length
+                        == ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                            .initial_response_read_bytes())
                     .count(),
                 1,
                 "{name}: fixed response completed once"
@@ -588,7 +672,8 @@ async fn client_response_key_and_clock_failures_are_single_fixed_io_and_persiste
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let key_observers = RecordingObservers::default();
-    let (io, key_observation) = RecordingIo::new([response[..RESPONSE_FIRST_READ_LEN].to_vec()]);
+    let (io, key_observation) =
+        RecordingIo::new([response[..common::AES128_RESPONSE_READ_LEN].to_vec()]);
     let connector = RecordingConnector::succeeds(
         io.with_abortive_failure()
             .with_sequence(key_observers.sequence.clone()),
@@ -612,7 +697,9 @@ async fn client_response_key_and_clock_failures_are_single_fixed_io_and_persiste
             observed
                 .read_lengths
                 .iter()
-                .filter(|length| **length == RESPONSE_FIRST_READ_LEN)
+                .filter(|length| **length
+                    == ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                        .initial_response_read_bytes())
                 .count(),
             1
         );
@@ -636,7 +723,8 @@ async fn client_response_key_and_clock_failures_are_single_fixed_io_and_persiste
     let clock = FakeClock::new(NOW, 0);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
     let clock_observers = RecordingObservers::default();
-    let (io, clock_observation) = RecordingIo::new([response[..RESPONSE_FIRST_READ_LEN].to_vec()]);
+    let (io, clock_observation) =
+        RecordingIo::new([response[..common::AES128_RESPONSE_READ_LEN].to_vec()]);
     let connector = RecordingConnector::succeeds(
         io.with_abortive_failure()
             .with_sequence(clock_observers.sequence.clone()),
@@ -663,7 +751,9 @@ async fn client_response_key_and_clock_failures_are_single_fixed_io_and_persiste
             observed
                 .read_lengths
                 .iter()
-                .filter(|length| **length == RESPONSE_FIRST_READ_LEN)
+                .filter(|length| **length
+                    == ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                        .initial_response_read_bytes())
                 .count(),
             1
         );

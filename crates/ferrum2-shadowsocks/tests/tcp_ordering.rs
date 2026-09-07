@@ -11,8 +11,8 @@ use ferrum2_core::{
     AbortiveClose, ConnectError, ConnectErrorKind, Connector, LocalEndpoint, Session, TargetAddr,
 };
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, DetectionReason, REQUEST_FIRST_READ_LEN, ShadowsocksError,
-    ShadowsocksTcpInbound, TcpReplayStore, TransportIo,
+    ClientTcpOutbound, DetectionReason, ShadowsocksError, ShadowsocksTcpInbound, TcpReplayStore,
+    TransportIo,
 };
 
 use common::{
@@ -205,7 +205,11 @@ async fn every_s0_through_s3_reject_precedes_all_downstream_and_replay_mutation(
     let cases = vec![
         (
             "short fixed",
-            RecordingIo::new([valid[..REQUEST_FIRST_READ_LEN - 1].to_vec()]).0,
+            RecordingIo::new([valid[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                .initial_request_read_bytes()
+                - 1]
+                .to_vec()])
+            .0,
             DetectionReason::ShortRead,
         ),
         (
@@ -215,24 +219,46 @@ async fn every_s0_through_s3_reject_precedes_all_downstream_and_replay_mutation(
         ),
         (
             "fixed auth",
-            RecordingIo::new([fixed_auth[..REQUEST_FIRST_READ_LEN].to_vec()]).0,
+            RecordingIo::new([
+                fixed_auth[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+            ])
+            .0,
             DetectionReason::Authentication,
         ),
         (
             "fixed type",
-            RecordingIo::new([bad_type[..REQUEST_FIRST_READ_LEN].to_vec()]).0,
+            RecordingIo::new([
+                bad_type[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+            ])
+            .0,
             DetectionReason::InvalidType,
         ),
         (
             "fixed time",
-            RecordingIo::new([bad_time[..REQUEST_FIRST_READ_LEN].to_vec()]).0,
+            RecordingIo::new([
+                bad_time[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+            ])
+            .0,
             DetectionReason::TimestampSkew,
         ),
         (
             "short variable",
             RecordingIo::new([
-                valid[..REQUEST_FIRST_READ_LEN].to_vec(),
-                valid[REQUEST_FIRST_READ_LEN..REQUEST_FIRST_READ_LEN + 1].to_vec(),
+                valid[..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()]
+                    .to_vec(),
+                valid[ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                    .initial_request_read_bytes()
+                    ..ferrum2_crypto::MethodProfile::Blake3Aes128Gcm2022
+                        .initial_request_read_bytes()
+                        + 1]
+                    .to_vec(),
             ])
             .0,
             DetectionReason::ShortRead,

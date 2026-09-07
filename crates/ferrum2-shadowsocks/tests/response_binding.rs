@@ -1,8 +1,7 @@
 mod common;
 
 use ferrum2_shadowsocks::{
-    ClientTcpOutbound, DetectionReason, RESPONSE_FIRST_READ_LEN, ShadowsocksError,
-    encode_response_first_write,
+    ClientTcpOutbound, DetectionReason, ShadowsocksError, encode_response_first_write,
 };
 
 use common::{
@@ -26,8 +25,8 @@ async fn full_request_salt_binding_precedes_first_payload_forwarding() {
     )
     .expect("fixture response");
     let (io, observation) = RecordingIo::new([
-        response[..RESPONSE_FIRST_READ_LEN].to_vec(),
-        response[RESPONSE_FIRST_READ_LEN..].to_vec(),
+        response[..common::AES128_RESPONSE_READ_LEN].to_vec(),
+        response[common::AES128_RESPONSE_READ_LEN..].to_vec(),
     ]);
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
@@ -64,8 +63,8 @@ async fn authenticated_bound_response_releases_exact_first_payload() {
     let response = encode_response_first_write(&keys, &response_salt, NOW, &request_salt, b"pong")
         .expect("fixture response");
     let (io, observation) = RecordingIo::new([
-        response[..RESPONSE_FIRST_READ_LEN].to_vec(),
-        response[RESPONSE_FIRST_READ_LEN..].to_vec(),
+        response[..common::AES128_RESPONSE_READ_LEN].to_vec(),
+        response[common::AES128_RESPONSE_READ_LEN..].to_vec(),
     ]);
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));
@@ -86,7 +85,7 @@ async fn authenticated_bound_response_releases_exact_first_payload() {
     assert_eq!(&destination[..read], b"pong");
     let observed = observation.lock().expect("observation");
     assert_eq!(observed.read_calls, 2);
-    assert_eq!(observed.read_lengths[0], RESPONSE_FIRST_READ_LEN);
+    assert_eq!(observed.read_lengths[0], common::AES128_RESPONSE_READ_LEN);
     assert_eq!(observed.abortive_calls, 0);
 }
 
@@ -102,8 +101,8 @@ async fn tampered_first_payload_is_never_released() {
             .to_vec();
     *response.last_mut().expect("tag byte") ^= 1;
     let (io, observation) = RecordingIo::new([
-        response[..RESPONSE_FIRST_READ_LEN].to_vec(),
-        response[RESPONSE_FIRST_READ_LEN..].to_vec(),
+        response[..common::AES128_RESPONSE_READ_LEN].to_vec(),
+        response[common::AES128_RESPONSE_READ_LEN..].to_vec(),
     ]);
     let connector = RecordingConnector::succeeds(io);
     let random = ScriptedRandom::new(client_random_bytes(&request_salt));

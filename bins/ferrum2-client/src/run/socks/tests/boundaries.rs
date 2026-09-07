@@ -93,7 +93,13 @@ async fn composed_udp_boundaries_are_real_and_sequential_for_every_method_and_ta
             let request_limit = composed_udp_request_limit(method, *target_len);
             assert_eq!(
                 request_limit,
-                max_udp_payload_len(method, false, target, 0).expect("request limit"),
+                max_udp_payload_len(
+                    method,
+                    ferrum2_shadowsocks::UdpPacketDirection::Request,
+                    target,
+                    0
+                )
+                .expect("request limit"),
                 "Shadowsocks is the request bound for {label}"
             );
             let stable_before = registry.snapshot();
@@ -193,7 +199,13 @@ async fn composed_udp_boundaries_are_real_and_sequential_for_every_method_and_ta
             let response_limit = composed_udp_response_limit(method, *target_len);
             assert_eq!(
                 response_limit,
-                max_udp_payload_len(method, true, target, 0).expect("response limit"),
+                max_udp_payload_len(
+                    method,
+                    ferrum2_shadowsocks::UdpPacketDirection::Response,
+                    target,
+                    0
+                )
+                .expect("response limit"),
                 "Shadowsocks is the response bound for {label}"
             );
             let response_payload = vec![0x6b; response_limit];

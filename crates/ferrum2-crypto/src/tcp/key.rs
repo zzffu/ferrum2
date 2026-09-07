@@ -1,7 +1,9 @@
 use shadowsocks_crypto::v2::tcp::TcpCipher as ShadowsocksTcpCipher;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::method::{AES_128_KEY_BYTES, MethodProfile, WIDE_KEY_BYTES};
+#[cfg(test)]
+use crate::method::AES_128_KEY_BYTES;
+use crate::method::{MethodProfile, WIDE_KEY_BYTES};
 
 /// An owned method-bound TCP session subkey.
 ///
@@ -13,10 +15,12 @@ pub struct TcpSubkey {
 
 impl TcpSubkey {
     /// Takes ownership of an AES-128 primitive key.
-    pub fn from_bytes(bytes: [u8; AES_128_KEY_BYTES]) -> Self {
+    #[cfg(test)]
+    pub(super) fn from_bytes(bytes: [u8; AES_128_KEY_BYTES]) -> Self {
         Self::from_subkey(MethodProfile::Blake3Aes128Gcm2022, bytes)
     }
 
+    #[cfg(test)]
     pub(super) fn from_subkey<const N: usize>(profile: MethodProfile, bytes: [u8; N]) -> Self {
         let mut bytes = Zeroizing::new(bytes);
         let cipher = ShadowsocksTcpCipher::try_from_subkey(profile.cipher_kind(), bytes.as_ref())

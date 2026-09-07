@@ -4,4 +4,4 @@ mod nonce;
 
 pub use aead::{AeadError, TcpOpener, TcpSealer};
 pub use key::TcpSubkey;
-pub use nonce::NonceCounter;
+use nonce::NonceCounter;

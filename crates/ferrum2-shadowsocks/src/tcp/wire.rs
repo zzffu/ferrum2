@@ -4,13 +4,12 @@ use bytes::{Bytes, BytesMut};
 use ferrum2_core::TargetAddr;
 use ferrum2_crypto::{MethodProfile, MethodTcpSalt, SecureRandom, TcpOpener, TcpSealer};
 
-use super::error::{DetectionReason, FrameError, frame_from_open_aead, frame_from_seal_aead};
+#[cfg(any(test, feature = "test-support"))]
+use super::error::frame_from_open_aead;
+use super::error::{DetectionReason, FrameError, frame_from_seal_aead};
 use super::handshake::TcpKeyProvider;
 
-pub const TCP_SALT_LEN: usize = 16;
 pub const TAG_LEN: usize = 16;
-pub const REQUEST_FIRST_READ_LEN: usize = 43;
-pub const RESPONSE_FIRST_READ_LEN: usize = 59;
 pub const MAX_PAYLOAD_LEN: usize = u16::MAX as usize;
 pub const MAX_DECRYPT_WIRE_LEN: usize = MAX_PAYLOAD_LEN + TAG_LEN;
 pub const MAX_ENCODE_PAYLOAD_LEN: usize = 32_768;
@@ -146,6 +145,7 @@ pub(crate) fn validate_target(
 }
 
 /// Builds a deterministic contiguous request first-write for reviewed fixtures.
+#[cfg(any(test, feature = "test-support"))]
 pub fn encode_request_first_write<K: TcpKeyProvider>(
     keys: &K,
     salt: &MethodTcpSalt,
@@ -267,6 +267,7 @@ pub(crate) fn encode_target_into(
 }
 
 /// Builds a deterministic contiguous response first-write for reviewed fixtures.
+#[cfg(any(test, feature = "test-support"))]
 pub fn encode_response_first_write<K: TcpKeyProvider>(
     keys: &K,
     response_salt: &MethodTcpSalt,
@@ -374,6 +375,7 @@ pub(super) fn seal_data_chunk_into(
 }
 
 /// Authenticates one complete subsequent frame for deterministic codec tests.
+#[cfg(any(test, feature = "test-support"))]
 pub fn open_data_frame(
     opener: &mut TcpOpener,
     encrypted_length: &[u8],
@@ -384,6 +386,7 @@ pub fn open_data_frame(
     Ok(scratch.freeze())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn open_data_frame_into(
     opener: &mut TcpOpener,
     encrypted_length: &[u8],

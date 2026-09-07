@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
 //! SIP022 TCP flow plus socket-free bounded UDP packet and security state.
+//!
+//! The default-off `test-support` feature exposes deterministic TCP fixture
+//! encoders for downstream contract tests. Production consumers use flow owners.
 
 mod tcp;
 mod udp;
@@ -12,16 +15,17 @@ pub use tcp::{
     BoxedClientFlow, BufferObserver, BufferRole, ClientFlow, ClientTcpOutbound,
     ConnectedClientOpen, DetectionReason, FlowObserver, FlowTerminal, FrameError,
     MAX_DECRYPT_WIRE_LEN, MAX_ENCODE_PAYLOAD_LEN, MAX_ENCRYPT_WIRE_LEN, MAX_PADDING_LEN,
-    MAX_PAYLOAD_LEN, MethodKeyAdapter, NoReply, PlainDuplex, ProtocolReason,
-    REQUEST_FIRST_READ_LEN, RESPONSE_FIRST_READ_LEN, ReplayCapacityError, ServerFlow,
-    ShadowsocksError, ShadowsocksTcpInbound, TAG_LEN, TCP_SALT_LEN, TcpKeyError, TcpKeyProvider,
-    TcpReplayStore, TransportIo, TransportPhase, encode_request_first_write,
-    encode_response_first_write, open_data_frame,
+    MAX_PAYLOAD_LEN, MethodKeyAdapter, NoReply, PlainDuplex, ProtocolReason, ReplayCapacityError,
+    ServerFlow, ShadowsocksError, ShadowsocksTcpInbound, TAG_LEN, TcpKeyError, TcpKeyProvider,
+    TcpReplayStore, TransportIo, TransportPhase,
 };
 pub use udp::{
     AcceptedUdpRequest, BorrowedPendingUdpResponse, ClientAssociationSnapshot, EncodedUdpResponse,
     MAX_UDP_WIRE_LEN, PendingUdpRequest, PendingUdpResponse, ServerResponseCapability,
     ServerSessionSnapshot, UDP_ASSOCIATION_RETENTION, UDP_REPLAY_LAG, UdpClientSession,
-    UdpPacketError, UdpPacketScratch, UdpReplayWindow, UdpRequestCommit, UdpResponseCommit,
-    UdpServer, max_udp_payload_len, max_udp_payload_len_for_encoded_target,
+    UdpPacketDirection, UdpPacketError, UdpPacketScratch, UdpReplayWindow, UdpRequestCommit,
+    UdpResponseCommit, UdpServer, max_udp_payload_len, max_udp_payload_len_for_encoded_target,
 };
+
+#[cfg(feature = "test-support")]
+pub use tcp::{encode_request_first_write, encode_response_first_write, open_data_frame};

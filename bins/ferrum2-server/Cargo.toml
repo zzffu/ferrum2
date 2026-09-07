@@ -29,6 +29,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+ferrum2-shadowsocks = { workspace = true, features = ["test-support"] }
 hickory-proto.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

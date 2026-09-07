@@ -68,8 +68,8 @@ fn provider() -> MethodKeyAdapter<MethodSinglePskProvider> {
 }
 
 fn salt(last: u8) -> MethodTcpSalt {
-    let mut bytes = [0_u8; TCP_SALT_LEN];
-    bytes[TCP_SALT_LEN - 1] = last;
+    let mut bytes = [0_u8; MethodProfile::Blake3Aes128Gcm2022.salt_bytes()];
+    bytes[MethodProfile::Blake3Aes128Gcm2022.salt_bytes() - 1] = last;
     MethodTcpSalt::try_from_slice(MethodProfile::Blake3Aes128Gcm2022, &bytes).expect("AES-128 salt")
 }
 

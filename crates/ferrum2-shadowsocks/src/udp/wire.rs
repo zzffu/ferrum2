@@ -10,9 +10,48 @@ use super::{
     TIMESTAMP_LEN, UdpPacketError, UdpPacketScratch,
 };
 use crate::tcp::wire::{
-    RESPONSE_TYPE, ValidatedTarget, encode_target_into, encoded_target_len, validate_target,
+    REQUEST_TYPE, RESPONSE_TYPE, ValidatedTarget, encode_target_into, encoded_target_len,
+    validate_target,
 };
 use crate::{DetectionReason, FrameError};
+
+/// Direction used when budgeting a packet before its binding exists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UdpPacketDirection {
+    Request,
+    Response,
+}
+
+impl UdpPacketDirection {
+    const fn binding_len(self) -> usize {
+        match self {
+            Self::Request => 0,
+            Self::Response => RESPONSE_BINDING_LEN,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PacketDirection<'a> {
+    Request,
+    Response { binding: &'a UdpSessionId },
+}
+
+impl PacketDirection<'_> {
+    const fn message_type(self) -> u8 {
+        match self {
+            Self::Request => REQUEST_TYPE,
+            Self::Response { .. } => RESPONSE_TYPE,
+        }
+    }
+
+    const fn direction(self) -> UdpPacketDirection {
+        match self {
+            Self::Request => UdpPacketDirection::Request,
+            Self::Response { .. } => UdpPacketDirection::Response,
+        }
+    }
+}
 
 pub(super) struct OpenedPacket {
     pub(super) session_id: UdpSessionId,
@@ -30,23 +69,23 @@ pub(super) struct BorrowedOpenedPacket<'a> {
 /// Computes the largest payload fitting the complete 65,507-byte wire bound.
 pub fn max_udp_payload_len(
     profile: MethodProfile,
-    response: bool,
+    direction: UdpPacketDirection,
     target: &TargetAddr,
     padding_len: usize,
 ) -> Result<usize, UdpPacketError> {
     let address_len = encoded_target_len(target).map_err(map_frame)?;
-    max_udp_payload_len_for_encoded_target(profile, response, address_len, padding_len)
+    max_udp_payload_len_for_encoded_target(profile, direction, address_len, padding_len)
 }
 
 /// Computes the largest payload from an already validated encoded target width.
 pub fn max_udp_payload_len_for_encoded_target(
     profile: MethodProfile,
-    response: bool,
+    direction: UdpPacketDirection,
     encoded_target_len: usize,
     padding_len: usize,
 ) -> Result<usize, UdpPacketError> {
     let semantic_overhead = COMMON_HEADER_LEN
-        .checked_add(if response { RESPONSE_BINDING_LEN } else { 0 })
+        .checked_add(direction.binding_len())
         .and_then(|length| length.checked_add(padding_len))
         .and_then(|length| length.checked_add(encoded_target_len))
         .ok_or(UdpPacketError::Bounds)?;
@@ -60,12 +99,12 @@ pub fn max_udp_payload_len_for_encoded_target(
 }
 pub(super) fn udp_wire_len(
     profile: MethodProfile,
-    response: bool,
+    direction: UdpPacketDirection,
     target: &TargetAddr,
     payload_len: usize,
     padding_len: usize,
 ) -> Result<usize, UdpPacketError> {
-    let max_payload = max_udp_payload_len(profile, response, target, padding_len)?;
+    let max_payload = max_udp_payload_len(profile, direction, target, padding_len)?;
     let unused_payload = max_payload
         .checked_sub(payload_len)
         .ok_or(UdpPacketError::Bounds)?;
@@ -80,16 +119,15 @@ pub(super) fn encode_packet(
     outbound: &mut UdpOutboundSession,
     clock: &(impl Clock + ?Sized),
     random: &(impl SecureRandom + ?Sized),
-    message_type: u8,
-    binding: Option<&UdpSessionId>,
+    direction: PacketDirection<'_>,
     target: &TargetAddr,
     payload: &[u8],
     padding_len: usize,
     output: &mut [u8],
     scratch: &mut UdpPacketScratch,
 ) -> Result<usize, UdpPacketError> {
-    let response = message_type == RESPONSE_TYPE;
-    let max_payload = max_udp_payload_len(crypto.profile(), response, target, padding_len)?;
+    let max_payload =
+        max_udp_payload_len(crypto.profile(), direction.direction(), target, padding_len)?;
     if payload.len() > max_payload {
         return Err(UdpPacketError::Bounds);
     }
@@ -105,9 +143,9 @@ pub(super) fn encode_packet(
     let timestamp = clock.unix_seconds().map_err(|_| UdpPacketError::Clock)?;
 
     scratch.body.clear();
-    scratch.body.extend_from_slice(&[message_type]);
+    scratch.body.extend_from_slice(&[direction.message_type()]);
     scratch.body.extend_from_slice(&timestamp.to_be_bytes());
-    if let Some(binding) = binding {
+    if let PacketDirection::Response { binding } = direction {
         let start = scratch.body.len();
         scratch.body.resize(start + SESSION_ID_LEN, 0);
         binding
@@ -141,10 +179,9 @@ pub(super) fn open_packet(
     clock: &(impl Clock + ?Sized),
     wire: &[u8],
     scratch: &mut UdpPacketScratch,
-    expected_type: u8,
-    binding: Option<&UdpSessionId>,
+    direction: PacketDirection<'_>,
 ) -> Result<OpenedPacket, UdpPacketError> {
-    let opened = open_packet_borrowed(crypto, clock, wire, scratch, expected_type, binding)?;
+    let opened = open_packet_borrowed(crypto, clock, wire, scratch, direction)?;
     let target = opened.target.into_owned().map_err(map_target)?;
     let payload_len = opened.payload.len();
     let datagram = Datagram::new(target, BytesMut::from(opened.payload), payload_len)
@@ -161,8 +198,7 @@ pub(super) fn open_packet_borrowed<'a>(
     clock: &(impl Clock + ?Sized),
     wire: &[u8],
     scratch: &'a mut UdpPacketScratch,
-    expected_type: u8,
-    binding: Option<&UdpSessionId>,
+    direction: PacketDirection<'_>,
 ) -> Result<BorrowedOpenedPacket<'a>, UdpPacketError> {
     if wire.len() > MAX_UDP_WIRE_LEN {
         return Err(UdpPacketError::Bounds);
@@ -173,7 +209,7 @@ pub(super) fn open_packet_borrowed<'a>(
         .open_with_cache(wire, &mut scratch.body, &mut scratch.open_cache)
         .map_err(map_crypto)?;
     scratch.body.truncate(opened.plaintext_len());
-    let (target, payload_start) = parse_body(&scratch.body, clock, expected_type, binding)?;
+    let (target, payload_start) = parse_body(&scratch.body, clock, direction)?;
     Ok(BorrowedOpenedPacket {
         session_id: opened.session_id().clone(),
         packet_id: opened.packet_id(),
@@ -185,11 +221,10 @@ pub(super) fn open_packet_borrowed<'a>(
 fn parse_body<'a>(
     body: &'a [u8],
     clock: &(impl Clock + ?Sized),
-    expected_type: u8,
-    binding: Option<&UdpSessionId>,
+    direction: PacketDirection<'_>,
 ) -> Result<(ValidatedTarget<'a>, usize), UdpPacketError> {
     let message_type = *body.first().ok_or(UdpPacketError::Bounds)?;
-    if message_type != expected_type {
+    if message_type != direction.message_type() {
         return Err(UdpPacketError::Type);
     }
     let timestamp_end = 1 + TIMESTAMP_LEN;
@@ -204,7 +239,7 @@ fn parse_body<'a>(
         return Err(UdpPacketError::Timestamp);
     }
     let mut cursor = timestamp_end;
-    if let Some(binding) = binding {
+    if let PacketDirection::Response { binding } = direction {
         let end = cursor
             .checked_add(SESSION_ID_LEN)
             .ok_or(UdpPacketError::Bounds)?;
@@ -236,25 +271,52 @@ fn parse_body<'a>(
 
 pub(super) fn udp_crypto<K: MethodKeyProvider>(keys: &K) -> Result<UdpCrypto, UdpPacketError> {
     keys.with_method_key(KeySelector::Default, |key| key.udp_crypto())
-        .map_err(|_| UdpPacketError::Key)
+        .map_err(|_| UdpPacketError::Key)?
+        .map_err(map_crypto)
 }
 
 fn map_frame(error: FrameError) -> UdpPacketError {
     match error {
         FrameError::AddressUnsupported => UdpPacketError::Address,
-        _ => UdpPacketError::Bounds,
+        FrameError::KeyUnavailable
+        | FrameError::Cipher
+        | FrameError::NonceExhausted
+        | FrameError::Bounds
+        | FrameError::PaddingBounds
+        | FrameError::EmptyRequest
+        | FrameError::EmptyResponse
+        | FrameError::ResponseSaltReuse => UdpPacketError::Bounds,
     }
 }
 
 fn map_target(error: DetectionReason) -> UdpPacketError {
     match error {
         DetectionReason::AddressBounds => UdpPacketError::Address,
-        _ => UdpPacketError::Bounds,
+        DetectionReason::ShortRead
+        | DetectionReason::ShortWrite
+        | DetectionReason::Authentication
+        | DetectionReason::InvalidType
+        | DetectionReason::TimestampSkew
+        | DetectionReason::FrameBounds
+        | DetectionReason::PaddingBounds
+        | DetectionReason::EmptyRequest
+        | DetectionReason::ResponseBinding
+        | DetectionReason::KeyUnavailable
+        | DetectionReason::ClockUnavailable
+        | DetectionReason::RandomUnavailable
+        | DetectionReason::Replay
+        | DetectionReason::ReplayCapacity
+        | DetectionReason::ReplayUnavailable
+        | DetectionReason::ReadFailed
+        | DetectionReason::WriteFailed => UdpPacketError::Bounds,
     }
 }
 
 fn map_crypto(error: UdpCryptoError) -> UdpPacketError {
     match error {
+        UdpCryptoError::OwnerMismatch | UdpCryptoError::OwnerExhausted => {
+            UdpPacketError::Generation
+        }
         UdpCryptoError::AuthenticationFailed => UdpPacketError::Authentication,
         UdpCryptoError::RandomUnavailable => UdpPacketError::Random,
         UdpCryptoError::CounterExhausted => UdpPacketError::Counter,

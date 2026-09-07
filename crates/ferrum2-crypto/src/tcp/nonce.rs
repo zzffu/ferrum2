@@ -16,11 +16,8 @@ fn increment_u96_le(value: &mut [u8; AEAD_NONCE_BYTES]) -> Option<()> {
     None
 }
 
-/// A standalone u96le counter fixture seam.
-///
-/// TCP AEAD owners use an internal counter of the same shape and never accept
-/// one from callers.
-pub struct NonceCounter {
+/// Private exhaustion-safe TCP nonce state.
+pub(super) struct NonceCounter {
     bytes: [u8; AEAD_NONCE_BYTES],
 }
 
@@ -35,17 +32,20 @@ impl NonceCounter {
     /// Creates a standalone counter from little-endian bytes.
     ///
     /// This constructor cannot inject state into a `TcpSealer` or `TcpOpener`.
-    pub const fn from_le_bytes(bytes: [u8; AEAD_NONCE_BYTES]) -> Self {
+    #[cfg(test)]
+    pub(super) const fn from_le_bytes(bytes: [u8; AEAD_NONCE_BYTES]) -> Self {
         Self { bytes }
     }
 
     /// Copies the current little-endian bytes for primitive verification.
-    pub const fn current_bytes(&self) -> [u8; AEAD_NONCE_BYTES] {
+    #[cfg(test)]
+    pub(super) const fn current_bytes(&self) -> [u8; AEAD_NONCE_BYTES] {
         self.bytes
     }
 
     /// Advances once, leaving the counter unchanged on overflow.
-    pub fn checked_increment(&mut self) -> Result<(), AeadError> {
+    #[cfg(test)]
+    pub(super) fn checked_increment(&mut self) -> Result<(), AeadError> {
         let mut next = self.bytes;
         increment_u96_le(&mut next).ok_or(AeadError::NonceExhausted)?;
         self.bytes = next;
@@ -83,7 +83,8 @@ impl NonceCounter {
     /// Reserves the current nonce and advances atomically.
     ///
     /// Overflow returns no nonce and leaves the state unchanged.
-    pub fn checked_take(&mut self) -> Result<[u8; AEAD_NONCE_BYTES], AeadError> {
+    #[cfg(test)]
+    pub(super) fn checked_take(&mut self) -> Result<[u8; AEAD_NONCE_BYTES], AeadError> {
         let (current, next) = self.reserve()?;
         *self = next;
         Ok(current)
@@ -93,5 +94,40 @@ impl NonceCounter {
         let mut next = self.bytes;
         increment_u96_le(&mut next).ok_or(AeadError::NonceExhausted)?;
         Ok((self.bytes, Self { bytes: next }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nonce_counter_starts_at_zero_carries_and_checks_overflow() {
+        let mut zero = NonceCounter::new();
+        assert_eq!(zero.current_bytes(), [0; 12]);
+        zero.checked_increment().expect("zero increments");
+        assert_eq!(zero.current_bytes(), [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let mut carry = NonceCounter::from_le_bytes([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        carry.checked_increment().expect("carry increments");
+        assert_eq!(carry.current_bytes(), [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let mut exhausted = NonceCounter::from_le_bytes([0xff; 12]);
+        assert!(exhausted.checked_increment().is_err());
+        assert_eq!(exhausted.current_bytes(), [0xff; 12]);
+    }
+    #[test]
+    fn nonce_overflow_returns_no_nonce_and_preserves_state() {
+        let mut counter = NonceCounter::from_le_bytes([0xff; 12]);
+        assert_eq!(counter.checked_take(), Err(AeadError::NonceExhausted));
+        assert_eq!(counter.current_bytes(), [0xff; 12]);
+    }
+    #[test]
+    fn nonce_counter_has_explicit_clear_and_drop_zeroizing_contract() {
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<NonceCounter>();
+
+        let mut counter = NonceCounter::from_le_bytes([0x5a; 12]);
+        counter.zeroize();
+        assert_eq!(counter.current_bytes(), [0; 12]);
     }
 }

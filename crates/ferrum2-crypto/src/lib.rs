@@ -16,7 +16,7 @@ pub use random::{
     RandomError, SecureRandom, SystemRandom, generate_method_request_salt,
     generate_method_response_salt,
 };
-pub use tcp::{AeadError, NonceCounter, TcpOpener, TcpSealer, TcpSubkey};
+pub use tcp::{AeadError, TcpOpener, TcpSealer, TcpSubkey};
 pub use udp::{
     UdpCrypto, UdpCryptoError, UdpOpenCache, UdpOpenResult, UdpOutboundSession, UdpSealResult,
     UdpSessionId,

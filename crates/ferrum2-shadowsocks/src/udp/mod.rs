@@ -1,4 +1,5 @@
 mod client;
+mod owner;
 mod replay;
 mod server;
 mod wire;
@@ -12,7 +13,7 @@ pub use server::{
     AcceptedUdpRequest, EncodedUdpResponse, PendingUdpRequest, ServerResponseCapability,
     ServerSessionSnapshot, UdpRequestCommit, UdpServer,
 };
-pub use wire::{max_udp_payload_len, max_udp_payload_len_for_encoded_target};
+pub use wire::{UdpPacketDirection, max_udp_payload_len, max_udp_payload_len_for_encoded_target};
 
 use std::fmt;
 use std::time::Duration;

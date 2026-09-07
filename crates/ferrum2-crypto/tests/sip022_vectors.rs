@@ -4,8 +4,7 @@ use std::sync::Mutex;
 use bytes::BytesMut;
 use ferrum2_crypto::{
     KeySelector, MethodKeyProvider, MethodProfile, MethodPsk, MethodSinglePskProvider,
-    MethodTcpSalt, NonceCounter, RandomError, SecureRandom, TcpOpener, TcpSealer, TcpSubkey,
-    UdpCryptoError,
+    MethodTcpSalt, RandomError, SecureRandom, TcpOpener, TcpSealer, UdpCryptoError,
 };
 use serde_json::Value;
 
@@ -97,24 +96,6 @@ fn sip022_kdf_aead_nonce_and_authentication_table_covers_every_profile() {
             .expect("profile-bound salt");
         assert_eq!(subkey.profile(), profile);
 
-        if profile == MethodProfile::Blake3Aes128Gcm2022 {
-            let selected =
-                decode_array::<16>(case["selected_subkey"].as_str().expect("selected subkey"));
-            let mut raw = BytesMut::from(plaintext.as_slice());
-            TcpSealer::new(TcpSubkey::from_bytes(selected))
-                .seal_in_place(&mut raw)
-                .expect("already-derived public subkey seals");
-            assert_eq!(
-                raw.as_ref(),
-                hex::decode(
-                    case["nonce_0_ciphertext_and_tag"]
-                        .as_str()
-                        .expect("nonce zero output")
-                )
-                .expect("nonce zero output")
-            );
-        }
-
         let mut sealer = TcpSealer::new(subkey);
         for field in ["nonce_0_ciphertext_and_tag", "nonce_1_ciphertext_and_tag"] {
             let mut encrypted = BytesMut::with_capacity(plaintext.len() + 16);
@@ -174,7 +155,8 @@ fn sip022_udp_capability_table_matches_reviewed_envelopes_and_fails_closed() {
         );
         let crypto = provider
             .with_method_key(KeySelector::Default, |key| key.udp_crypto())
-            .expect("default key");
+            .expect("default key")
+            .expect("owner identity");
         assert_eq!(crypto.profile(), profile);
         assert!(format!("{crypto:?}").contains("[REDACTED]"));
         let session_random = ScriptedRandom::new([session_bytes]);
@@ -260,20 +242,4 @@ fn sip022_udp_capability_table_matches_reviewed_envelopes_and_fails_closed() {
             assert_ne!(&output[..next.wire_len()], &prior_wire[..sealed.wire_len()]);
         }
     }
-}
-
-#[test]
-fn nonce_counter_starts_at_zero_carries_and_checks_overflow() {
-    let mut zero = NonceCounter::new();
-    assert_eq!(zero.current_bytes(), [0; 12]);
-    zero.checked_increment().expect("zero increments");
-    assert_eq!(zero.current_bytes(), [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-
-    let mut carry = NonceCounter::from_le_bytes([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    carry.checked_increment().expect("carry increments");
-    assert_eq!(carry.current_bytes(), [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-
-    let mut exhausted = NonceCounter::from_le_bytes([0xff; 12]);
-    assert!(exhausted.checked_increment().is_err());
-    assert_eq!(exhausted.current_bytes(), [0xff; 12]);
 }

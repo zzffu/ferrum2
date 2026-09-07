@@ -21,8 +21,7 @@ use ferrum2_crypto::{
 };
 use ferrum2_shadowsocks::{
     BufferObserver, BufferRole, FlowObserver, FlowTerminal, MethodKeyAdapter, PlainDuplex,
-    REQUEST_FIRST_READ_LEN, ShadowsocksError, TcpKeyError, TcpKeyProvider, TransportIo,
-    encode_request_first_write,
+    ShadowsocksError, TcpKeyError, TcpKeyProvider, TransportIo, encode_request_first_write,
 };
 
 pub const NOW: u64 = 1_700_000_000;
@@ -379,8 +378,8 @@ impl RecordingIo {
 
     pub fn request(wire: &[u8]) -> (Self, Arc<Mutex<IoObservation>>) {
         Self::new([
-            wire[..REQUEST_FIRST_READ_LEN].to_vec(),
-            wire[REQUEST_FIRST_READ_LEN..].to_vec(),
+            wire[..AES128_REQUEST_READ_LEN].to_vec(),
+            wire[AES128_REQUEST_READ_LEN..].to_vec(),
         ])
     }
 
@@ -786,3 +785,9 @@ impl FlowObserver for RecordingObservers {
         self.sequence.lock().expect("sequence").push("terminal");
     }
 }
+
+// Reviewed helpers below construct AES-128 fixtures.
+pub const AES128_REQUEST_READ_LEN: usize =
+    MethodProfile::Blake3Aes128Gcm2022.initial_request_read_bytes();
+pub const AES128_RESPONSE_READ_LEN: usize =
+    MethodProfile::Blake3Aes128Gcm2022.initial_response_read_bytes();

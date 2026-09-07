@@ -11,9 +11,9 @@ use ferrum2_crypto::{
     MonotonicInstant, UdpCrypto,
 };
 use ferrum2_shadowsocks::{
-    MAX_UDP_WIRE_LEN, MethodKeyAdapter, ServerResponseCapability, UdpClientSession, UdpPacketError,
-    UdpPacketScratch, UdpResponseCommit, UdpServer, max_udp_payload_len,
-    max_udp_payload_len_for_encoded_target,
+    MAX_UDP_WIRE_LEN, MethodKeyAdapter, ServerResponseCapability, UdpClientSession,
+    UdpPacketDirection, UdpPacketError, UdpPacketScratch, UdpResponseCommit, UdpServer,
+    max_udp_payload_len, max_udp_payload_len_for_encoded_target,
 };
 
 use serde_json::Value;
@@ -168,7 +168,8 @@ fn three_method_request_response_table_round_trips_every_address_kind() {
             assert_eq!(opened_response.payload(), b"response payload");
 
             let before = client.association_snapshot().expect("snapshot");
-            let maximum = max_udp_payload_len(profile, true, &target, 0).expect("response maximum");
+            let maximum = max_udp_payload_len(profile, UdpPacketDirection::Response, &target, 0)
+                .expect("response maximum");
             assert_eq!(
                 server.encode_response(
                     accepted.capability(),
@@ -259,8 +260,13 @@ fn borrowed_response_plans_domain_capacity_before_single_materialization() {
     assert_eq!(pending.encoded_target_len(), 4 + "opaque.example".len());
     assert_eq!(pending.allocated_capacity(), b"response".len());
     assert_eq!(
-        max_udp_payload_len_for_encoded_target(profile, true, pending.encoded_target_len(), 0,),
-        max_udp_payload_len(profile, true, &target, 0)
+        max_udp_payload_len_for_encoded_target(
+            profile,
+            UdpPacketDirection::Response,
+            pending.encoded_target_len(),
+            0,
+        ),
+        max_udp_payload_len(profile, UdpPacketDirection::Response, &target, 0)
     );
     let owning = pending.materialize();
     assert_eq!(owning.datagram().target(), &target);
@@ -275,7 +281,8 @@ fn aes_request_wire_length_matches_exact_encoder_output() {
     let clock = FakeClock::new(NOW, 0);
     let mut client = UdpClientSession::new(&keys, &random, |_| false).expect("client session");
     let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53)).expect("target");
-    let maximum = max_udp_payload_len(profile, false, &target, 0).expect("checked payload maximum");
+    let maximum = max_udp_payload_len(profile, UdpPacketDirection::Request, &target, 0)
+        .expect("checked payload maximum");
     let mut scratch = UdpPacketScratch::new();
 
     for payload_len in [128, 1_200, maximum, 128] {
@@ -318,8 +325,8 @@ fn complete_wire_bound_is_exact_and_failed_capacity_does_not_consume_packet_id()
         let mut client = UdpClientSession::new(&keys, &random, |_| false).expect("client session");
         let server = UdpServer::new(&keys).expect("server");
         let target = TargetAddr::ipv4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 53)).expect("target");
-        let maximum =
-            max_udp_payload_len(profile, false, &target, 0).expect("checked payload maximum");
+        let maximum = max_udp_payload_len(profile, UdpPacketDirection::Request, &target, 0)
+            .expect("checked payload maximum");
         let maximum_datagram = datagram(target.clone(), &vec![0x5a; maximum]);
         let mut scratch = UdpPacketScratch::new();
         let identity = scratch.storage_identity();
@@ -385,7 +392,8 @@ fn authenticated_semantic_negative_table_has_zero_server_mutation() {
     let keys = udp_provider(profile);
     let crypto = keys
         .with_method_key(KeySelector::Default, |key| key.udp_crypto())
-        .expect("key");
+        .expect("key")
+        .expect("owner identity");
     let server = UdpServer::new(&keys).expect("server");
     let clock = FakeClock::new(NOW, 0);
     let packet_random = FillRandom::new(0x30);
@@ -473,7 +481,8 @@ fn authenticated_response_with_wrong_client_binding_is_rejected_without_associat
     let keys = udp_provider(profile);
     let crypto = keys
         .with_method_key(KeySelector::Default, |key| key.udp_crypto())
-        .expect("key");
+        .expect("key")
+        .expect("owner identity");
     let client_random = FillRandom::new(0x10);
     let client = UdpClientSession::new(&keys, &client_random, |_| false).expect("client session");
     let mut body = vec![1];

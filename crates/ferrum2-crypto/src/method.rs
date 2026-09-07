@@ -428,8 +428,9 @@ impl MethodSecretKeyRef<'_> {
     ///
     /// The returned owner contains only private secret and primitive state.
     /// Callers can seal or authenticate complete crypto envelopes but cannot
-    /// read or substitute the underlying PSK.
-    pub fn udp_crypto(self) -> UdpCrypto {
+    /// read or substitute the underlying PSK. Each construction has a distinct
+    /// session lineage, even for equal keys; identity exhaustion fails closed.
+    pub fn udp_crypto(self) -> Result<UdpCrypto, crate::UdpCryptoError> {
         UdpCrypto::from_method_key(self.psk)
     }
 }
