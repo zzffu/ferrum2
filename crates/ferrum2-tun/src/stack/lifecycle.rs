@@ -22,8 +22,11 @@ impl Stack {
     fn fence_owners(&mut self, next_generation: u64) {
         self.fenced_generation = Some(next_generation);
         self.udp.fence_session(next_generation);
-        for entry in self.flows.iter_mut().flatten() {
+        let mut active = self.active_flow_head;
+        while let Some(slot) = active {
+            let entry = self.flows[slot].as_mut().expect("active TCP flow");
             entry.owner.fence_generation();
+            active = entry.active_next;
         }
     }
 

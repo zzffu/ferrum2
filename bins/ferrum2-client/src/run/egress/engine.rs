@@ -193,8 +193,8 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         self.network_reset_state.register_dns_action(action)
     }
 
-    pub(in crate::run) fn reset_network(&self) -> usize {
-        self.network_reset_hub.reset()
+    pub(in crate::run) fn network_reset_hub(&self) -> ClientNetworkResetHub {
+        self.network_reset_hub.clone()
     }
 
     fn classify_selected(

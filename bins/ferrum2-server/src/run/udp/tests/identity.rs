@@ -381,7 +381,7 @@ async fn udp_generation_termination_retention_and_replacement_cleanup() {
 }
 
 #[tokio::test]
-async fn network_reset_immediately_retires_udp_runtime_mapping_and_allows_rebuild() {
+async fn network_reset_fences_before_retiring_udp_mapping_and_preserves_frozen_identity() {
     let target = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9));
     let clock = SystemClock::new();
     let keys = aes_keys();
@@ -419,6 +419,24 @@ async fn network_reset_immediately_retires_udp_runtime_mapping_and_allows_rebuil
     .await
     .expect("generation two reset");
 
+    assert_eq!(
+        registry.snapshot().udp_sessions,
+        1,
+        "hook keeps storage until owner barrier"
+    );
+    assert_eq!(
+        mappings.handle(capability).map(|binding| binding.handle),
+        Some(old_handle)
+    );
+    assert_eq!(
+        manager
+            .reserve_session(tokio::time::Instant::now())
+            .unwrap_err(),
+        UdpRuntimeError::Cancelled
+    );
+    assert_eq!(hook.pending_generation(), Some(2));
+    hook.finish_generation(2).await.unwrap();
+    assert_eq!(hook.pending_generation(), None);
     assert_eq!(registry.snapshot().udp_sessions, 0);
     assert_eq!(mappings.handle(capability), None);
     assert_eq!(
@@ -470,6 +488,7 @@ async fn network_reset_immediately_retires_udp_runtime_mapping_and_allows_rebuil
     )
     .await
     .expect("same generation reset is idempotent");
+    hook.finish_generation(2).await.unwrap();
     assert_eq!(registry.snapshot().udp_sessions, 1);
     assert_eq!(
         mappings.handle(capability).map(|binding| binding.handle),
@@ -484,6 +503,7 @@ async fn network_reset_immediately_retires_udp_runtime_mapping_and_allows_rebuil
     )
     .await
     .expect("generation three reset");
+    hook.finish_generation(3).await.unwrap();
     assert_eq!(registry.snapshot().udp_sessions, 0);
     assert_eq!(mappings.handle(capability), None);
     assert_eq!(mappings.capability(new_handle).await, None);
@@ -494,6 +514,37 @@ async fn network_reset_immediately_retires_udp_runtime_mapping_and_allows_rebuil
             terminal: ServerTerminalRoute::Direct(0),
         })
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn outbound_fence_does_not_wait_for_an_inflight_packet_admission() {
+    let registry = OwnerRegistry::new();
+    let baseline = registry.snapshot();
+    let manager = UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone());
+    let admission = Arc::new(tokio::sync::Mutex::new(()));
+    let hook = ServerUdpNetworkReset::new(
+        1,
+        manager,
+        Arc::new(UdpMappings::new(1)),
+        Arc::clone(&admission),
+    );
+    let packet = admission.lock().await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        ferrum2_runtime::ResetNetwork::reset_network(
+            &hook,
+            Arc::new(ferrum2_net::NetworkSnapshot::new(2, None, None).unwrap()),
+        ),
+    )
+    .await;
+    drop(packet);
+    assert!(
+        result
+            .expect("fence cannot wait for packet cancellation")
+            .is_ok()
+    );
+    hook.finish_generation(2).await.unwrap();
+    assert_eq!(registry.snapshot(), baseline);
 }
 
 #[tokio::test]

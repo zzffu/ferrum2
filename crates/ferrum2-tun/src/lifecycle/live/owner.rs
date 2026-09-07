@@ -5,14 +5,15 @@ use std::time::Duration;
 use ferrum2_net::NetworkSnapshot;
 
 use super::super::reducer::LifecycleReducer;
+use super::ordinary::{OrdinaryResetOutcome, OrdinaryResetRequest, complete_ordinary_reset};
 use super::prepare::{build_adapter_config, wait_owner_delay};
 use super::rebuild::{
-    OwnerAttempt, PendingFullRebuild, adapter_underlay_is_current,
-    request_client_network_lifecycle, request_full_rebuild_transition, start_full_rebuild,
+    OwnerAttempt, PendingFullRebuild, adapter_underlay_is_current, request_full_rebuild_transition,
+    start_full_rebuild,
 };
 use super::reset::{
-    NetworkResetHealthDisposition, NetworkResetRefreshOutcome, classify_network_reset_health,
-    classify_network_reset_refresh_error, refresh_network_runtime,
+    NetworkResetHealthDisposition, classify_network_reset_health,
+    classify_network_reset_refresh_error,
 };
 use super::session::{ActiveSession, SessionExit, run_active_session};
 use crate::stack::Stack;
@@ -62,6 +63,7 @@ pub(crate) fn owner_main(
     });
     let mut ready = Some(ready);
     let mut generation = initial_network_generation;
+    let mut completed_reset: Option<Arc<NetworkSnapshot>> = None;
     let mut backoff = RestartBackoff::default();
     let supervisor_origin = std::time::Instant::now();
     let mut debounce = NetworkDebounce::default();
@@ -209,28 +211,26 @@ pub(crate) fn owner_main(
             }
         }
 
-        if let Some(reason) = reset_reason
-            && !adapter_underlay_is_current(&adapter)
-        {
-            match refresh_network_runtime(
-                &mut adapter,
-                &control,
-                &mut backoff,
-                &events,
+        if let Some(reason) = reset_reason {
+            match complete_ordinary_reset(OrdinaryResetRequest {
+                adapter: &mut adapter,
+                control: &control,
+                backoff: &mut backoff,
+                events: &events,
+                link: &network_lifecycle_output,
+                current_generation: generation,
                 reason,
-                false,
-            ) {
-                NetworkResetRefreshOutcome::Refreshed(reason) => {
-                    lifecycle
-                        .stage(OwnerAttempt::reset(adapter, reason, false))
-                        .expect("refreshed reset stages the next attempt");
-                    continue;
-                }
-                NetworkResetRefreshOutcome::FullRebuild(damage) => {
+                settle_underlay: false,
+                completed: completed_reset.as_ref(),
+            }) {
+                OrdinaryResetOutcome::Completed(snapshot) => completed_reset = Some(snapshot),
+                OrdinaryResetOutcome::FullRebuild(damage) => {
                     let rebuild = match start_full_rebuild(
                         PendingFullRebuild::new(
                             damage,
-                            generation,
+                            completed_reset
+                                .as_ref()
+                                .map_or(generation, |snapshot| snapshot.generation()),
                             control.flow_count.load(Ordering::Acquire),
                             control.association_count.load(Ordering::Acquire),
                         )
@@ -250,18 +250,19 @@ pub(crate) fn owner_main(
                         rebuild.emit_failed(&events);
                         return OwnerExit::CleanupFailed;
                     }
+                    completed_reset = None;
                     lifecycle
                         .stage(OwnerAttempt::rebuild(rebuild, None))
                         .expect("managed damage stages a rebuild attempt");
                     continue;
                 }
-                NetworkResetRefreshOutcome::RuntimeFailed => {
+                OrdinaryResetOutcome::RuntimeFailed => {
                     return finish_adapter(&current_work, adapter, OwnerExit::RuntimeFailed);
                 }
-                NetworkResetRefreshOutcome::CleanupFailed => {
+                OrdinaryResetOutcome::CleanupFailed => {
                     return finish_adapter(&current_work, adapter, OwnerExit::CleanupFailed);
                 }
-                NetworkResetRefreshOutcome::Stopped => {
+                OrdinaryResetOutcome::Stopped => {
                     return finish_adapter(&current_work, adapter, OwnerExit::Stopped);
                 }
             }
@@ -270,6 +271,11 @@ pub(crate) fn owner_main(
         let candidate_generation = attempt
             .pending_rebuild()
             .map(|rebuild| rebuild.generation)
+            .or_else(|| {
+                completed_reset
+                    .as_ref()
+                    .map(|snapshot| snapshot.generation())
+            })
             .or_else(|| generation.checked_add(1));
         let Some(candidate_generation) = candidate_generation else {
             attempt.emit_rebuild_failed(&events);
@@ -393,7 +399,9 @@ pub(crate) fn owner_main(
                     let rebuild = match start_full_rebuild(
                         PendingFullRebuild::new(
                             damage,
-                            generation,
+                            completed_reset
+                                .as_ref()
+                                .map_or(generation, |snapshot| snapshot.generation()),
                             control.flow_count.load(Ordering::Acquire),
                             control.association_count.load(Ordering::Acquire),
                         )
@@ -413,6 +421,7 @@ pub(crate) fn owner_main(
                         rebuild.emit_failed(&events);
                         return OwnerExit::CleanupFailed;
                     }
+                    completed_reset = None;
                     lifecycle
                         .stage(OwnerAttempt::rebuild(rebuild, None))
                         .expect("reset damage stages a full rebuild");
@@ -479,9 +488,14 @@ pub(crate) fn owner_main(
                 .expect("stale reset underlay stages the retained adapter");
             continue;
         }
-        let snapshot =
+        let snapshot = if reset_reason.is_some() {
+            Ok(Arc::clone(completed_reset.as_ref().expect(
+                "ordinary reset completed before stack replacement",
+            )))
+        } else {
             NetworkSnapshot::capture(candidate_generation, &adapter.network_interface_catalog())
-                .map(Arc::new);
+                .map(Arc::new)
+        };
         let snapshot = match snapshot {
             Ok(snapshot) => snapshot,
             Err(_) => {
@@ -536,32 +550,6 @@ pub(crate) fn owner_main(
                 continue;
             }
         };
-        if let Some(reason) = reset_reason {
-            let outcome = request_client_network_lifecycle(
-                &network_lifecycle_output,
-                Arc::clone(&snapshot),
-                TunNetworkLifecycle::ResetNetwork(reason),
-            );
-            if outcome != NetworkResetBridgeOutcome::Completed {
-                session_cancel_handle.cancel();
-                stack.quiesce(
-                    candidate_generation.saturating_add(1),
-                    UdpResponseDropReason::SessionReset,
-                );
-                drop(flows);
-                drop(datagrams);
-                drop(stack);
-                events.emit(TunEvent::NetworkResetFailed(reason));
-                let delay = backoff.next_delay();
-                lifecycle
-                    .back_off(
-                        OwnerAttempt::reset(adapter, TunNetworkResetReason::Retry, true),
-                        delay,
-                    )
-                    .expect("lifecycle callback retry preserves reset ownership");
-                continue;
-            }
-        }
         if underlay.publish(adapter.underlay_policy()).is_err() {
             session_cancel_handle.cancel();
             stack.quiesce(
@@ -684,6 +672,7 @@ pub(crate) fn owner_main(
                 .prepared(owner_wake.clone());
         }
         generation = candidate_generation;
+        completed_reset = None;
         events.emit(TunEvent::SessionGeneration(generation));
         events.emit(TunEvent::SessionActive(true));
         lifecycle
@@ -729,6 +718,46 @@ pub(crate) fn owner_main(
         let rebuild_tcp_associations = control.flow_count.load(Ordering::Acquire);
         let rebuild_udp_associations = stack.live_udp_associations();
         let underlay_failed = underlay.invalidate().is_err();
+        let mut session_exit = session_exit;
+        if !underlay_failed
+            && !control.stop.load(Ordering::Acquire)
+            && !control.shutdown.load(Ordering::Acquire)
+            && let SessionExit::ResetNetwork { settle_underlay } = session_exit
+        {
+            // Polling/admission is paused; keep the old bounded stack and channel
+            // storage until publication, hooks and the external owner barrier finish.
+            let fenced = generation
+                .checked_add(1)
+                .ok_or(())
+                .and_then(|next| stack.fence_generation(next));
+            if fenced.is_err() {
+                session_exit = SessionExit::Terminal(OwnerExit::RuntimeFailed);
+            } else {
+                match complete_ordinary_reset(OrdinaryResetRequest {
+                    adapter: &mut adapter,
+                    control: &control,
+                    backoff: &mut backoff,
+                    events: &events,
+                    link: &network_lifecycle_output,
+                    current_generation: generation,
+                    reason: TunNetworkResetReason::NetworkChange,
+                    settle_underlay,
+                    completed: None,
+                }) {
+                    OrdinaryResetOutcome::Completed(snapshot) => completed_reset = Some(snapshot),
+                    OrdinaryResetOutcome::FullRebuild(damage) => {
+                        session_exit = SessionExit::FullRebuild(damage)
+                    }
+                    OrdinaryResetOutcome::RuntimeFailed => {
+                        session_exit = SessionExit::Terminal(OwnerExit::RuntimeFailed)
+                    }
+                    OrdinaryResetOutcome::CleanupFailed => {
+                        session_exit = SessionExit::Terminal(OwnerExit::CleanupFailed)
+                    }
+                    OrdinaryResetOutcome::Stopped => session_exit = SessionExit::Stopped,
+                }
+            }
+        }
         session_cancel_handle.cancel();
         let response_drop_reason =
             if underlay_failed || matches!(session_exit, SessionExit::Terminal(_)) {
@@ -772,35 +801,21 @@ pub(crate) fn owner_main(
             return finish_adapter(&current_work, adapter, OwnerExit::Stopped);
         }
         let damage = match session_exit {
-            SessionExit::ResetNetwork { settle_underlay } => match refresh_network_runtime(
-                &mut adapter,
-                &control,
-                &mut backoff,
-                &events,
-                TunNetworkResetReason::NetworkChange,
-                settle_underlay,
-            ) {
-                NetworkResetRefreshOutcome::Refreshed(reason) => {
-                    if session_started.elapsed() >= Duration::from_secs(5) {
-                        backoff.reset();
-                    }
-                    debounce.clear();
-                    lifecycle
-                        .stage(OwnerAttempt::reset(adapter, reason, false))
-                        .expect("active reset stages the retained adapter");
-                    continue 'owner;
+            SessionExit::ResetNetwork { .. } => {
+                debug_assert!(completed_reset.is_some());
+                if session_started.elapsed() >= Duration::from_secs(5) {
+                    backoff.reset();
                 }
-                NetworkResetRefreshOutcome::FullRebuild(damage) => damage,
-                NetworkResetRefreshOutcome::RuntimeFailed => {
-                    return finish_adapter(&current_work, adapter, OwnerExit::RuntimeFailed);
-                }
-                NetworkResetRefreshOutcome::CleanupFailed => {
-                    return finish_adapter(&current_work, adapter, OwnerExit::CleanupFailed);
-                }
-                NetworkResetRefreshOutcome::Stopped => {
-                    return finish_adapter(&current_work, adapter, OwnerExit::Stopped);
-                }
-            },
+                debounce.clear();
+                lifecycle
+                    .stage(OwnerAttempt::reset(
+                        adapter,
+                        TunNetworkResetReason::NetworkChange,
+                        false,
+                    ))
+                    .expect("completed reset retains its adapter and immutable snapshot");
+                continue 'owner;
+            }
             SessionExit::FullRebuild(damage) => damage,
             SessionExit::Stopped | SessionExit::Terminal(_) => {
                 unreachable!("stopped and terminal sessions exit before rebuild dispatch")

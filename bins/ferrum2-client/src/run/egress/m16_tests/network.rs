@@ -19,16 +19,24 @@ fn shared_network_reset_hub_resets_all_live_engines_and_drops_registration_exact
     let second_calls = Arc::new(AtomicUsize::new(0));
     let first_action: Arc<ClientDnsResetAction> = {
         let calls = Arc::clone(&first_calls);
-        Arc::new(move || {
-            calls.fetch_add(1, Ordering::SeqCst);
-            2
+        Arc::new(ClientDnsResetAction {
+            fence: Box::new(|_| Ok(())),
+            retire: Box::new(move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(2)
+            }),
+            reopen: Box::new(|_| Ok(())),
         })
     };
     let second_action: Arc<ClientDnsResetAction> = {
         let calls = Arc::clone(&second_calls);
-        Arc::new(move || {
-            calls.fetch_add(1, Ordering::SeqCst);
-            3
+        Arc::new(ClientDnsResetAction {
+            fence: Box::new(|_| Ok(())),
+            retire: Box::new(move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(3)
+            }),
+            reopen: Box::new(|_| Ok(())),
         })
     };
     first.register_dns_action(&first_action).unwrap();
@@ -36,12 +44,19 @@ fn shared_network_reset_hub_resets_all_live_engines_and_drops_registration_exact
     let _first_registration = hub.register(&first).unwrap();
     let second_registration = hub.register(&second).unwrap();
 
-    assert_eq!(hub.reset(), 5);
+    hub.fence(1).unwrap();
+    assert_eq!(hub.pending_generation(), Some(1));
+    assert_eq!(first_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(hub.complete(1), Ok(5));
+    assert_eq!(hub.pending_generation(), None);
+    hub.fence(1).unwrap();
+    assert_eq!(hub.complete(1), Ok(0));
     assert_eq!(first_calls.load(Ordering::SeqCst), 1);
     assert_eq!(second_calls.load(Ordering::SeqCst), 1);
 
     drop(second_registration);
-    assert_eq!(hub.reset(), 2);
+    hub.fence(2).unwrap();
+    assert_eq!(hub.complete(2), Ok(2));
     assert_eq!(first_calls.load(Ordering::SeqCst), 2);
     assert_eq!(second_calls.load(Ordering::SeqCst), 1);
 }

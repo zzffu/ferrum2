@@ -64,7 +64,9 @@ impl ClientNetworkRuntime {
     pub(super) fn cleanup(&self) -> ferrum2_runtime::ProcessFuture<Result<(), RunError>> {
         let native = self.native.as_ref().map(|(owner, _)| Arc::clone(owner));
         let sockets = Arc::clone(&self.owner);
+        let reset_hub = self.sockets.reset_hub();
         Box::pin(async move {
+            let reset = reset_hub.stop().map_err(|()| RunError::ShutdownCleanup);
             let native = match native {
                 Some(owner) => owner.lock().await.shutdown().await,
                 None => Ok(()),
@@ -75,7 +77,7 @@ impl ClientNetworkRuntime {
                 .shutdown()
                 .await
                 .map_err(|_| RunError::ShutdownCleanup);
-            native.and(sockets)
+            reset.and(native).and(sockets)
         })
     }
     pub(super) async fn shutdown(&mut self) -> Result<(), RunError> {

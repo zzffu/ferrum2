@@ -76,8 +76,13 @@ pub type NetworkResetFuture<'a> =
     Pin<Box<dyn Future<Output = Result<(), NetworkResetError>> + Send + 'a>>;
 
 /// Generation-aware hook implemented by network-dependent runtime components.
+///
+/// Ordinary reset publishes the supplied snapshot before invoking hooks in stage order.
+/// Implementors must accept retries of the same generation, fence stale capabilities,
+/// and leave storage retirement until the coordinator has acknowledged old owners.
+/// Hooks must not wait for owner cancellation: it starts only after all hooks succeed.
 pub trait ResetNetwork: Send + Sync {
-    /// Replaces all generation-bound state without tearing down managed device state.
+    /// Accepts and fences one published generation without tearing down managed device state.
     fn reset_network(&self, snapshot: Arc<NetworkSnapshot>) -> NetworkResetFuture<'_>;
 }
 

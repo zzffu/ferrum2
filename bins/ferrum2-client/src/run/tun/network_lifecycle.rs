@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(all(windows, not(test)))]
 use std::time::Duration;
@@ -164,8 +164,11 @@ async fn reset_client_network(
     reset: &ClientNetworkResetRuntime,
     retry: bool,
 ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
-    if reset.coordinator.status().pending_generation().is_some() {
-        return reset.retry().await;
+    let _driver = reset.driver.lock().await;
+    if reset.coordinator.status().pending_generation().is_some()
+        || reset.hub.pending_generation().is_some()
+    {
+        return reset.retry_locked().await;
     }
     let generation = reset
         .coordinator
@@ -179,9 +182,9 @@ async fn reset_client_network(
         .map(Arc::new)
         .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
     let reason = if retry {
-        ferrum2_tun::TunNetworkResetReason::Retry
+        RuntimeNetworkResetReason::ExplicitRequest
     } else {
-        ferrum2_tun::TunNetworkResetReason::NetworkChange
+        RuntimeNetworkResetReason::InterfaceChanged
     };
     if reset
         .coordinator
@@ -192,7 +195,9 @@ async fn reset_client_network(
     {
         return Err(ferrum2_tun::TunNetworkResetError);
     }
-    reset.reset(snapshot, reason).await
+    reset
+        .reset_locked(snapshot, reason, ResetObservation::NetworkChange)
+        .await
 }
 
 pub(super) type ClientNetworkResetAction = Arc<dyn Fn(u64) -> Result<(), ()> + Send + Sync>;
@@ -233,15 +238,19 @@ impl ResetNetwork for ClientNetworkResetHook {
     }
 }
 
+enum ResetObservation {
+    Initialize,
+    NetworkChange,
+}
+
 pub(super) struct ClientNetworkResetRuntime {
     #[cfg(all(windows, not(test)))]
     sockets: Arc<crate::run::egress::ClientNetworkSocketService>,
     pub(super) coordinator: NetworkResetCoordinator,
     pub(super) hooks: [Arc<ClientNetworkResetHook>; 4],
     registrations: Mutex<Option<[NetworkResetHookRegistration; 4]>>,
-    hook_udp_associations: Arc<AtomicUsize>,
-    pending_full_rebuild_udp_associations: AtomicUsize,
-    egress: Arc<crate::run::egress::ClientEgressEngine>,
+    hub: crate::run::egress::ClientNetworkResetHub,
+    driver: Arc<tokio::sync::Mutex<()>>,
     metrics: Arc<Metrics>,
 }
 
@@ -255,10 +264,8 @@ impl ClientNetworkResetRuntime {
     ) -> Self {
         let initial_generation = coordinator.status().published_generation();
         let accept: ClientNetworkResetAction = Arc::new(|_| Ok(()));
-        // The owner has already constructed the stack when it crosses the bounded bridge.
-        // Router and inbound listeners retain no interface-bound cache today, so their hooks are
-        // generation acceptance barriers. Outbound owns the shared UDP sessions (including DNS
-        // UDP egress) and cancels them below; TUN TCP work is acknowledged by runtime owners.
+        // Native packet polling is paused across the bridge. These hooks accept the
+        // published generation; outbound fences capabilities without retiring storage.
         let stack = Arc::new(ClientNetworkResetHook::new(
             initial_generation,
             Arc::clone(&accept),
@@ -267,17 +274,11 @@ impl ClientNetworkResetRuntime {
             initial_generation,
             Arc::clone(&accept),
         ));
-        let egress = Arc::clone(&context.egress);
-        let hook_udp_associations = Arc::new(AtomicUsize::new(0));
-        let reset_associations = Arc::clone(&hook_udp_associations);
-        let outbound_egress = Arc::clone(&egress);
+        let hub = context.egress.network_reset_hub();
+        let outbound_hub = hub.clone();
         let outbound = Arc::new(ClientNetworkResetHook::new(
             initial_generation,
-            Arc::new(move |_| {
-                let udp_associations = outbound_egress.reset_network();
-                reset_associations.fetch_add(udp_associations, Ordering::AcqRel);
-                Ok(())
-            }),
+            Arc::new(move |generation| outbound_hub.fence(generation)),
         ));
         let inbound_dns = Arc::new(ClientNetworkResetHook::new(
             initial_generation,
@@ -290,9 +291,8 @@ impl ClientNetworkResetRuntime {
             coordinator,
             hooks,
             registrations: Mutex::new(None),
-            hook_udp_associations,
-            pending_full_rebuild_udp_associations: AtomicUsize::new(0),
-            egress,
+            driver: hub.driver(),
+            hub,
             metrics: Arc::clone(&context.metrics),
         }
     }
@@ -342,35 +342,17 @@ impl ClientNetworkResetRuntime {
         }
     }
 
-    fn take_hook_udp_associations(&self) -> usize {
-        self.hook_udp_associations.swap(0, Ordering::AcqRel)
-    }
-
     pub(super) async fn initialize(
         &self,
         snapshot: Arc<NetworkSnapshot>,
     ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
-        self.require_next_generation(&snapshot)?;
-        self.register_hooks()?;
-        let report = self
-            .coordinator
-            .reset_network(
-                Arc::clone(&snapshot),
-                NetworkResetIntent::Ordinary(RuntimeNetworkResetReason::ExplicitRequest),
-            )
-            .await
-            .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
-        if report.outcome() != NetworkResetOutcome::ResetCompleted {
-            return Err(ferrum2_tun::TunNetworkResetError);
-        }
-        #[cfg(all(windows, not(test)))]
-        self.sockets
-            .retire_generation(snapshot.generation().saturating_sub(1))
-            .await
-            .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
-        let _ = self.take_hook_udp_associations();
-        self.metrics.set_network_generation(snapshot.generation());
-        Ok(())
+        let _driver = self.driver.lock().await;
+        self.reset_locked(
+            snapshot,
+            RuntimeNetworkResetReason::ExplicitRequest,
+            ResetObservation::Initialize,
+        )
+        .await
     }
 
     pub(super) async fn reset(
@@ -378,44 +360,81 @@ impl ClientNetworkResetRuntime {
         snapshot: Arc<NetworkSnapshot>,
         reason: ferrum2_tun::TunNetworkResetReason,
     ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
-        self.require_next_generation(&snapshot)?;
-        self.register_hooks()?;
+        let _driver = self.driver.lock().await;
         let reason = match reason {
             ferrum2_tun::TunNetworkResetReason::NetworkChange => {
                 RuntimeNetworkResetReason::InterfaceChanged
             }
             ferrum2_tun::TunNetworkResetReason::Retry => RuntimeNetworkResetReason::ExplicitRequest,
         };
+        self.reset_locked(snapshot, reason, ResetObservation::NetworkChange)
+            .await
+    }
+
+    async fn reset_locked(
+        &self,
+        snapshot: Arc<NetworkSnapshot>,
+        reason: RuntimeNetworkResetReason,
+        observation: ResetObservation,
+    ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        if self
+            .hub
+            .pending_generation()
+            .is_some_and(|generation| generation != snapshot.generation())
+        {
+            return Err(ferrum2_tun::TunNetworkResetError);
+        }
+        let current = self.coordinator.snapshots().snapshot();
+        if *snapshot != *current
+            && current.generation().checked_add(1) != Some(snapshot.generation())
+        {
+            return Err(ferrum2_tun::TunNetworkResetError);
+        }
+        self.register_hooks()?;
         let report = self
             .coordinator
             .reset_network(Arc::clone(&snapshot), NetworkResetIntent::Ordinary(reason))
             .await
             .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
         match report.outcome() {
-            NetworkResetOutcome::ResetCompleted => {
-                #[cfg(all(windows, not(test)))]
-                self.sockets
-                    .retire_generation(report.published_generation().saturating_sub(1))
-                    .await
-                    .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
-                self.metrics.network_associations_reset(
-                    NetworkLifecycleOperation::ResetNetwork,
-                    Transport::Udp,
-                    self.take_hook_udp_associations(),
-                );
-                self.metrics.set_network_generation(snapshot.generation());
+            NetworkResetOutcome::ResetCompleted | NetworkResetOutcome::Noop => {
+                let count = self
+                    .finish_generation(report.published_generation())
+                    .await?;
+                if matches!(observation, ResetObservation::NetworkChange) {
+                    self.metrics.network_associations_reset(
+                        NetworkLifecycleOperation::ResetNetwork,
+                        Transport::Udp,
+                        count,
+                    );
+                }
+                self.metrics
+                    .set_network_generation(report.published_generation());
                 Ok(())
             }
-            NetworkResetOutcome::Noop
-            | NetworkResetOutcome::FullRebuildRequired(_)
+            NetworkResetOutcome::FullRebuildRequired(_)
             | NetworkResetOutcome::FullRebuildAcknowledged => {
                 Err(ferrum2_tun::TunNetworkResetError)
             }
         }
     }
 
+    async fn finish_generation(
+        &self,
+        generation: u64,
+    ) -> Result<usize, ferrum2_tun::TunNetworkResetError> {
+        #[cfg(all(windows, not(test)))]
+        self.sockets
+            .retire_generation(generation.saturating_sub(1))
+            .await
+            .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
+        self.hub
+            .complete(generation)
+            .map_err(|()| ferrum2_tun::TunNetworkResetError)
+    }
+
     #[cfg(all(windows, not(test)))]
-    async fn retry(&self) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+    async fn retry_locked(&self) -> Result<(), ferrum2_tun::TunNetworkResetError> {
         self.register_hooks()?;
         let report = self
             .coordinator
@@ -423,23 +442,20 @@ impl ClientNetworkResetRuntime {
             .await
             .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
         match report.outcome() {
-            NetworkResetOutcome::ResetCompleted => {
-                #[cfg(all(windows, not(test)))]
-                self.sockets
-                    .retire_generation(report.published_generation().saturating_sub(1))
-                    .await
-                    .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
+            NetworkResetOutcome::ResetCompleted | NetworkResetOutcome::Noop => {
+                let count = self
+                    .finish_generation(report.published_generation())
+                    .await?;
                 self.metrics.network_associations_reset(
                     NetworkLifecycleOperation::ResetNetwork,
                     Transport::Udp,
-                    self.take_hook_udp_associations(),
+                    count,
                 );
                 self.metrics
                     .set_network_generation(report.published_generation());
                 Ok(())
             }
-            NetworkResetOutcome::Noop
-            | NetworkResetOutcome::FullRebuildRequired(_)
+            NetworkResetOutcome::FullRebuildRequired(_)
             | NetworkResetOutcome::FullRebuildAcknowledged => {
                 Err(ferrum2_tun::TunNetworkResetError)
             }
@@ -451,7 +467,9 @@ impl ClientNetworkResetRuntime {
         snapshot: Arc<NetworkSnapshot>,
         reason: ferrum2_tun::TunNetworkFullRebuildReason,
     ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        let _driver = self.driver.lock().await;
         self.require_next_generation(&snapshot)?;
+        let target_generation = snapshot.generation();
         let report = self
             .coordinator
             .reset_network(
@@ -467,9 +485,12 @@ impl ClientNetworkResetRuntime {
                     .retire_generation(report.published_generation())
                     .await
                     .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
-                let udp_associations = self.egress.reset_network();
-                self.pending_full_rebuild_udp_associations
-                    .fetch_add(udp_associations, Ordering::AcqRel);
+                self.hub
+                    .fence(target_generation)
+                    .map_err(|()| ferrum2_tun::TunNetworkResetError)?;
+                self.hub
+                    .retire(target_generation)
+                    .map_err(|()| ferrum2_tun::TunNetworkResetError)?;
                 Ok(())
             }
             NetworkResetOutcome::Noop
@@ -484,6 +505,7 @@ impl ClientNetworkResetRuntime {
         &self,
         snapshot: Arc<NetworkSnapshot>,
     ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
+        let _driver = self.driver.lock().await;
         self.require_next_generation(&snapshot)?;
         for hook in &self.hooks {
             hook.reset_network(Arc::clone(&snapshot))
@@ -499,9 +521,9 @@ impl ClientNetworkResetRuntime {
             return Err(ferrum2_tun::TunNetworkResetError);
         }
         let udp_associations = self
-            .pending_full_rebuild_udp_associations
-            .swap(0, Ordering::AcqRel)
-            .saturating_add(self.take_hook_udp_associations());
+            .hub
+            .complete(snapshot.generation())
+            .map_err(|()| ferrum2_tun::TunNetworkResetError)?;
         self.metrics.network_associations_reset(
             NetworkLifecycleOperation::FullRebuild,
             Transport::Udp,
@@ -528,5 +550,12 @@ impl ClientNetworkResetRuntime {
                 self.complete_full_rebuild(snapshot).await
             }
         }
+    }
+}
+
+impl Drop for ClientNetworkResetRuntime {
+    fn drop(&mut self) {
+        // Final process resources observe the hub's sticky cleanup outcome.
+        let _ = self.hub.stop();
     }
 }

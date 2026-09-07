@@ -253,6 +253,88 @@ struct FailOnceHook {
     attempts: AtomicUsize,
 }
 
+struct PublishedBeforeHook {
+    snapshots: NetworkSnapshotPublisher,
+    events: Arc<Mutex<Vec<(u64, &'static str)>>>,
+    label: &'static str,
+}
+
+impl ResetNetwork for PublishedBeforeHook {
+    fn reset_network(&self, snapshot: Arc<NetworkSnapshot>) -> NetworkResetFuture<'_> {
+        Box::pin(async move {
+            if *self.snapshots.snapshot() != *snapshot {
+                return Err(NetworkResetError);
+            }
+            self.events
+                .lock()
+                .unwrap()
+                .push((snapshot.generation(), self.label));
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn ordinary_reset_publishes_and_finishes_all_hooks_before_cancelling_owners() {
+    let owners = OwnerRegistry::new();
+    let baseline = owners.snapshot();
+    let coordinator = coordinator(1, NetworkResetLimits::default(), &owners);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut registrations = Vec::new();
+    for (stage, label) in [
+        (NetworkResetHookStage::Stack, "stack"),
+        (NetworkResetHookStage::Router, "router"),
+        (NetworkResetHookStage::Outbound, "outbound"),
+        (NetworkResetHookStage::Inbound, "inbound"),
+    ] {
+        registrations.push(
+            coordinator
+                .register_reset_hook(
+                    stage,
+                    Arc::new(PublishedBeforeHook {
+                        snapshots: coordinator.snapshots(),
+                        events: Arc::clone(&events),
+                        label,
+                    }),
+                )
+                .unwrap(),
+        );
+    }
+    let mut owner = coordinator
+        .register_runtime_owner(1, NetworkRuntimeOwnerKind::TcpConnection)
+        .unwrap();
+    let observed = Arc::clone(&events);
+    let owned = tokio::spawn(async move {
+        owner.cancelled().await;
+        observed.lock().unwrap().push((2, "cancel"));
+        drop(owner);
+    });
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        coordinator.reset_network(
+            snapshot(2),
+            NetworkResetIntent::Ordinary(NetworkResetReason::ExplicitRequest),
+        ),
+    )
+    .await;
+    // Always reap the finite helper, including the old-order failure path.
+    owned.abort();
+    let _ = owned.await;
+    drop(registrations);
+    assert_eq!(owners.snapshot(), baseline);
+    assert!(result.expect("bounded reset").is_ok());
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            (2, "stack"),
+            (2, "router"),
+            (2, "outbound"),
+            (2, "inbound"),
+            (2, "cancel")
+        ]
+    );
+}
+
 impl ResetNetwork for FailOnceHook {
     fn reset_network(&self, _snapshot: Arc<NetworkSnapshot>) -> NetworkResetFuture<'_> {
         Box::pin(async move {

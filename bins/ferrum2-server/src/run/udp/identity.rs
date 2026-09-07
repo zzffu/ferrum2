@@ -258,6 +258,7 @@ impl UdpMappings {
 #[cfg(any(windows, test))]
 pub(in crate::run) struct ServerUdpNetworkReset {
     pub(super) accepted_generation: std::sync::atomic::AtomicU64,
+    completed_generation: std::sync::atomic::AtomicU64,
     pub(super) sessions: UdpSessionManager,
     pub(super) mappings: Arc<UdpMappings>,
     pub(super) admission: Arc<tokio::sync::Mutex<()>>,
@@ -273,10 +274,50 @@ impl ServerUdpNetworkReset {
     ) -> Self {
         Self {
             accepted_generation: std::sync::atomic::AtomicU64::new(initial_generation),
+            completed_generation: std::sync::atomic::AtomicU64::new(initial_generation),
             sessions,
             mappings,
             admission,
         }
+    }
+
+    pub(in crate::run) fn pending_generation(&self) -> Option<u64> {
+        let accepted = self
+            .accepted_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        (accepted
+            != self
+                .completed_generation
+                .load(std::sync::atomic::Ordering::Acquire))
+        .then_some(accepted)
+    }
+
+    pub(in crate::run) async fn finish_generation(&self, generation: u64) -> Result<(), ()> {
+        let _admission = self.admission.lock().await;
+        if self
+            .accepted_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != generation
+        {
+            return Err(());
+        }
+        if self
+            .completed_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            == generation
+        {
+            return Ok(());
+        }
+        self.sessions
+            .retire_network_generation(generation)
+            .map_err(|_| ())?;
+        self.mappings.reset_runtime();
+        self.sessions
+            .reopen_network_generation(generation)
+            .map_err(|_| ())?;
+        self.completed_generation
+            .store(generation, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 }
 
@@ -288,7 +329,9 @@ impl ferrum2_runtime::ResetNetwork for ServerUdpNetworkReset {
     ) -> ferrum2_runtime::NetworkResetFuture<'_> {
         Box::pin(async move {
             let generation = snapshot.generation();
-            let _admission = self.admission.lock().await;
+            // An in-flight packet can await generation-bound DNS/socket work while
+            // holding admission. Fence under the manager's commit lock now; wait
+            // for packet admission only during retirement after owner cancellation.
             let current = self
                 .accepted_generation
                 .load(std::sync::atomic::Ordering::Acquire);
@@ -298,8 +341,9 @@ impl ferrum2_runtime::ResetNetwork for ServerUdpNetworkReset {
             if generation == current {
                 return Ok(());
             }
-            self.sessions.reset_all();
-            self.mappings.reset_runtime();
+            self.sessions
+                .fence_network_generation(generation)
+                .map_err(|_| ferrum2_runtime::NetworkResetError)?;
             self.accepted_generation
                 .store(generation, std::sync::atomic::Ordering::Release);
             Ok(())

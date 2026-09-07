@@ -74,10 +74,10 @@ pub(super) fn network_change_process_root(
 ) -> ProcessRoot<RunError> {
     ProcessRoot::new_cancellable(move |_| async move {
         let coordinator = sockets.coordinator().clone();
-        let registration = match udp_reset {
+        let registration = match &udp_reset {
             Some(hook) => Some(
                 coordinator
-                    .register_reset_hook(NetworkResetHookStage::Outbound, hook)
+                    .register_reset_hook(NetworkResetHookStage::Outbound, hook.clone())
                     .map_err(|_| RunError::StartupRuntime)?,
             ),
             None => None,
@@ -88,6 +88,7 @@ pub(super) fn network_change_process_root(
             owner,
             metrics,
             _udp_reset_registration: registration,
+            udp_reset,
         }))
     })
 }
@@ -98,6 +99,7 @@ struct ServerNetworkChangeRoot {
     owner: Arc<tokio::sync::Mutex<ferrum2_runtime::NetworkSocketOwner>>,
     metrics: Arc<Metrics>,
     _udp_reset_registration: Option<NetworkResetHookRegistration>,
+    udp_reset: Option<Arc<super::udp::ServerUdpNetworkReset>>,
 }
 #[cfg(all(windows, not(test)))]
 impl PreparedProcessRoot<RunError> for ServerNetworkChangeRoot {
@@ -152,7 +154,7 @@ impl PreparedProcessRoot<RunError> for ServerNetworkChangeRoot {
                             self.metrics.network_reset(metric_reason, NetworkLifecycleResult::Failed);
                             return Ok(());
                         }
-                        result = reset_server_network(&self.sockets, &self.owner, reason) => result,
+                        result = reset_server_network(&self.sockets, &self.owner, self.udp_reset.as_deref(), reason) => result,
                     };
                     match result {
                         Ok(generation) => {
@@ -186,11 +188,16 @@ impl PreparedProcessRoot<RunError> for ServerNetworkChangeRoot {
 async fn reset_server_network(
     sockets: &ServerNetworkSocketService,
     owner: &tokio::sync::Mutex<ferrum2_runtime::NetworkSocketOwner>,
+    udp_reset: Option<&super::udp::ServerUdpNetworkReset>,
     reason: RuntimeNetworkResetReason,
 ) -> Result<u64, ()> {
     let coordinator = sockets.coordinator();
     let status = coordinator.status();
-    let report = if status.pending_generation().is_some() {
+    let report = if status.pending_generation().is_some()
+        || udp_reset
+            .and_then(super::udp::ServerUdpNetworkReset::pending_generation)
+            .is_some()
+    {
         coordinator.retry_reset().await.map_err(|_| ())?
     } else {
         let generation = status.published_generation().checked_add(1).ok_or(())?;
@@ -207,7 +214,10 @@ async fn reset_server_network(
             .await
             .map_err(|_| ())?
     };
-    if report.outcome() != NetworkResetOutcome::ResetCompleted {
+    if !matches!(
+        report.outcome(),
+        NetworkResetOutcome::ResetCompleted | NetworkResetOutcome::Noop
+    ) {
         return Err(());
     }
     let generation = report.published_generation();
@@ -217,6 +227,9 @@ async fn reset_server_network(
         .retire_generation(generation.saturating_sub(1))
         .await
         .map_err(|_| ())?;
+    if let Some(reset) = udp_reset {
+        reset.finish_generation(generation).await?;
+    }
     Ok(generation)
 }
 

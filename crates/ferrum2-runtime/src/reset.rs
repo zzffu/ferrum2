@@ -162,20 +162,21 @@ const OWNER_RESET_ORDER: [NetworkRuntimeOwnerKind; 3] = [
     NetworkRuntimeOwnerKind::UdpAssociation,
 ];
 
-/// Fixed hook order around atomic snapshot publication.
+/// Fixed hook order after atomic snapshot publication and before owner cancellation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum NetworkResetHookStage {
-    /// Replace stack-owned packet state before publishing the new snapshot.
+    /// Accept the published generation while the native packet owner is quiescent.
     Stack,
     /// Accept the published generation in the router.
     Router,
-    /// Replace outbound binders, DNS sockets, and other generation-bound state.
+    /// Fence outbound binders, DNS reuse, and other generation-bound capabilities.
     Outbound,
     /// Replace inbound generation-bound state last.
     Inbound,
 }
 
-const POST_PUBLISH_HOOK_ORDER: [NetworkResetHookStage; 3] = [
+const POST_PUBLISH_HOOK_ORDER: [NetworkResetHookStage; 4] = [
+    NetworkResetHookStage::Stack,
     NetworkResetHookStage::Router,
     NetworkResetHookStage::Outbound,
     NetworkResetHookStage::Inbound,
@@ -707,9 +708,8 @@ impl NetworkResetCoordinator {
                 target_generation: attempt.target().snapshot.generation(),
                 intent: attempt.target().intent,
             };
-            cancelled_runtime_owners += self.cancel_runtime_owners(signal).await;
-
             if let Some(damage) = attempt.target().intent.full_rebuild_damage() {
+                cancelled_runtime_owners += self.cancel_runtime_owners(signal).await;
                 let target = attempt.complete();
                 let mut state = lock_unpoisoned(&self.inner.state);
                 state.active = None;
@@ -731,17 +731,12 @@ impl NetworkResetCoordinator {
             }
 
             let hooks = self.snapshot_hooks();
-            self.run_hook_stage(
-                NetworkResetHookStage::Stack,
-                &hooks,
-                &attempt.target().snapshot,
-            )
-            .await?;
             publish_snapshot(&self.inner.snapshots, &attempt.target().snapshot)?;
             for stage in POST_PUBLISH_HOOK_ORDER {
                 self.run_hook_stage(stage, &hooks, &attempt.target().snapshot)
                     .await?;
             }
+            cancelled_runtime_owners += self.cancel_runtime_owners(signal).await;
 
             attempt.complete();
             let mut state = lock_unpoisoned(&self.inner.state);

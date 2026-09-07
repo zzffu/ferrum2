@@ -43,7 +43,7 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 | M2d / RD-01 | command-loop parent保管query admission、reply与实际清理；弱registrar在关闭后拒绝资源；body/descendant失败含queued child统一保留Runtime优先级 | DNS interop完整包、14个unit及全部integration通过；DNS严格clippy、DNS/client/server格式通过；binary clippy因同时进行的TUN/platform接口迁移未通过，整合门禁待冻结后重跑 |
 | M2c / RD-02/03/08 | 两个实际工作记录保留permit到join；worker拥有流式cache IO/compile/cleanup；独占目录、单container原子替换与同held-file验证；64声明先准入；完整refresh successor先构建再persist | ruleset33（16unit/7HTTPS/10loader）、严格lint/格式通过；config87通过及严格lint；Windows持有目标拒绝精确验证PermissionDenied/OS5；取消在persist前后分别保留完整旧/新generation。Unix及binary整合仍待执行，聚合matcher预算另批实施 |
 | M2g / FND-05 | 私有listener owner统一同family通配/相等地址冲突；ordinary、DNS、metrics及finish后的endpoint loop使用同一关系；TUN pseudo inbound仍排除 | config90通过，严格clippy/格式通过；新3项行为测试覆盖两角色/两种声明顺序、metrics与DNS冲突、不同具体地址共享端口。未做真实bind，未主张跨family alias；首轮新增测试调用不存在getter编译失败已修正 |
-| M3d / PLAT-05/06/09/11 | 健康readback区分Exact/Mismatch/Unavailable，检查双family MTU及journal；查询失败只关准入并保留分类，字段私有化维护AdapterConfig构造不变量；补现有trait/FFI义务 | platform69 safe tests、allfeatures check/strictlint/fmt通过；新增Mtu闭合原因贯穿TUN/runtime/client/observability，observability24及严格lint通过。新增3个rebuild result组合，lazy注册；live host及binary整合待执行 |
+| M3d / PLAT-05/06/09/11 | 健康readback区分Exact/Mismatch/Unavailable，检查双family MTU及journal；查询失败只关准入并保留分类，字段私有化维护AdapterConfig构造不变量；补现有trait/FFI义务 | platform69 safe tests、allfeatures check/strictlint/fmt通过；新增Mtu闭合原因贯穿TUN/runtime/client/observability，observability24及严格lint通过。新增3个rebuild result组合，预分配但未触及不渲染；live host及binary整合待执行 |
 | M3c1 / D5 bridge | TunRootRequest替代12位置参数；NativeLifecycleOwner从spawn起保管可关闭单槽握手与native join；queued/inflight completion关闭后Stopped；Initialize及Prepared共享deadline | TUN134 safe tests、allfeature check/strictlint/fmt通过；client no-run初次受并行system接口迁移影响。D5仍有后续：强制drop run future时异步JoinSet仅abort未join，已确认supervisor watchdog触发链，正在实现parent-retained cleanup；不能称D5完成 |
 | M2f / aggregate及公开构造 | CompiledMatchSet持有用量；snapshot在复制index前分别限制retained slots和descriptor展开（含alias）；initial逐文件准入、refresh超限保留原cache/live；keyword显式NoncontiguousNFA；同步删除失效selector错误/公开常量，borrowed plan redaction及空字段拒绝 | rule47/ruleset35、config/DNS完整包、四包严格lint/fmt通过；新7个小输入边界及2个真实worker aggregate测试。复制suffix output粗界O(255×keyword bytes)，没有实测RSS/性能声明；core/protocol联合277测试覆盖构造和redaction调整 |
 | M4a / PROTO-01..05 | UDP crypto/session及SS token/capability绑定checked constructor身份；接受时间单调含old/current/batch；packet方向具名、错误穷尽；fixture primitive私有或默认关闭test-support，无旧尺寸别名 | core/crypto/SS/rule/config联合277测试、严格lint；SS production-only lint、client no-run、M4 self-check56通过；普通SS integration仍执行（self dev-feature），lock仅增加self依赖边。没有新增per-packet Arc/keycopy；未测性能 |
@@ -65,12 +65,14 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 
 | M3h2 / D6 TUN能力 | Stack私有lifecycle owner分离fence与retire；TCP原锁内先拒绝旧缓冲读/写，UDP在receive返回前检查epoch，peer能力显式StaleGeneration；终止quiesce仍组合清理 | TUN safe138及allfeatures严格lint、client compile-only、格式通过；新增TCP旧缓冲/UDP已排队数据和peer reservation边界，原stack测试增加fence前后storage与错误代retire断言。首次新测试误用不存在counts accessor编译失败已修正；native普通reset编排尚未迁移 |
 
+| M3h3 / D6编排 | coordinator先publish再全部hooks再cancel/wait；两端hooks只fence，barrier后retire/reopen；client hub共用driver覆盖capture到completion，失败保留同代cohort，stop结果由全局cleanup消费；native保留暂停旧stack到callback完成，replacement失败复用已完成snapshot | 顺序测试旧实现失败后通过；server admission锁测试先失败后通过；runtime/server完整包（server60）、两端严格lint及client compile-only、TUN safe138通过；m0相关17通过/4旧ignored。native实际Win32重置与同代失败恢复仍待host资格；没有性能结果 |
+
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
-剩余主要实施是D6普通network reset的publish→hooks→cancel→retire顺序与同代重试，
-server startup诊断、未使用DNS proxy移除、network诊断接口和TCP代数耗尽槽退休。
-TUN dispatch与sniff批次完成后先冻结运行整合门禁；实际Windows资格和架构前后性能验收
-仍未完成。后续由主代理直接实施，不再启动或重启子代理。M2a性能记录`709e123`不能
+TUN dispatch、sniff、TCP耗尽槽与D6重置已实施；D6之前的冻结门禁17项全部通过（含doc及3个M4有限filter）。
+剩余主要实施是server startup诊断、未使用DNS proxy移除、network诊断接口及net具名状态。
+随后执行最终整合门禁、实际Windows资格和架构前后性能验收；当前仍未完成这些验收。
+后续由主代理直接实施，不再启动或重启子代理。M2a性能记录`709e123`不能
 归给后续源码；CT-05/07及CPU完整采样资格继续后置，工具整改范围没有重新开放。
 
 ## 环境与暂定验收

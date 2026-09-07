@@ -6,9 +6,9 @@ use std::net::SocketAddr;
 #[cfg(test)]
 use std::net::SocketAddrV4;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ferrum2_config::{DnsServerConfig, DnsTransport};
@@ -34,53 +34,9 @@ use ferrum2_shadowsocks::tokio::TokioFramed;
 type Packet = Vec<u8>;
 type DnsUdpPool = Arc<DnsUdpPoolState<IdleDnsUdp>>;
 
-struct DnsUdpPoolState<T> {
-    inner: Mutex<DnsUdpPoolInner<T>>,
-}
-
-struct DnsUdpPoolInner<T> {
-    generation: u64,
-    accepts_reuse: bool,
-    idle: Vec<T>,
-}
-
-impl<T> Default for DnsUdpPoolState<T> {
-    fn default() -> Self {
-        Self {
-            inner: Mutex::new(DnsUdpPoolInner {
-                generation: 0,
-                accepts_reuse: true,
-                idle: Vec::new(),
-            }),
-        }
-    }
-}
-
-impl<T> DnsUdpPoolState<T> {
-    fn reset(&self) -> usize {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match inner.generation.checked_add(1) {
-            Some(generation) => inner.generation = generation,
-            None => inner.accepts_reuse = false,
-        }
-        let count = inner.idle.len();
-        inner.idle.clear();
-        count
-    }
-
-    fn put(&self, generation: u64, value: T) {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if inner.accepts_reuse && inner.generation == generation {
-            inner.idle.push(value);
-        }
-    }
-}
+#[path = "dns_egress/pool.rs"]
+mod pool;
+use pool::{DnsUdpPoolState, take_dns_udp};
 
 /// Configured application resolver backend bound to the one prepared client
 /// DNS proxy graph. Absence or shutdown is terminal and never reaches system
@@ -150,9 +106,26 @@ pub(super) struct ClientDnsEgress {
 impl ClientDnsEgress {
     pub(super) fn new(engine: Arc<ClientEgressEngine>) -> Result<Self, ()> {
         let udp_pool = Arc::new(DnsUdpPoolState::default());
-        let weak_pool = Arc::downgrade(&udp_pool);
-        let network_reset_action: Arc<super::egress::ClientDnsResetAction> =
-            Arc::new(move || weak_pool.upgrade().map_or(0, |pool| pool.reset()));
+        let fenced = Arc::downgrade(&udp_pool);
+        let retired = Arc::downgrade(&udp_pool);
+        let reopened = Arc::downgrade(&udp_pool);
+        let network_reset_action = Arc::new(super::egress::ClientDnsResetAction {
+            fence: Box::new(move |generation| {
+                fenced
+                    .upgrade()
+                    .map_or(Ok(()), |pool| pool.fence(generation))
+            }),
+            retire: Box::new(move |generation| {
+                retired
+                    .upgrade()
+                    .map_or(Ok(0), |pool| pool.retire(generation))
+            }),
+            reopen: Box::new(move |generation| {
+                reopened
+                    .upgrade()
+                    .map_or(Ok(()), |pool| pool.reopen(generation))
+            }),
+        });
         engine.register_dns_reset_action(&network_reset_action)?;
         Ok(Self {
             engine,
@@ -221,19 +194,6 @@ impl Drop for PooledDnsUdp {
         };
         self.pool.put(self.pool_generation, idle);
     }
-}
-
-fn take_dns_udp(
-    pool: &DnsUdpPool,
-    key: &DnsUdpPoolKey,
-) -> io::Result<(Option<IdleDnsUdp>, Option<IdleDnsUdp>, u64)> {
-    let mut pool = pool.inner.lock().map_err(|_| invalid_target())?;
-    let generation = pool.generation;
-    let (matching, stale) = match pool.idle.iter().position(|idle| idle.key == *key) {
-        Some(index) => (Some(pool.idle.swap_remove(index)), None),
-        None => (None, pool.idle.pop()),
-    };
-    Ok((matching, stale, generation))
 }
 
 impl DnsEgress for ClientDnsEgress {

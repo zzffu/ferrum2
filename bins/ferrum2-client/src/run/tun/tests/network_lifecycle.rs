@@ -122,3 +122,68 @@ async fn managed_tun_lifecycle_cancelled_prepare_cleanup_failure_maps_to_shutdow
     let report = run.await.expect("process owner");
     assert_eq!(report_result(report), Err(RunError::ShutdownCleanup));
 }
+
+#[tokio::test]
+async fn published_failed_reset_retries_the_same_snapshot_and_reopens_its_fenced_cohort() {
+    struct FailOnce(std::sync::atomic::AtomicBool);
+    impl ferrum2_runtime::ResetNetwork for FailOnce {
+        fn reset_network(
+            &self,
+            _: Arc<ferrum2_net::NetworkSnapshot>,
+        ) -> ferrum2_runtime::NetworkResetFuture<'_> {
+            Box::pin(async move {
+                if self.0.swap(false, Ordering::AcqRel) {
+                    Err(ferrum2_runtime::NetworkResetError)
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+    let registry = OwnerRegistry::new();
+    let (path, context) = udp_test_context_for_server(registry.clone(), reserve_address());
+    let coordinator = network_reset_coordinator(
+        Arc::new(ferrum2_net::NetworkSnapshot::new(1, None, None).unwrap()),
+        registry,
+    );
+    let _failure = coordinator
+        .register_reset_hook(
+            ferrum2_runtime::NetworkResetHookStage::Inbound,
+            Arc::new(FailOnce(std::sync::atomic::AtomicBool::new(true))),
+        )
+        .unwrap();
+    let runtime = ClientNetworkResetRuntime::new(&context, coordinator);
+    let second = Arc::new(ferrum2_net::NetworkSnapshot::new(2, None, None).unwrap());
+    assert!(
+        runtime
+            .reset(
+                Arc::clone(&second),
+                ferrum2_tun::TunNetworkResetReason::NetworkChange
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(runtime.coordinator.status().published_generation(), 2);
+    assert!(!runtime.coordinator.status().admission_open());
+    assert_eq!(
+        context.egress.network_reset_hub().pending_generation(),
+        Some(2)
+    );
+    runtime
+        .reset(
+            Arc::clone(&second),
+            ferrum2_tun::TunNetworkResetReason::Retry,
+        )
+        .await
+        .unwrap();
+    runtime
+        .reset(second, ferrum2_tun::TunNetworkResetReason::Retry)
+        .await
+        .unwrap();
+    assert!(runtime.coordinator.status().admission_open());
+    assert_eq!(
+        context.egress.network_reset_hub().pending_generation(),
+        None
+    );
+    std::fs::remove_file(path).unwrap();
+}

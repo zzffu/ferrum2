@@ -1247,3 +1247,50 @@ hash清单在`target/remediation-audit/m3b-loader-bounds.md`、m3b-loader-ownedp
 实际CNG、Win32目录验证失败的CloseHandle次数只有静态/编译证据；没有真实DLL篡改、
 大文件、adapter或网络操作，也没有启动性能测量。该读取上限不是OS调用的硬期限或
 整体启动RSS/延迟改善声明。整合检查及专用host资格仍待当前DNS/cache源码收口。
+
+### M3h — ordinary reset orchestration (2026-09-07)
+
+D6 now separates capability fencing from storage retirement. `runtime/reset.rs` publishes the
+immutable snapshot before Stack/Router/Outbound/Inbound hooks, then signals and waits for old
+GenerationTask/TCP/UDP registrations. Full rebuild retains its separate cancel/acknowledge path.
+The finite `ordinary_reset_publishes_and_finishes_all_hooks_before_cancelling_owners` test failed
+on the old order and passes after the change; it reaps its helper even on failure. Initial test
+compilation incorrectly derived Debug for NetworkSnapshotPublisher; this fixture error was fixed
+before recording behavioral red evidence.
+
+Client network/reset owns a bounded retained cohort and one shared async driver, covering capture,
+coordinator work, physical monitor retirement and synchronous pool/session retirement/reopening.
+Same-generation retry cannot capture a newer cutoff or retire newly accepted work. DNS idle pools
+fence reuse, then move idle storage out of their mutex before dropping socket/manager owners.
+Runtime drop requests stop; final process cleanup observes sticky hub cleanup failures. The native
+ordinary owner retains the old fenced stack and channels while the callback runs, and only then
+cancels session state and clears/replaces storage. A completed snapshot survives stack-construction
+failure; a later observed underlay change, rather than construction failure, creates the next
+network generation. Managed-state damage after completion uses the latest published generation
+for the separate full rebuild.
+
+Server reset similarly fences the manager in its commit mutex, then retires mappings after the
+owner barrier under packet admission. Review found that awaiting packet admission *inside* the
+hook could wait for network work whose cancellation comes after hooks. A paused-time test failed
+before removing that wait and passes now. Frozen authenticated identity remains across retirement.
+The old `reset_all` interface and its obsolete single-phase test were removed after all callers
+migrated. No new tasks, queue expansion, unsafe code or packet-time allocations were introduced by
+these reset phases; control-plane cohort/closure allocations and validity checks still require
+performance measurement.
+
+Actually run (locked): full runtime and server packages, server60; runtime reset10; UDP generation
+contracts (new staged cases plus existing liveness/removal); TUN safe138; client all-features no-run;
+strict all-targets/all-features clippy for runtime/TUN/client/server; fmt. Cross-process
+`udp_local_e2e`, `socks_udp_lifecycle_e2e`, `tcp_routing_e2e`:17 passed/4 old platform ignores.
+The first command accidentally named a nonexistent `socks_lifecycle` target and exited101 before
+running tests; the corrected complete target command passed. Client tests, including same-published-
+generation retry and pool/hub cases, remain compile-only. Native ordinary reset is compiled, but
+actual Win32 transition/stack-construction fault injection and performance are not claimed passed.
+
+Logs: `target/remediation-audit/m5-reset-*`, `m5-server-fence-lock-{red,green}.log`,
+`m5-server-reset-test-final.log`, `m5-udp-fence-tests.log`, `m5-tun-fence-*.log`.
+D6 predecessor frozen source `e7a99331`: all17 root Rust gates passed, workspace764/5old ignores,
+TUN135/platform69, DNS interop, compile-only gates, GNU check, strict lint/fmt/docs, self-check and
+three finite M4 filters. Python candidate134/rule66/CI80/platform7 and PS nonmutating contract
+passed. WSL RuleSet35 passed with locked offline dependencies in Debian's separate target dir.
+These are ordinary contract results, not host qualification or performance acceptance.

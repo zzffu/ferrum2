@@ -17,9 +17,14 @@ fn dns_udp_pool_reset_synchronously_drops_every_idle_owner() {
         DropCounter(Arc::clone(&drops)),
     ]);
 
-    assert_eq!(pool.reset(), 2);
+    pool.fence(7).unwrap();
+    pool.fence(7).unwrap();
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(pool.reopen(7).is_err());
+    assert_eq!(pool.retire(7), Ok(2));
     assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 2);
-    assert_eq!(pool.reset(), 0, "a repeated reset is idempotent");
+    assert_eq!(pool.retire(7), Ok(0), "a repeated retirement is idempotent");
+    pool.reopen(7).unwrap();
 
     pool.put(0, DropCounter(Arc::clone(&drops)));
     assert_eq!(
