@@ -13,6 +13,7 @@ Commands assume the repository root unless a guide says otherwise. Use `python` 
 | [DNS/RuleSet example](examples/client-v2-dns-rulesets.toml) | Annotated client configuration; replace documentation endpoints and key before deployment |
 | [Managed TUN](config-v2-tun.md) and [TUN example](examples/client-v2-tun.toml) | Windows x86_64, IPv4/IPv6, route/dial policy, UDP associations, lifecycle, and metrics |
 | [Network model v2 migration](network-model-v2-migration.md) | Removed schema/fields and current behavior; no compatibility runtime |
+| [Embedded rocom recording and decoder](architecture/rocom-recording-design.md) | Opt-in sensitive TCP/key evidence, single-process integration, offline decoding, and failure replay |
 
 ## Qualification and performance
 

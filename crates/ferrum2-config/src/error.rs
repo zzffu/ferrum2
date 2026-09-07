@@ -41,6 +41,8 @@ impl ConfigErrorKind {
 pub enum ConfigField {
     Config,
     SchemaVersion,
+    RocomRecordPath,
+    RocomMaxBytes,
     ClientListen,
     ClientServer,
     ServerListen,
@@ -177,6 +179,8 @@ impl ConfigField {
         match self {
             Self::Config => "config",
             Self::SchemaVersion => "schema_version",
+            Self::RocomRecordPath => "rocom.record_path",
+            Self::RocomMaxBytes => "rocom.max_bytes",
             Self::ClientListen => "client.listen",
             Self::ClientServer => "client.server",
             Self::ServerListen => "server.listen",

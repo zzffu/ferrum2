@@ -39,9 +39,9 @@ pub use model::{
     DnsCacheConfig, DnsConfig, DnsEndpointMode, DnsInboundConfig, DnsIngressId,
     DnsPolicyBlueprintBinding, DnsQueryType, DnsRuntimeConfig, DnsServerConfig, DnsStrategy,
     DnsTransport, LoggingConfig, LoggingLevel, MetricsConfig, OutboundDialOptions, ReplayConfig,
-    ResolverRef, RouteAction, RouteNetworkConfig, RouteProtocol, RouteSniffConfig, RuntimeConfig,
-    SchemaVersion, ServerDnsRoute, ServerInboundConfig, ServerOutboundConfig, Sniffers, TunConfig,
-    UdpConfig, UdpFiltering, ValidatedClientConfig, ValidatedServerConfig,
+    ResolverRef, RocomConfig, RouteAction, RouteNetworkConfig, RouteProtocol, RouteSniffConfig,
+    RuntimeConfig, SchemaVersion, ServerDnsRoute, ServerInboundConfig, ServerOutboundConfig,
+    Sniffers, TunConfig, UdpConfig, UdpFiltering, ValidatedClientConfig, ValidatedServerConfig,
 };
 pub use prepared::{
     ClientV2Resources, CompiledRuleSetResource, DialEndpoint, PreparedClientOutboundDescriptor,

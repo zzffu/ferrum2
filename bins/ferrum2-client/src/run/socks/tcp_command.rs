@@ -6,7 +6,7 @@ use ferrum2_core::{ConnectErrorKind, LocalEndpoint, SessionReply as _};
 use ferrum2_observability::{
     Event, Inbound, LogLevel, Outcome, Reason, Role, Stage, TraceRecord, emit,
 };
-use ferrum2_runtime::{CancellationToken, relay_lifecycle};
+use ferrum2_runtime::CancellationToken;
 use ferrum2_shadowsocks::ShadowsocksError;
 use ferrum2_shadowsocks::tokio::TokioFramed;
 use ferrum2_socks5::SocksCommand;
@@ -26,7 +26,8 @@ pub(super) async fn client_connection(
     inbound: usize,
     routing: Arc<ClientRouting>,
 ) {
-    let peer_ip = stream.peer_addr().ok().map(|peer| peer.ip());
+    let peer_addr = stream.peer_addr().ok();
+    let peer_ip = peer_addr.map(|peer| peer.ip());
     let local_addr = stream.local_addr().ok();
     let local_ip = match local_addr {
         Some(SocketAddr::V4(local)) if !local.ip().is_unspecified() => Some(*local.ip()),
@@ -213,14 +214,15 @@ pub(super) async fn client_connection(
         Outcome::Accepted,
     ));
     let mut framed = TokioFramed::new(flow);
-    let relay = relay_lifecycle(
-        &mut stream,
-        &mut framed,
-        context.runtime.idle_timeout,
-        &context.registry,
-        cancellation.cancelled(),
-    )
-    .await;
+    let relay = context
+        .relay_tcp(
+            &mut stream,
+            &mut framed,
+            peer_addr,
+            &target,
+            cancellation.cancelled(),
+        )
+        .await;
     context
         .metrics
         .active_connections_dec(Role::Client, Inbound::Socks5);

@@ -62,6 +62,7 @@ SOCKS5 入站为无认证模式，示例因此只监听回环地址。
 - [文档索引](docs/README.md)：配置、架构、验证流程和性能证据。
 - [DNS 与 RuleSet 配置](docs/config-v2-dns-rulesets.md)。
 - [Windows TUN 配置](docs/config-v2-tun.md)与[旧网络模型迁移说明](docs/network-model-v2-migration.md)。
+- [内嵌 rocom 录制与离线解码](docs/architecture/rocom-recording-design.md)：自动识别 TSF4G 连接，每条连接独立保存原始数据/key JSONL，普通 TCP 不录制；敏感录制须显式开启。
 - [Windows TUN 正确性验证](docs/windows-tun-qualification.md)：真实网卡验证的专用流程。
 - [性能证据说明](docs/performance-evidence.md)：Linux 配对测量和 Windows 主机性能流程。
 - [Rule 性能控制器](tools/performance_rule/README.md)：校准前置检查、请求绑定与有界证据保留。

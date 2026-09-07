@@ -86,6 +86,8 @@ pub(crate) enum RunError {
     StartupRuntime,
     StartupBind,
     StartupProtocol,
+    StartupRecording,
+    RecordingIncomplete,
     ConfigResourceMaterialization,
     DnsResolve,
     RuleCompile,
@@ -144,6 +146,8 @@ impl std::fmt::Display for RunError {
             Self::RuntimeListener => "error[runtime.listener] process: required listener failed",
             Self::RuntimeChild => "error[runtime.child] process: required child failed",
             Self::RuntimeRoot => "error[runtime.root] process: required root stopped",
+            Self::StartupRecording => "error[recording.startup] process: unable to start recording",
+            Self::RecordingIncomplete => "error[recording.incomplete] process: recording is incomplete",
             Self::ShutdownCleanup => {
                 "error[shutdown.cleanup] process: unable to reap all process owners"
             }
@@ -158,6 +162,8 @@ impl RunError {
             Self::StartupRuntime => "startup.runtime",
             Self::StartupBind => "startup.bind",
             Self::StartupProtocol => "startup.protocol",
+            Self::StartupRecording => "recording.startup",
+            Self::RecordingIncomplete => "recording.incomplete",
             Self::ConfigResourceMaterialization => "config.resource_materialization",
             Self::DnsResolve => "dns.resolve",
             Self::RuleCompile => "rule.compile",
@@ -523,7 +529,16 @@ where
     #[cfg(any(not(windows), test))]
     let network_interface_catalog =
         ferrum2_platform_windows::WindowsNetworkInterfaceCatalog::system();
+    let mut recording = None;
     let result = async {
+        recording = config
+            .rocom
+            .as_ref()
+            .map(|settings| {
+                ferrum2_rocom::Recording::start(&settings.record_path, settings.max_bytes)
+                    .map_err(|_| RunError::StartupRecording)
+            })
+            .transpose()?;
         publish_rule_program_metadata(&config, &metrics);
         let selector = config.selector_control();
         let tun_config = config.tun;
@@ -676,6 +691,7 @@ where
         let egress = Arc::new(egress);
         let context = Arc::new(ClientContext {
             inbound: Socks5Inbound::new(),
+            recorder: recording.as_ref().map(ferrum2_rocom::Recording::recorder),
             egress: Arc::clone(&egress),
             #[cfg(test)]
             keys: MethodKeyAdapter::new(MethodSinglePskProvider::new(
@@ -866,11 +882,19 @@ where
         report_result(report)
     }
     .await;
-    if let Some(mut root) = materialization_root {
-        let cleanup = root.cleanup().await;
-        return result.and(cleanup);
-    }
-    result
+    let result = if let Some(mut root) = materialization_root {
+        result.and(root.cleanup().await)
+    } else {
+        result
+    };
+    let recording_result = match recording.as_mut() {
+        Some(recording) => match recording.shutdown() {
+            Ok(report) if report.complete => Ok(()),
+            Ok(_) | Err(_) => Err(RunError::RecordingIncomplete),
+        },
+        None => Ok(()),
+    };
+    result.and(recording_result)
 }
 
 const fn dns_strategy(strategy: ferrum2_config::DnsStrategy) -> DnsStrategy {

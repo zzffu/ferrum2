@@ -1,5 +1,73 @@
 use super::support::*;
 
+const RECORDING_CLIENT: &str = r#"
+schema_version = 2
+[[inbounds]]
+tag = "socks"
+listen = "127.0.0.1:1080"
+outbound = "direct"
+[[outbounds]]
+tag = "direct"
+type = "direct"
+"#;
+
+#[test]
+fn recording_preparation_and_finish_never_touch_capture_storage() {
+    let config_file = TempConfig::new("");
+    let capture_path = config_file.0.with_extension("private-captures");
+    let capture_literal = capture_path.to_string_lossy().replace('\\', "/");
+    let source = format!("{RECORDING_CLIENT}\n[rocom]\nrecord_path = '{capture_literal}'\n");
+    fs::write(&config_file.0, source).expect("write recording config");
+    let prepared = prepare_client(&config_file.0).expect("offline recording preparation");
+    assert!(!capture_path.exists());
+    let config =
+        finish_client_v2(prepared, ClientV2Resources::default()).expect("offline recording finish");
+    let settings = config.rocom.expect("recording enabled");
+    assert!(!format!("{settings:?}").contains("private-captures"));
+    assert!(!capture_path.exists());
+}
+
+#[test]
+fn recording_bounds_and_empty_path_are_field_specific() {
+    for (settings, field) in [
+        ("record_path = ''", ConfigField::RocomRecordPath),
+        (
+            "record_path = 'private'\nmax_bytes = 65535",
+            ConfigField::RocomMaxBytes,
+        ),
+        (
+            "record_path = 'private'\nmax_bytes = 1099511627777",
+            ConfigField::RocomMaxBytes,
+        ),
+    ] {
+        let file = TempConfig::new(&format!("{RECORDING_CLIENT}\n[rocom]\n{settings}\n"));
+        let error = prepare_client(&file.0).expect_err("invalid recording setting");
+        assert_eq!(error.kind(), ConfigErrorKind::Semantic);
+        assert_eq!(error.field(), field);
+        assert!(!format!("{error:?} {error}").contains("private"));
+    }
+    for max_bytes in [65_536, 1_099_511_627_776] {
+        let file = TempConfig::new(&format!(
+            "{RECORDING_CLIENT}\n[rocom]\nrecord_path = 'private'\nmax_bytes = {max_bytes}\n"
+        ));
+        let prepared = prepare_client(&file.0).expect("valid recording boundary");
+        let config = finish_client_v2(prepared, ClientV2Resources::default()).expect("finish");
+        assert_eq!(config.rocom.expect("enabled").max_bytes, max_bytes);
+    }
+}
+
+#[test]
+fn recording_is_client_only_and_rejects_unknown_fields() {
+    let server = TempConfig::new(&format!("{SERVER_V2}\n[rocom]\nrecord_path = 'private'\n"));
+    let error = prepare_server(&server.0).expect_err("server rejects recording");
+    assert_eq!(error.kind(), ConfigErrorKind::Syntax);
+    let client = TempConfig::new(&format!(
+        "{RECORDING_CLIENT}\n[rocom]\nrecord_path = 'private'\nunrecognized = true\n"
+    ));
+    let error = prepare_client(&client.0).expect_err("unknown recording field");
+    assert_eq!(error.kind(), ConfigErrorKind::Syntax);
+}
+
 #[test]
 fn endpoint_and_ruleset_failures_are_field_specific_and_redacted() {
     let cases = [

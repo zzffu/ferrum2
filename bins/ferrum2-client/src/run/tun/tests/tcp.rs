@@ -97,6 +97,7 @@ final = "resolver"
     let registry = OwnerRegistry::new();
     let context = Arc::new(ClientContext {
         inbound: Socks5Inbound::new(),
+        recorder: None,
         egress: Arc::new(ClientEgressEngine::new(
             outbounds,
             TokioConnector::new(TcpConnector::with_resolution_adapters(
@@ -197,6 +198,7 @@ final = "resolver"
     });
     let direct_context = Arc::new(ClientContext {
         inbound: Socks5Inbound::new(),
+        recorder: None,
         egress: Arc::new(ClientEgressEngine::new(
             direct_outbounds,
             TokioConnector::new(TcpConnector::with_resolution_adapters(
