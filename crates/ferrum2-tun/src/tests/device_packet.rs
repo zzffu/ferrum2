@@ -195,6 +195,29 @@ fn udp_injection_preserves_the_canonical_packet_reject_reason() {
         device.inject_udp_response(mixed, b"mixed family"),
         crate::UdpInjectOutcome::Rejected(crate::TunRejectReason::InvalidDestination)
     );
+    for (local, remote, reason) in [
+        (
+            "198.18.0.1:10000",
+            "0.0.0.0:53",
+            crate::TunRejectReason::InvalidSource,
+        ),
+        (
+            "255.255.255.255:10000",
+            "192.0.2.1:53",
+            crate::TunRejectReason::InvalidDestination,
+        ),
+        (
+            "198.18.0.1:0",
+            "192.0.2.1:53",
+            crate::TunRejectReason::InvalidTransportLength,
+        ),
+    ] {
+        let endpoints = UdpDatagramEndpoints::new(local.parse().unwrap(), remote.parse().unwrap());
+        assert_eq!(
+            device.inject_udp_response(endpoints, b"invalid generated endpoint"),
+            crate::UdpInjectOutcome::Rejected(reason),
+        );
+    }
     assert!(!device.has_output());
 }
 

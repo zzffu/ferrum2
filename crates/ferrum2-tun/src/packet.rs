@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
 mod control;
@@ -281,6 +281,46 @@ pub(crate) struct PacketParser {
 impl PacketParser {
     pub(crate) const fn new(families: Families) -> Self {
         Self { families }
+    }
+
+    /// Validates endpoints of locally constructed, fixed-header UDP responses.
+    /// The constructor owns wire lengths and checksums; untrusted packets still
+    /// pass through the complete parser.
+    pub(crate) fn validate_udp_response(
+        self,
+        source: SocketAddr,
+        destination: SocketAddr,
+        packet_len: usize,
+    ) -> Result<(), PacketRejectReason> {
+        let (enabled, valid_source, valid_destination) = match (source.ip(), destination.ip()) {
+            (IpAddr::V4(source), IpAddr::V4(destination)) => (
+                self.families.ipv4,
+                ipv4_unicast(source),
+                ipv4_unicast(destination),
+            ),
+            (IpAddr::V6(source), IpAddr::V6(destination)) => (
+                self.families.ipv6,
+                ipv6_unicast(source),
+                ipv6_unicast(destination),
+            ),
+            _ => return Err(PacketRejectReason::InvalidDestination),
+        };
+        if !enabled {
+            return Err(PacketRejectReason::DisabledFamily);
+        }
+        if packet_len > MAX_REASSEMBLED_PACKET {
+            return Err(PacketRejectReason::InvalidLength);
+        }
+        if !valid_source {
+            return Err(PacketRejectReason::InvalidSource);
+        }
+        if !valid_destination {
+            return Err(PacketRejectReason::InvalidDestination);
+        }
+        if source.port() == 0 || destination.port() == 0 {
+            return Err(PacketRejectReason::InvalidTransport);
+        }
+        Ok(())
     }
 
     pub(crate) fn parse(self, bytes: &[u8]) -> ParseResult {

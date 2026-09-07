@@ -1,8 +1,9 @@
+#[cfg(any(test, all(feature = "bench-support", not(feature = "live-backend"))))]
+use crate::packet::ParsedPacket;
 use crate::packet::map_packet_reject;
 use crate::packet::{
     self, ControlContext, ControlRateLimiter, Families, IpFamily, LocalControlKind, PacketParser,
-    ParsedIpPacket, ParsedPacket, TransportMetadata, internet_checksum as checksum,
-    write_local_control_error,
+    ParsedIpPacket, TransportMetadata, internet_checksum as checksum, write_local_control_error,
 };
 use crate::udp::{InjectOutcome as UdpInjectOutcome, UdpDatagramEndpoints};
 use crate::{INGRESS_SLOTS, TunRejectReason};
@@ -254,17 +255,12 @@ impl MemoryDevice {
                 return UdpInjectOutcome::Rejected(map_packet_reject(reason));
             }
         };
-        match self
-            .validator
-            .parse_ingress(&self.output[index].bytes[..length])
-        {
-            Ok(ParsedPacket::Complete(_)) => {}
-            Ok(ParsedPacket::Fragment(_)) => {
-                return UdpInjectOutcome::Rejected(TunRejectReason::FragmentMalformed);
-            }
-            Err(rejected) => {
-                return UdpInjectOutcome::Rejected(map_packet_reject(rejected.reason));
-            }
+        if let Err(reason) = self.validator.parser.validate_udp_response(
+            endpoints.target(),
+            endpoints.source(),
+            length,
+        ) {
+            return UdpInjectOutcome::Rejected(map_packet_reject(reason));
         }
         self.output[index].len = length;
         self.output_count = 1;
@@ -317,7 +313,7 @@ pub(crate) fn write_udp_response(
             let packet = output
                 .get_mut(..length)
                 .ok_or(packet::PacketRejectReason::InvalidLength)?;
-            packet.fill(0);
+            packet[..28].fill(0);
             packet[0] = 0x45;
             packet[2..4].copy_from_slice(
                 &u16::try_from(length)
@@ -340,7 +336,7 @@ pub(crate) fn write_udp_response(
             let packet = output
                 .get_mut(..length)
                 .ok_or(packet::PacketRejectReason::InvalidLength)?;
-            packet.fill(0);
+            packet[..48].fill(0);
             packet[0] = 0x60;
             packet[4..6].copy_from_slice(
                 &u16::try_from(udp_len)
