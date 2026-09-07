@@ -9,7 +9,8 @@ use crate::model::{
 };
 use crate::raw::RawTun;
 
-use super::common::{sockets_alias, validate_tag};
+use super::common::validate_tag;
+use super::listener::sockets_alias;
 
 pub(super) struct ValidatedTun {
     pub(super) tag: String,
@@ -471,7 +472,7 @@ pub(crate) fn validate_finished_client_endpoints(
         if config
             .inbounds
             .iter()
-            .any(|inbound| SocketAddr::V4(inbound.listen) == server)
+            .any(|inbound| sockets_alias(SocketAddr::V4(inbound.listen), server))
         {
             return Err(ConfigError::semantic(ConfigField::OutboundsServer));
         }

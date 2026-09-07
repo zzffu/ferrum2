@@ -17,6 +17,8 @@ use crate::model::{
 };
 use crate::raw::{RawDns, RawLogging, RawMetrics, RawReplay, RawRuntime, RawUdp, SecretString};
 
+use super::listener::{sockets_alias, validate_listener};
+
 pub(super) fn dns_detour_tags(raw: &RawDns) -> Vec<&str> {
     raw.servers
         .as_deref()
@@ -85,15 +87,19 @@ pub(super) fn validate_dns(
             return Err(ConfigError::semantic(ConfigField::DnsInboundsTag));
         }
         let listen = parse_socket(&inbound.listen, ConfigField::DnsInboundsListen)?;
-        if context
-            .ordinary_listens
-            .iter()
-            .chain(inbounds.iter().map(|item: &DnsInboundConfig| &item.listen))
-            .any(|other| sockets_alias(*other, listen))
-            || context
-                .outbound_servers
+        validate_listener(
+            listen,
+            context
+                .ordinary_listens
                 .iter()
-                .any(|server| sockets_alias(*server, listen))
+                .copied()
+                .chain(inbounds.iter().map(|item: &DnsInboundConfig| item.listen)),
+            ConfigField::DnsInboundsListen,
+        )?;
+        if context
+            .outbound_servers
+            .iter()
+            .any(|server| sockets_alias(*server, listen))
         {
             return Err(ConfigError::semantic(ConfigField::DnsInboundsListen));
         }
@@ -296,12 +302,6 @@ pub(super) fn parse_socket(value: &str, field: ConfigField) -> Result<SocketAddr
     } else {
         Ok(address)
     }
-}
-
-pub(super) fn sockets_alias(left: SocketAddr, right: SocketAddr) -> bool {
-    left.port() == right.port()
-        && left.is_ipv4() == right.is_ipv4()
-        && (left.ip() == right.ip() || left.ip().is_unspecified() || right.ip().is_unspecified())
 }
 
 pub(super) fn valid_tls_name(name: &str) -> bool {
@@ -516,8 +516,13 @@ pub(super) fn validate_metrics(
         return Ok(None);
     };
     let listen = parse_endpoint(&raw.listen, ConfigField::MetricsListen)?;
-    if !listen.ip().is_loopback() || proxy_listens.contains(&listen) {
+    if !listen.ip().is_loopback() {
         return Err(ConfigError::semantic(ConfigField::MetricsListen));
     }
+    validate_listener(
+        SocketAddr::V4(listen),
+        proxy_listens.iter().copied().map(SocketAddr::V4),
+        ConfigField::MetricsListen,
+    )?;
     Ok(Some(MetricsConfig { listen }))
 }

@@ -19,6 +19,12 @@ dependency-first first-hop/domain summaries are the shared interpretation for pr
 validation; do not reintroduce root-to-leaf path expansion or recursive raw-tag interpretation.
 The public core/rule compiler still validates its independently supplied inputs.
 
+Private `validation/listener` owns the same-family wildcard/equal-address relation used
+by ordinary listeners, DNS, metrics and post-materialization endpoint-loop checks.
+All currently declared listeners include TCP, so optional UDP does not make overlapping
+addresses disjoint. Do not treat the TUN pseudo-inbound as a socket or infer IPv4/IPv6
+dual-stack aliasing without the consuming socket's contract.
+
 ## Verification
 
 Run:

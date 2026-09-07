@@ -2,6 +2,7 @@ mod v2_prepare_contract {
     mod dependencies;
     mod dns_policy;
     mod finish;
+    mod listeners;
     mod prepare;
     mod resources;
     mod ruleset;

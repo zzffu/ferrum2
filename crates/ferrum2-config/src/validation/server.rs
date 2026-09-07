@@ -14,6 +14,7 @@ use super::common::{
     validate_runtime, validate_tag, validate_udp,
 };
 use super::graph::{compile_graph_roots, validate_outbound_dial_options, validate_route_network};
+use super::listener::validate_listener;
 use super::v2;
 
 pub(crate) struct PreparedServerValidation {
@@ -196,9 +197,11 @@ pub(super) fn validate_server_graph(
             return Err(ConfigError::semantic(ConfigField::InboundsTag));
         }
         let listen = parse_endpoint(&inbound.listen, ConfigField::InboundsListen)?;
-        if listens.contains(&listen) {
-            return Err(ConfigError::semantic(ConfigField::InboundsListen));
-        }
+        validate_listener(
+            std::net::SocketAddr::V4(listen),
+            listens.iter().copied().map(std::net::SocketAddr::V4),
+            ConfigField::InboundsListen,
+        )?;
         listens.push(listen);
     }
     for (index, outbound) in outbounds.iter().enumerate() {

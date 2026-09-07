@@ -17,6 +17,7 @@ use super::common::{
     validate_runtime, validate_tag, validate_udp,
 };
 use super::graph::{compile_graph_roots, validate_outbound_dial_options, validate_route_network};
+use super::listener::{sockets_alias, validate_listener};
 use super::tun::validate_tun;
 use super::v2;
 
@@ -241,8 +242,12 @@ pub(super) fn validate_client_graph(
         } else {
             SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0)
         };
-        if index < socks_inbound_count && listens.contains(&listen) {
-            return Err(ConfigError::semantic(ConfigField::InboundsListen));
+        if index < socks_inbound_count {
+            validate_listener(
+                SocketAddr::V4(listen),
+                listens.iter().copied().map(SocketAddr::V4),
+                ConfigField::InboundsListen,
+            )?;
         }
         listens.push(listen);
     }
@@ -306,7 +311,7 @@ pub(super) fn validate_client_graph(
                 )?;
                 if listens
                     .iter()
-                    .any(|listen| SocketAddr::V4(*listen) == server)
+                    .any(|listen| sockets_alias(SocketAddr::V4(*listen), server))
                 {
                     return Err(ConfigError::semantic(ConfigField::OutboundsServer));
                 }
