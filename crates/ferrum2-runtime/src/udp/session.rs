@@ -404,7 +404,6 @@ impl PendingUdpDatagram {
     where
         C: FnOnce() -> Result<(), E>,
     {
-
         let reservation = self
             .reservation
             .take()
