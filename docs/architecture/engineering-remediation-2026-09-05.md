@@ -57,6 +57,8 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 
 | M4e / C5 | sniff使用具名attempt区分transport、parser及collector终态；client TCP不再错误记为UDP/unknown；两端私有sniff observation owner删除nullable/bool入口 | server指标行为测试、m0 server TCP匹配/超时及完整prefix replay通过；client compile-only，两bin及m0严格lint/fmt通过。尝试SOCKS client TCP sniff fixture被现有配置正确拒绝，删除无效新fixture；client TCP sniff仅支持TUN，未放宽配置或执行client测试 |
 
+| M4整合 / `e7a99331` | 受影响批次冻结后的普通门禁；补齐新增network owner字段fixture数组长度、SS self dev依赖workspace继承、M4协议caller source bundle | workspace764通过/5旧ignored，safe TUN135/platform69；client及rule qualification compile-only、DNS interop、GNU check、全workspace strictlint/fmt与self-check通过。Python candidate134/rule66/CI80/platform7、PS非变更合同通过；WSL RuleSet35通过。C8保留accept ErrorKind，runtime accept5通过。真实host/perf尚未运行 |
+
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
 剩余主要实施是D6普通network reset的publish→hooks→cancel→retire顺序与同代重试，
