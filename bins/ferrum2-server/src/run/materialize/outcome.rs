@@ -133,12 +133,16 @@ pub(super) const fn classify_rule_set_load_error_kind(kind: RuleSetLoadErrorKind
         | RuleSetLoadErrorKind::InvalidSource
         | RuleSetLoadErrorKind::InvalidLoaderConfig => RunError::ConfigResourceMaterialization,
         RuleSetLoadErrorKind::CacheDirectory
+        | RuleSetLoadErrorKind::CacheBusy
+        | RuleSetLoadErrorKind::CacheLimit
+        | RuleSetLoadErrorKind::CacheCleanup
         | RuleSetLoadErrorKind::CacheRead
         | RuleSetLoadErrorKind::CacheMetadata
         | RuleSetLoadErrorKind::CacheDigest
         | RuleSetLoadErrorKind::CacheWrite
         | RuleSetLoadErrorKind::NotModifiedWithoutCache => RunError::RuleSetCache,
         RuleSetLoadErrorKind::Download(_)
+        | RuleSetLoadErrorKind::Cancelled
         | RuleSetLoadErrorKind::DownloadTimeout
         | RuleSetLoadErrorKind::DownloadBody
         | RuleSetLoadErrorKind::DownloadOverflow

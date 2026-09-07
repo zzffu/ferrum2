@@ -6,7 +6,7 @@ use ferrum2_rule::{RuleEngineRegistry, RuleSetId};
 use tokio::time::Instant;
 
 use crate::download::RuleSetDownloader;
-use crate::error::{RuleSetLoadError, RuleSetLoadErrorKind, rule_compile_load_error_kind};
+use crate::error::{RuleSetLoadError, RuleSetLoadErrorKind};
 use crate::loader::{RuleSetLoadDisposition, RuleSetLoader};
 use crate::snapshot::{MaterializedRuleSets, RuleSetEntry};
 
@@ -54,7 +54,7 @@ pub struct RuleSetRefreshService<D> {
 
 impl<D> RuleSetRefreshService<D>
 where
-    D: RuleSetDownloader,
+    D: RuleSetDownloader + 'static,
 {
     fn from_materialized(
         loader: Arc<RuleSetLoader<D>>,
@@ -87,57 +87,14 @@ where
         let Some(entry) = self.entries.get(index) else {
             return RuleSetRefreshOutcome::Failed(RuleSetLoadErrorKind::RegistryCompile);
         };
-        let current = self.registry.snapshot();
-        let Some(descriptor) = current.rule_set(entry.rule_set) else {
-            return RuleSetRefreshOutcome::Failed(RuleSetLoadErrorKind::RegistryCompile);
-        };
-        let expected_capabilities = descriptor.capabilities();
-        let Some(generation) = current.generation().checked_add(1) else {
-            return RuleSetRefreshOutcome::Failed(RuleSetLoadErrorKind::RegistryCompile);
-        };
-        let loaded = match self
-            .loader
-            .load_with_capabilities(&entry.source, generation, Some(expected_capabilities))
+        self.loader
+            .refresh(&entry.source, Arc::clone(&self.registry), entry.rule_set)
             .await
-        {
-            Ok(loaded) => loaded,
-            Err(error) => return RuleSetRefreshOutcome::Failed(error.kind()),
-        };
-        match loaded.disposition {
-            RuleSetLoadDisposition::NotModified => return RuleSetRefreshOutcome::NotModified,
-            RuleSetLoadDisposition::OfflineCache | RuleSetLoadDisposition::StaleCache => {
-                return RuleSetRefreshOutcome::RetainedCache(loaded.disposition);
-            }
-            RuleSetLoadDisposition::Downloaded => {}
-        }
-
-        let mut builder = match current.builder_for_generation(generation) {
-            Ok(builder) => builder,
-            Err(error) => {
-                return RuleSetRefreshOutcome::Failed(rule_compile_load_error_kind(error));
-            }
-        };
-        if let Err(error) = builder.replace_shared_rule_set(entry.rule_set, loaded.match_set) {
-            return RuleSetRefreshOutcome::Failed(rule_compile_load_error_kind(error));
-        }
-        let next = match builder.build() {
-            Ok(next) => next,
-            Err(error) => {
-                return RuleSetRefreshOutcome::Failed(rule_compile_load_error_kind(error));
-            }
-        };
-        match self.registry.publish(next) {
-            Ok(previous) => RuleSetRefreshOutcome::Updated {
-                previous_generation: previous.generation(),
-                generation,
-            },
-            Err(_) => RuleSetRefreshOutcome::Failed(RuleSetLoadErrorKind::RegistryPublish),
-        }
     }
 
     /// Runs until process quiescing. Dropping an in-flight download future
-    /// closes its body and removes its `NamedTempFile`; all completed refreshes
-    /// were already atomically published.
+    /// signals cancellation; the loader retains body/worker cleanup until its
+    /// retryable shutdown joins it. Completed refreshes publish complete snapshots.
     pub async fn run_until<F>(&self, stop: F) -> Result<(), RuleSetLoadError>
     where
         F: Future<Output = ()>,
@@ -209,7 +166,7 @@ impl MaterializedRuleSets {
         loader: Arc<RuleSetLoader<D>>,
     ) -> Result<RuleSetRefreshService<D>, RuleSetLoadError>
     where
-        D: RuleSetDownloader,
+        D: RuleSetDownloader + 'static,
     {
         RuleSetRefreshService::from_materialized(loader, self)
     }

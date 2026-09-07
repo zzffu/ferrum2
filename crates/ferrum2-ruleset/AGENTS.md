@@ -12,6 +12,13 @@ Keep `source`, `download`, `https`, `cache`, `loader`, `snapshot`, `refresh`, an
 owner seams. The crate root remains a curated façade; do not reintroduce a monolithic loader or
 runtime re-export layer.
 
+`cache_work` retains actual operation handles and admission until observed joins, independently
+of cancellable callers. Its workers own all cache IO and compiler work. The cache is one bounded
+container per hashed key, verified from the same held file; no two-file compatibility reader.
+Hold the directory lease until all work is joined. Build a complete refresh successor before
+replacing its cache; cancellation after replacement may retain complete new disk and old live
+generations. Never remove the old target to emulate replacement.
+
 Do not add a local-source configuration mode. A local file in this crate is only a verified cache
 entry bound to its remote URL, digest, metadata schema, capabilities, and generation. Preserve the
 same resolver mode, immutable detour, and one absolute deadline through HTTPS redirects. A

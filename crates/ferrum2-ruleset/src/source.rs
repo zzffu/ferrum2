@@ -85,6 +85,9 @@ impl RuleSetRemoteSource {
         detour: Option<EgressPlanHandle>,
         update_interval: Option<Duration>,
     ) -> Result<Self, RuleSetLoadError> {
+        if url.len() > crate::cache::MAX_URL_BYTES {
+            return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::InvalidSource));
+        }
         if update_interval.is_some_and(|interval| interval.is_zero()) {
             return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::InvalidSource));
         }
@@ -94,6 +97,7 @@ impl RuleSetRemoteSource {
         let parsed = Url::parse(url)
             .map_err(|_| RuleSetLoadError::new(RuleSetLoadErrorKind::InvalidSource))?;
         if parsed.scheme() != "https"
+            || parsed.as_str().len() > crate::cache::MAX_URL_BYTES
             || !matches!(parsed.host(), Some(Host::Domain(_)))
             || !parsed.username().is_empty()
             || parsed.password().is_some()

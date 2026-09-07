@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::dependency::DependencyNode;
 use crate::error::{ConfigError, ConfigField};
 use crate::prepared::PreparedEgressRef;
-use crate::raw::{RawChain, RawClientRoot, RawDns, RawSelector, RawServerRoot};
+use crate::raw::{RawChain, RawClientRoot, RawDns, RawRoute, RawSelector, RawServerRoot};
 
 use super::common::{validate_count, validate_tag};
 
@@ -40,7 +40,7 @@ impl AdmittedEgressGraph {
         let outbounds = raw.outbounds.as_deref().unwrap_or(&[]);
         validate_count(outbounds.len(), ConfigField::Outbounds)?;
         admit_cohorts(raw.selectors.as_deref(), raw.chains.as_deref())?;
-        admit_dns(raw.dns.as_ref(), DnsRole::Client)?;
+        admit_resources(raw.dns.as_ref(), raw.route.as_ref(), DnsRole::Client)?;
         if let Some(tun) = &raw.tun {
             validate_tag(&tun.tag, ConfigField::TunTag)?;
         }
@@ -70,7 +70,7 @@ impl AdmittedEgressGraph {
         validate_count(inbounds.len(), ConfigField::Inbounds)?;
         validate_count(outbounds.len(), ConfigField::Outbounds)?;
         admit_cohorts(raw.selectors.as_deref(), None)?;
-        admit_dns(raw.dns.as_ref(), DnsRole::Server)?;
+        admit_resources(raw.dns.as_ref(), raw.route.as_ref(), DnsRole::Server)?;
         Self::build(
             inbounds.iter().map(|inbound| inbound.tag.as_str()),
             outbounds.iter().map(|outbound| OutboundInput {
@@ -320,7 +320,15 @@ enum DnsRole {
     Server,
 }
 
-fn admit_dns(dns: Option<&RawDns>, role: DnsRole) -> Result<(), ConfigError> {
+fn admit_resources(
+    dns: Option<&RawDns>,
+    route: Option<&RawRoute>,
+    role: DnsRole,
+) -> Result<(), ConfigError> {
+    let rule_set_count = route.map_or(0, |route| route.rule_set.len());
+    if rule_set_count != 0 {
+        validate_count(rule_set_count, ConfigField::RouteRuleSet)?;
+    }
     let Some(dns) = dns else {
         return Ok(());
     };

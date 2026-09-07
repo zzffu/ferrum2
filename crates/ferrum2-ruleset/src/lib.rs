@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-mod blocking;
 mod cache;
+mod cache_work;
 mod download;
 mod error;
 mod https;

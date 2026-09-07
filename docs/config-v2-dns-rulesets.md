@@ -133,8 +133,9 @@ same server-scoped response.
 
 ## Cache and refresh
 
-Each remote declaration uses `<tag>.srs` and `<tag>.meta` below
-`rule_set_loader.cache_dir`. Metadata binds the URL, validators, digest, SRS
+Up to 64 remote declarations use separate `rs-<SHA256(tag)>.frs-cache` containers
+below `rule_set_loader.cache_dir`. Each container atomically binds bounded header,
+SRS payload and metadata; reads verify and decode the same held file. Metadata binds the URL, validators, digest, SRS
 version, matcher capabilities, and generation. Downloads use one absolute
 deadline, the selected resolution mode, and one fixed detour snapshot on every
 redirect, plus conditional ETag/Last-Modified requests, a temporary file,
@@ -151,6 +152,16 @@ generation unchanged.
 Cache reads and SRS decoding/compilation that run on blocking workers remain
 owned by the refresh root; cancellation stops accepting new work and shutdown
 joins every already-started worker before the root reports completion.
+One loader holds an exclusive directory lock until all work is joined; another loader
+using that directory receives a cache-busy failure. At most two actual operations are
+retained, including cancelled callers' unfinished work; streaming handoff has two
+32 KiB chunks per operation. Filesystem operations may outlive the caller deadline.
+The old `.srs`/`.meta` cache is neither read nor migrated and cannot support offline
+startup after this change; old or unrelated files are not deleted.
+Cancellation after atomic replacement may leave a complete newer cache with the
+complete older live snapshot. Windows can refuse replacement while a reader holds
+the destination; the old cache remains intact. Atomic visibility is not a guarantee
+of power-loss durability.
 
 DNS A and AAAA entries are cached separately by DNS server, canonical name,
 query type, and resolver generation. Positive and negative TTLs are honored.

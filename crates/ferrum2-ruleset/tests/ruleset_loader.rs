@@ -14,6 +14,7 @@ use ferrum2_ruleset::{
     RuleSetDownloader, RuleSetLoadDisposition, RuleSetLoadErrorKind, RuleSetLoader,
     RuleSetLoaderConfig, RuleSetRefreshOutcome, RuleSetRemoteSource, materialize_rule_sets,
 };
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 
@@ -91,6 +92,27 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn container_path(cache: &TempDir) -> PathBuf {
+    cache.path().join(format!(
+        "rs-{}.frs-cache",
+        hex::encode(Sha256::digest(b"ai"))
+    ))
+}
+
+async fn load_once(
+    cache: &TempDir,
+    downloader: FakeDownloader,
+    generation: u64,
+) -> Result<ferrum2_ruleset::LoadedRuleSet, ferrum2_ruleset::RuleSetLoadError> {
+    let loader = RuleSetLoader::new(config(cache), downloader);
+    let result = loader.load(&source(), generation).await;
+    loader
+        .shutdown()
+        .await
+        .expect("confirmed cache-owner shutdown");
+    result
+}
+
 fn config(cache: &TempDir) -> RuleSetLoaderConfig {
     RuleSetLoaderConfig::new(cache.path().to_path_buf(), Duration::from_secs(2), 4)
         .expect("loader config")
@@ -123,8 +145,8 @@ async fn first_download_is_strictly_compiled_cached_and_conditionally_reused() {
     assert_eq!(first.generation(), 11);
     assert_eq!(first.srs_version(), 2);
     assert!(first.capabilities().domain_keyword);
-    assert!(cache.path().join("ai.srs").is_file());
-    assert!(cache.path().join("ai.meta").is_file());
+    assert!(container_path(&cache).is_file());
+    assert!(!cache.path().join("ai.meta").exists());
 
     let second = loader.load(&source(), 12).await.expect("conditional load");
     assert_eq!(second.disposition(), RuleSetLoadDisposition::NotModified);
@@ -256,17 +278,11 @@ async fn four_pinned_binary_rule_sets_load_into_one_publishable_snapshot() {
 async fn offline_or_invalid_refresh_keeps_the_last_complete_cache() {
     let cache = TempDir::new().expect("cache");
     let initial = FakeDownloader::new([FakeResult::Download(AI_SRS.to_vec())]);
-    RuleSetLoader::new(config(&cache), initial)
-        .load(&source(), 3)
-        .await
-        .expect("seed cache");
-    let original = std::fs::read(cache.path().join("ai.srs")).expect("cached SRS");
+    load_once(&cache, initial, 3).await.expect("seed cache");
+    let original = std::fs::read(container_path(&cache)).expect("cached SRS");
 
     let offline = FakeDownloader::new([FakeResult::Error(RuleSetDownloadErrorKind::Resolution)]);
-    let stale = RuleSetLoader::new(config(&cache), offline)
-        .load(&source(), 4)
-        .await
-        .expect("offline cache");
+    let stale = load_once(&cache, offline, 4).await.expect("offline cache");
     assert_eq!(stale.disposition(), RuleSetLoadDisposition::OfflineCache);
     assert_eq!(
         stale.degraded_failure(),
@@ -277,8 +293,7 @@ async fn offline_or_invalid_refresh_keeps_the_last_complete_cache() {
     assert_eq!(stale.generation(), 3);
 
     let invalid = FakeDownloader::new([FakeResult::Download(b"not an SRS".to_vec())]);
-    let stale = RuleSetLoader::new(config(&cache), invalid)
-        .load(&source(), 5)
+    let stale = load_once(&cache, invalid, 5)
         .await
         .expect("invalid refresh retains cache");
     assert_eq!(stale.disposition(), RuleSetLoadDisposition::StaleCache);
@@ -287,7 +302,7 @@ async fn offline_or_invalid_refresh_keeps_the_last_complete_cache() {
         Some(RuleSetLoadErrorKind::Decode(_))
     ));
     assert_eq!(
-        std::fs::read(cache.path().join("ai.srs")).expect("cached SRS"),
+        std::fs::read(container_path(&cache)).expect("cached SRS"),
         original
     );
     let mut cache_files: Vec<_> = std::fs::read_dir(cache.path())
@@ -298,8 +313,8 @@ async fn offline_or_invalid_refresh_keeps_the_last_complete_cache() {
     assert_eq!(
         cache_files,
         [
-            std::ffi::OsString::from("ai.meta"),
-            std::ffi::OsString::from("ai.srs")
+            std::ffi::OsString::from(".ferrum2-ruleset.lock"),
+            container_path(&cache).file_name().unwrap().to_owned()
         ]
     );
 }
@@ -307,11 +322,11 @@ async fn offline_or_invalid_refresh_keeps_the_last_complete_cache() {
 #[tokio::test]
 async fn initial_snapshot_retains_each_degraded_cache_failure() {
     let cache = TempDir::new().expect("cache");
-    RuleSetLoader::new(
-        config(&cache),
+    load_once(
+        &cache,
         FakeDownloader::new([FakeResult::Download(AI_SRS.to_vec())]),
+        3,
     )
-    .load(&source(), 3)
     .await
     .expect("seed cache");
 
@@ -336,8 +351,7 @@ async fn initial_snapshot_retains_each_degraded_cache_failure() {
 async fn startup_without_a_valid_cache_fails_closed() {
     let cache = TempDir::new().expect("cache");
     let downloader = FakeDownloader::new([FakeResult::Error(RuleSetDownloadErrorKind::Resolution)]);
-    let error = RuleSetLoader::new(config(&cache), downloader)
-        .load(&source(), 1)
+    let error = load_once(&cache, downloader, 1)
         .await
         .expect_err("no fallback cache");
     assert_eq!(
@@ -350,23 +364,21 @@ async fn startup_without_a_valid_cache_fails_closed() {
 async fn corrupt_or_incomplete_cache_is_never_an_offline_fallback() {
     let cache = TempDir::new().expect("cache");
     let initial = FakeDownloader::new([FakeResult::Download(AI_SRS.to_vec())]);
-    RuleSetLoader::new(config(&cache), initial)
-        .load(&source(), 3)
-        .await
-        .expect("seed cache");
+    load_once(&cache, initial, 3).await.expect("seed cache");
 
-    std::fs::write(cache.path().join("ai.srs"), b"corrupt").expect("corrupt cache");
+    let mut corrupt = std::fs::read(container_path(&cache)).expect("container");
+    corrupt[64] ^= 1;
+    std::fs::write(container_path(&cache), &corrupt).expect("corrupt payload");
     let offline = FakeDownloader::new([FakeResult::Error(RuleSetDownloadErrorKind::Resolution)]);
-    let error = RuleSetLoader::new(config(&cache), offline)
-        .load(&source(), 4)
+    let error = load_once(&cache, offline, 4)
         .await
         .expect_err("corrupt cache must not be served");
     assert_eq!(error.kind(), RuleSetLoadErrorKind::CacheDigest);
 
-    std::fs::remove_file(cache.path().join("ai.meta")).expect("remove metadata");
+    std::fs::write(container_path(&cache), &corrupt[..corrupt.len() - 1])
+        .expect("truncate metadata");
     let not_modified = FakeDownloader::new([FakeResult::NotModified]);
-    let error = RuleSetLoader::new(config(&cache), not_modified)
-        .load(&source(), 4)
+    let error = load_once(&cache, not_modified, 4)
         .await
         .expect_err("an incomplete cache cannot satisfy 304");
     assert_eq!(error.kind(), RuleSetLoadErrorKind::CacheMetadata);
@@ -446,6 +458,7 @@ async fn capability_shape_change_never_replaces_the_cache_or_live_snapshot() {
     let materialized = materialize_rule_sets(&loader, vec![source()], 1)
         .await
         .expect("initial domain snapshot");
+    let original_container = std::fs::read(container_path(&cache)).expect("original container");
     let registry = materialized.shared_registry();
     let ids = materialized.rule_set_ids().to_vec();
     let service = materialized
@@ -468,8 +481,8 @@ async fn capability_shape_change_never_replaces_the_cache_or_live_snapshot() {
     );
     assert!(!compiled.matches_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 8, 8))));
     assert_eq!(
-        std::fs::read(cache.path().join("ai.srs")).expect("retained cached SRS"),
-        AI_SRS
+        std::fs::read(container_path(&cache)).expect("retained cached SRS"),
+        original_container
     );
 }
 

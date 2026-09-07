@@ -5,7 +5,7 @@ use ferrum2_rule::{RuleEngineRegistry, RuleEngineSnapshotBuilder, RuleSetId};
 
 use crate::download::RuleSetDownloader;
 use crate::error::{RuleSetLoadError, RuleSetLoadErrorKind, rule_compile_load_error};
-use crate::loader::{RuleSetLoadDisposition, RuleSetLoader};
+use crate::loader::{LoadedRuleSet, RuleSetLoadDisposition, RuleSetLoader};
 use crate::source::RuleSetRemoteSource;
 
 pub(crate) struct RuleSetEntry {
@@ -73,16 +73,16 @@ pub async fn materialize_rule_sets<D>(
     generation: u64,
 ) -> Result<MaterializedRuleSets, RuleSetLoadError>
 where
-    D: RuleSetDownloader,
+    D: RuleSetDownloader + 'static,
 {
-    let mut loaded = Vec::new();
-    loaded
-        .try_reserve_exact(sources.len())
-        .map_err(|_| RuleSetLoadError::new(RuleSetLoadErrorKind::Allocation))?;
-    for source in &sources {
-        loaded.push(loader.load(source, generation).await?);
-    }
+    loader.materialize(sources, generation).await
+}
 
+pub(crate) fn build_materialized(
+    sources: Vec<RuleSetRemoteSource>,
+    loaded: Vec<LoadedRuleSet>,
+    generation: u64,
+) -> Result<MaterializedRuleSets, RuleSetLoadError> {
     let mut builder = RuleEngineSnapshotBuilder::new(generation);
     let mut rule_set_ids = Vec::new();
     let mut dispositions = Vec::new();

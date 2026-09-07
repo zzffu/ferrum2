@@ -1,6 +1,54 @@
 use super::support::*;
 
 #[test]
+fn rule_set_cohort_is_admitted_before_endpoint_preparation_for_both_roles() {
+    fn with_rule_sets(base: &str, total: usize) -> String {
+        let mut source = base.to_owned();
+        for index in 1..total {
+            source.push_str(&format!(
+                "\n[[route.rule_set]]\ntag = \"extra-{index}\"\ntype = \"remote\"\n\
+                 url = \"https://rules.example.test/{index}.srs\"\n\
+                 download_resolver = \"system\"\n"
+            ));
+        }
+        source
+    }
+
+    let client = TempConfig::new(&with_rule_sets(CLIENT_V2, /* total: */ 64));
+    let server = TempConfig::new(&with_rule_sets(SERVER_V2, /* total: */ 64));
+    assert_eq!(
+        (
+            prepare_client(&client.0).unwrap().rule_sets().len(),
+            prepare_server(&server.0).unwrap().rule_sets().len(),
+        ),
+        (64, 64)
+    );
+
+    for address in ["192.0.2.53:53", "invalid endpoint"] {
+        let client = TempConfig::new(
+            &with_rule_sets(CLIENT_V2, /* total: */ 65).replace("192.0.2.53:53", address),
+        );
+        let server = TempConfig::new(
+            &with_rule_sets(SERVER_V2, /* total: */ 65).replace("192.0.2.53:53", address),
+        );
+        for error in [
+            prepare_client(&client.0).expect_err("reject 65 resources"),
+            prepare_server(&server.0).expect_err("reject 65 resources"),
+        ] {
+            assert_eq!(
+                (error.kind(), error.field(), error.to_string()),
+                (
+                    ConfigErrorKind::Semantic,
+                    ConfigField::RouteRuleSet,
+                    "error[config.semantic] route.rule_set: configuration value is invalid"
+                        .to_owned(),
+                )
+            );
+        }
+    }
+}
+
+#[test]
 fn client_prepare_retains_closed_resources_without_materializing() {
     let file = TempConfig::new(CLIENT_V2);
     let prepared = prepare_client(&file.0).expect("prepare client V2");
