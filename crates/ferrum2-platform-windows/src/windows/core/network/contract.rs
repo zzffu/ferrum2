@@ -142,8 +142,16 @@ pub(in crate::windows) fn build_network_interface_observations(
             NetworkInterfaceObservation::new(
                 binding,
                 family.family,
-                interface.operational,
-                interface.connected && family.connected,
+                if interface.operational {
+                    ferrum2_net::InterfaceOperationalState::Operational
+                } else {
+                    ferrum2_net::InterfaceOperationalState::Unavailable
+                },
+                if interface.connected && family.connected {
+                    ferrum2_net::InterfaceLinkState::Connected
+                } else {
+                    ferrum2_net::InterfaceLinkState::Disconnected
+                },
                 kind,
                 family.interface_metric,
                 family.default_route_metric,

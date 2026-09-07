@@ -94,7 +94,10 @@ fn validated_network_policies_are_retained_per_outbound_and_route() {
     };
     assert_eq!(
         runtime_route_network(&route),
-        RouteNetworkOptions::new(true, Some("route-interface"))
+        RouteNetworkOptions::new(
+            ferrum2_net::AutomaticInterfaceSelection::Enabled,
+            Some("route-interface")
+        )
     );
 }
 
@@ -164,7 +167,10 @@ async fn physical_connector_receives_selected_policy_and_first_concrete_target()
         Some("192.0.2.20".parse().unwrap()),
         None,
     );
-    let route_network = RouteNetworkOptions::new(true, Some("route-interface"));
+    let route_network = RouteNetworkOptions::new(
+        ferrum2_net::AutomaticInterfaceSelection::Enabled,
+        Some("route-interface"),
+    );
     let proxy_server: SocketAddr = "198.51.100.20:443".parse().unwrap();
     let trace = Arc::new(PhysicalPolicyTrace::default());
     let engine = ClientEgressEngine::new(

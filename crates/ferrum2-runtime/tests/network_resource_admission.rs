@@ -83,7 +83,10 @@ fn successful_admission_returns_resource_resolution_and_exact_owner() {
         .prepare_and_admit_runtime_resource(
             &resolver,
             &DialOptions::default(),
-            &RouteNetworkOptions::new(true, None::<&str>),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                None::<&str>,
+            ),
             destination(),
             NetworkRuntimeOwnerKind::TcpConnection,
             |resolved| {
@@ -132,7 +135,10 @@ fn one_generation_race_drops_stale_resource_then_admits_new_generation() {
         .prepare_and_admit_runtime_resource(
             &resolver,
             &DialOptions::default(),
-            &RouteNetworkOptions::new(true, None::<&str>),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                None::<&str>,
+            ),
             destination(),
             NetworkRuntimeOwnerKind::UdpAssociation,
             |resolved| {
@@ -173,7 +179,10 @@ fn second_generation_race_fails_and_never_admits_an_old_owner() {
     let result = coordinator.prepare_and_admit_runtime_resource(
         &resolver,
         &DialOptions::default(),
-        &RouteNetworkOptions::new(true, None::<&str>),
+        &RouteNetworkOptions::new(
+            ferrum2_net::AutomaticInterfaceSelection::Enabled,
+            None::<&str>,
+        ),
         destination(),
         NetworkRuntimeOwnerKind::GenerationTask,
         |resolved| {
@@ -224,7 +233,10 @@ fn closed_admission_drops_prepared_resource_and_preserves_registration_reason() 
     let result = coordinator.prepare_and_admit_runtime_resource(
         &resolver,
         &DialOptions::default(),
-        &RouteNetworkOptions::new(true, None::<&str>),
+        &RouteNetworkOptions::new(
+            ferrum2_net::AutomaticInterfaceSelection::Enabled,
+            None::<&str>,
+        ),
         destination(),
         NetworkRuntimeOwnerKind::TcpConnection,
         |resolved| {
@@ -265,7 +277,10 @@ fn stable_prepare_failure_retains_error_and_selection_source() {
     let result = coordinator.prepare_and_admit_runtime_resource::<_, (), _>(
         &resolver,
         &DialOptions::default(),
-        &RouteNetworkOptions::new(true, None::<&str>),
+        &RouteNetworkOptions::new(
+            ferrum2_net::AutomaticInterfaceSelection::Enabled,
+            None::<&str>,
+        ),
         destination(),
         NetworkRuntimeOwnerKind::TcpConnection,
         |_| Err(PrepareError::BindFailed),
@@ -300,7 +315,10 @@ fn source_failure_is_observable_and_never_prepares_or_registers() {
     let result = coordinator.prepare_and_admit_runtime_resource::<_, (), ()>(
         &resolver,
         &DialOptions::new(Some("missing"), None, None),
-        &RouteNetworkOptions::new(true, None::<&str>),
+        &RouteNetworkOptions::new(
+            ferrum2_net::AutomaticInterfaceSelection::Enabled,
+            None::<&str>,
+        ),
         destination(),
         NetworkRuntimeOwnerKind::TcpConnection,
         |_| {

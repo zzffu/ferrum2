@@ -53,8 +53,8 @@ fn v6(name: &str, id: u64, index: u32, suffix: u16) -> InterfaceBinding {
 fn observation(
     binding: InterfaceBinding,
     family: NetworkFamily,
-    operational: bool,
-    connected: bool,
+    operational: InterfaceOperationalState,
+    connected: InterfaceLinkState,
     kind: NetworkInterfaceKind,
     interface_metric: u32,
     default_route_metric: Option<u32>,
@@ -75,8 +75,8 @@ fn available(binding: InterfaceBinding, family: NetworkFamily) -> NetworkInterfa
     observation(
         binding,
         family,
-        true,
-        true,
+        InterfaceOperationalState::Operational,
+        InterfaceLinkState::Connected,
         NetworkInterfaceKind::Underlay,
         10,
         None,
@@ -94,8 +94,8 @@ fn four_tier_priority_is_exact_and_system_fallback_is_target_aware() {
         observation(
             automatic.clone(),
             NetworkFamily::Ipv4,
-            true,
-            true,
+            InterfaceOperationalState::Operational,
+            InterfaceLinkState::Connected,
             NetworkInterfaceKind::Underlay,
             5,
             Some(5),
@@ -121,8 +121,8 @@ fn four_tier_priority_is_exact_and_system_fallback_is_target_aware() {
             observation(
                 binding,
                 NetworkFamily::Ipv4,
-                true,
-                true,
+                InterfaceOperationalState::Operational,
+                InterfaceLinkState::Connected,
                 NetworkInterfaceKind::Underlay,
                 0,
                 None,
@@ -137,7 +137,10 @@ fn four_tier_priority_is_exact_and_system_fallback_is_target_aware() {
     let selected = resolver
         .resolve(
             &DialOptions::new(Some("explicit"), None, None),
-            &RouteNetworkOptions::new(true, Some("route-default")),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                Some("route-default"),
+            ),
             target,
             &snapshot,
         )
@@ -151,7 +154,10 @@ fn four_tier_priority_is_exact_and_system_fallback_is_target_aware() {
     let selected = resolver
         .resolve(
             &DialOptions::default(),
-            &RouteNetworkOptions::new(true, Some("route-default")),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                Some("route-default"),
+            ),
             target,
             &snapshot,
         )
@@ -165,7 +171,10 @@ fn four_tier_priority_is_exact_and_system_fallback_is_target_aware() {
     let selected = resolver
         .resolve(
             &DialOptions::default(),
-            &RouteNetworkOptions::new(true, Some("route-default")),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                Some("route-default"),
+            ),
             target,
             &no_auto,
         )
@@ -179,7 +188,10 @@ fn four_tier_priority_is_exact_and_system_fallback_is_target_aware() {
     let selected = resolver
         .resolve(
             &DialOptions::default(),
-            &RouteNetworkOptions::new(false, Some("missing")),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Disabled,
+                Some("missing"),
+            ),
             target,
             &no_auto,
         )
@@ -218,8 +230,8 @@ fn explicit_lookup_failure_never_falls_back() {
             vec![observation(
                 v4("explicit", 1, 11, 11),
                 NetworkFamily::Ipv4,
-                false,
-                true,
+                InterfaceOperationalState::Unavailable,
+                InterfaceLinkState::Connected,
                 NetworkInterfaceKind::Underlay,
                 1,
                 None,
@@ -239,7 +251,10 @@ fn explicit_lookup_failure_never_falls_back() {
         let error = resolver
             .resolve(
                 &DialOptions::new(Some("explicit"), None, None),
-                &RouteNetworkOptions::new(true, Some("fallback")),
+                &RouteNetworkOptions::new(
+                    ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                    Some("fallback"),
+                ),
                 SocketAddr::from(([203, 0, 113, 9], 443)),
                 &NetworkSnapshot::from_interfaces(1, interfaces).unwrap(),
             )
@@ -275,7 +290,10 @@ fn family_defaults_and_source_addresses_are_independent() {
     let selected_v4 = resolver
         .resolve(
             &options,
-            &RouteNetworkOptions::new(true, None::<&str>),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                None::<&str>,
+            ),
             SocketAddr::from(([203, 0, 113, 9], 443)),
             &snapshot,
         )
@@ -290,7 +308,10 @@ fn family_defaults_and_source_addresses_are_independent() {
     let selected_v6 = resolver
         .resolve(
             &options,
-            &RouteNetworkOptions::new(true, None::<&str>),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                None::<&str>,
+            ),
             SocketAddr::new(
                 IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 9)),
                 443,
@@ -322,22 +343,34 @@ fn mismatched_source_retains_each_selected_tier_and_family_is_rejected() {
     for (outbound, route, expected_source) in [
         (
             DialOptions::new(Some("v4"), source, None),
-            RouteNetworkOptions::new(true, None::<&str>),
+            RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                None::<&str>,
+            ),
             InterfaceSelectionSource::OutboundExplicit,
         ),
         (
             DialOptions::new(None::<&str>, source, None),
-            RouteNetworkOptions::new(true, None::<&str>),
+            RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                None::<&str>,
+            ),
             InterfaceSelectionSource::AutoDetected,
         ),
         (
             DialOptions::new(None::<&str>, source, None),
-            RouteNetworkOptions::new(false, Some("v4")),
+            RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Disabled,
+                Some("v4"),
+            ),
             InterfaceSelectionSource::RouteDefault,
         ),
         (
             DialOptions::new(None::<&str>, source, None),
-            RouteNetworkOptions::new(false, None::<&str>),
+            RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Disabled,
+                None::<&str>,
+            ),
             InterfaceSelectionSource::SystemBestRoute,
         ),
     ] {
@@ -366,8 +399,8 @@ fn automatic_defaults_are_family_aware_filtered_and_metric_ranked() {
             observation(
                 v4("managed-tun", 1, 1, 1),
                 NetworkFamily::Ipv4,
-                true,
-                true,
+                InterfaceOperationalState::Operational,
+                InterfaceLinkState::Connected,
                 NetworkInterfaceKind::ManagedTun,
                 1,
                 Some(1),
@@ -375,8 +408,8 @@ fn automatic_defaults_are_family_aware_filtered_and_metric_ranked() {
             observation(
                 v4("loopback", 2, 2, 2),
                 NetworkFamily::Ipv4,
-                true,
-                true,
+                InterfaceOperationalState::Operational,
+                InterfaceLinkState::Connected,
                 NetworkInterfaceKind::Loopback,
                 1,
                 Some(1),
@@ -384,8 +417,8 @@ fn automatic_defaults_are_family_aware_filtered_and_metric_ranked() {
             observation(
                 v4("down", 3, 3, 3),
                 NetworkFamily::Ipv4,
-                false,
-                true,
+                InterfaceOperationalState::Unavailable,
+                InterfaceLinkState::Connected,
                 NetworkInterfaceKind::Underlay,
                 1,
                 Some(1),
@@ -393,8 +426,8 @@ fn automatic_defaults_are_family_aware_filtered_and_metric_ranked() {
             observation(
                 v4("disconnected", 4, 4, 4),
                 NetworkFamily::Ipv4,
-                true,
-                false,
+                InterfaceOperationalState::Operational,
+                InterfaceLinkState::Disconnected,
                 NetworkInterfaceKind::Underlay,
                 1,
                 Some(1),
@@ -402,8 +435,8 @@ fn automatic_defaults_are_family_aware_filtered_and_metric_ranked() {
             observation(
                 v4("no-default-route", 5, 5, 5),
                 NetworkFamily::Ipv4,
-                true,
-                true,
+                InterfaceOperationalState::Operational,
+                InterfaceLinkState::Connected,
                 NetworkInterfaceKind::Underlay,
                 1,
                 None,
@@ -411,8 +444,8 @@ fn automatic_defaults_are_family_aware_filtered_and_metric_ranked() {
             observation(
                 ipv4_winner.clone(),
                 NetworkFamily::Ipv4,
-                true,
-                true,
+                InterfaceOperationalState::Operational,
+                InterfaceLinkState::Connected,
                 NetworkInterfaceKind::Underlay,
                 4,
                 Some(6),
@@ -420,8 +453,8 @@ fn automatic_defaults_are_family_aware_filtered_and_metric_ranked() {
             observation(
                 v4("v4-tied-later", 30, 30, 30),
                 NetworkFamily::Ipv4,
-                true,
-                true,
+                InterfaceOperationalState::Operational,
+                InterfaceLinkState::Connected,
                 NetworkInterfaceKind::Underlay,
                 5,
                 Some(5),
@@ -429,8 +462,8 @@ fn automatic_defaults_are_family_aware_filtered_and_metric_ranked() {
             observation(
                 ipv6_winner.clone(),
                 NetworkFamily::Ipv6,
-                true,
-                true,
+                InterfaceOperationalState::Operational,
+                InterfaceLinkState::Connected,
                 NetworkInterfaceKind::Underlay,
                 2,
                 Some(3),
@@ -438,8 +471,8 @@ fn automatic_defaults_are_family_aware_filtered_and_metric_ranked() {
             observation(
                 v6("v6-higher-metric", 61, 61, 61),
                 NetworkFamily::Ipv6,
-                true,
-                true,
+                InterfaceOperationalState::Operational,
+                InterfaceLinkState::Connected,
                 NetworkInterfaceKind::Underlay,
                 3,
                 Some(3),

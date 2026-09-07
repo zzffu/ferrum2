@@ -76,7 +76,14 @@ const fn run_error_for_dns_policy_compile(error: ferrum2_dns::DnsPolicyCompileEr
 }
 
 fn runtime_route_network(config: &ferrum2_config::RouteNetworkConfig) -> RouteNetworkOptions {
-    RouteNetworkOptions::new(config.auto_detect_interface, config.default_interface())
+    RouteNetworkOptions::new(
+        if config.auto_detect_interface {
+            ferrum2_net::AutomaticInterfaceSelection::Enabled
+        } else {
+            ferrum2_net::AutomaticInterfaceSelection::Disabled
+        },
+        config.default_interface(),
+    )
 }
 
 fn runtime_dial_options(config: &ferrum2_config::OutboundDialOptions) -> DialOptions {

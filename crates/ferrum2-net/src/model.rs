@@ -99,13 +99,27 @@ pub enum NetworkInterfaceKind {
     ManagedTun,
 }
 
+/// Captured operational availability, without importing platform status codes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterfaceOperationalState {
+    Operational,
+    Unavailable,
+}
+
+/// Captured media-link availability, independent of interface operational state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterfaceLinkState {
+    Connected,
+    Disconnected,
+}
+
 /// One family-specific interface row captured by a read-only platform adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NetworkInterfaceObservation {
     binding: InterfaceBinding,
     family: NetworkFamily,
-    operational: bool,
-    connected: bool,
+    operational: InterfaceOperationalState,
+    connected: InterfaceLinkState,
     kind: NetworkInterfaceKind,
     interface_metric: u32,
     default_route_metric: Option<u32>,
@@ -116,8 +130,8 @@ impl NetworkInterfaceObservation {
     pub fn new(
         binding: InterfaceBinding,
         family: NetworkFamily,
-        operational: bool,
-        connected: bool,
+        operational: InterfaceOperationalState,
+        connected: InterfaceLinkState,
         kind: NetworkInterfaceKind,
         interface_metric: u32,
         default_route_metric: Option<u32>,
@@ -153,12 +167,12 @@ impl NetworkInterfaceObservation {
 
     /// Returns whether the interface was operational when captured.
     pub const fn operational(&self) -> bool {
-        self.operational
+        matches!(self.operational, InterfaceOperationalState::Operational)
     }
 
     /// Returns whether the interface media was connected when captured.
     pub const fn connected(&self) -> bool {
-        self.connected
+        matches!(self.connected, InterfaceLinkState::Connected)
     }
 
     /// Returns the closed interface kind used by automatic selection.
@@ -177,7 +191,7 @@ impl NetworkInterfaceObservation {
     }
 
     fn is_available(&self) -> bool {
-        self.operational && self.connected
+        self.operational() && self.connected()
     }
 
     fn automatic_rank(&self) -> Option<(u64, u64, u32, &str)> {
@@ -420,8 +434,8 @@ fn default_observation(
     NetworkInterfaceObservation::new(
         family_binding,
         family,
-        true,
-        true,
+        InterfaceOperationalState::Operational,
+        InterfaceLinkState::Connected,
         NetworkInterfaceKind::Underlay,
         0,
         Some(0),

@@ -125,7 +125,10 @@ fn destination_and_every_policy_input_are_isolated() {
     let route_default = resolver
         .resolve(
             &DialOptions::default(),
-            &RouteNetworkOptions::new(false, Some("underlay")),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Disabled,
+                Some("underlay"),
+            ),
             first_target,
             &snapshot,
         )

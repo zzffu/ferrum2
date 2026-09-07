@@ -262,7 +262,10 @@ fn resolved_socket_binding_applies_interface_then_family_source() {
     let resolved = NetworkInterfaceResolver::new(NoRouteCatalog)
         .resolve(
             &DialOptions::new(None::<&str>, Some(source), None),
-            &RouteNetworkOptions::new(true, None::<&str>),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                None::<&str>,
+            ),
             destination,
             &snapshot,
         )
@@ -298,7 +301,10 @@ fn resolved_link_local_source_carries_the_selected_ipv6_scope() {
     let resolved = NetworkInterfaceResolver::new(NoRouteCatalog)
         .resolve(
             &DialOptions::new(None::<&str>, None, Some(source)),
-            &RouteNetworkOptions::new(true, None::<&str>),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                None::<&str>,
+            ),
             destination,
             &snapshot,
         )

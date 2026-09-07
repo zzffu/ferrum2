@@ -91,7 +91,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     let (path, config) = server_test_config_source("network-policy-retention", &source);
     let route = runtime_route_network(&config.route_network);
     let dial = runtime_dial_options(config.outbounds[0].dial_options());
-    assert!(route.auto_detect_interface());
+    assert_eq!(
+        route.automatic_selection(),
+        ferrum2_net::AutomaticInterfaceSelection::Enabled
+    );
     assert_eq!(route.default_interface(), Some("Fallback Ethernet"));
     assert_eq!(dial.bind_interface(), Some("Server Ethernet"));
 

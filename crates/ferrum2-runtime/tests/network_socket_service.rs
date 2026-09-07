@@ -342,7 +342,10 @@ fn service(
 }
 
 fn route() -> RouteNetworkOptions {
-    RouteNetworkOptions::new(true, None::<&str>)
+    RouteNetworkOptions::new(
+        ferrum2_net::AutomaticInterfaceSelection::Enabled,
+        None::<&str>,
+    )
 }
 
 #[tokio::test]

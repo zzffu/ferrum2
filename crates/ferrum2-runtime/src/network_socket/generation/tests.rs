@@ -49,7 +49,10 @@ fn context(owners: &OwnerRegistry) -> (NetworkResetCoordinator, ResolvedInterfac
     let resolved = NetworkInterfaceResolver::new(Catalog)
         .resolve(
             &DialOptions::default(),
-            &RouteNetworkOptions::new(true, None::<&str>),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                None::<&str>,
+            ),
             "203.0.113.1:1".parse().unwrap(),
             &snapshot,
         )

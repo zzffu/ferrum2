@@ -72,7 +72,14 @@ pub(in crate::run) fn runtime_dial_options(
 pub(in crate::run) fn runtime_route_network(
     route: &ferrum2_config::RouteNetworkConfig,
 ) -> RouteNetworkOptions {
-    RouteNetworkOptions::new(route.auto_detect_interface, route.default_interface())
+    RouteNetworkOptions::new(
+        if route.auto_detect_interface {
+            ferrum2_net::AutomaticInterfaceSelection::Enabled
+        } else {
+            ferrum2_net::AutomaticInterfaceSelection::Disabled
+        },
+        route.default_interface(),
+    )
 }
 
 pub(in crate::run) fn prepare_client_outbounds(

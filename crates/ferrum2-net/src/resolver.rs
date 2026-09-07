@@ -39,28 +39,36 @@ impl DialOptions {
     }
 }
 
+/// Whether the resolver may select the snapshot's automatic family-specific underlay.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub enum AutomaticInterfaceSelection {
+    #[default]
+    Disabled,
+    Enabled,
+}
+
 /// Route-level inputs to the shared interface resolver.
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RouteNetworkOptions {
-    auto_detect_interface: bool,
+    automatic_selection: AutomaticInterfaceSelection,
     default_interface: Option<Arc<str>>,
 }
 
 impl RouteNetworkOptions {
     /// Builds immutable route-level network options.
     pub fn new(
-        auto_detect_interface: bool,
+        automatic_selection: AutomaticInterfaceSelection,
         default_interface: Option<impl Into<Arc<str>>>,
     ) -> Self {
         Self {
-            auto_detect_interface,
+            automatic_selection,
             default_interface: default_interface.map(Into::into),
         }
     }
 
-    /// Returns whether family-aware automatic interface selection is enabled.
-    pub const fn auto_detect_interface(&self) -> bool {
-        self.auto_detect_interface
+    /// Returns the family-aware automatic interface selection policy.
+    pub const fn automatic_selection(&self) -> AutomaticInterfaceSelection {
+        self.automatic_selection
     }
 
     /// Returns the route-level fallback interface, if configured.
@@ -309,7 +317,7 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
                 }
             };
             (binding, InterfaceSelectionSource::OutboundExplicit)
-        } else if route.auto_detect_interface() {
+        } else if route.automatic_selection() == AutomaticInterfaceSelection::Enabled {
             if let Some(binding) = snapshot.auto_interface(destination.ip()) {
                 (binding.clone(), InterfaceSelectionSource::AutoDetected)
             } else {
