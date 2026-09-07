@@ -1,6 +1,32 @@
 use super::support::*;
 
 #[test]
+fn exhausted_tcp_slot_does_not_block_another_free_slot() {
+    let (mut stack, _flows) = Stack::new(
+        (Ipv4Addr::new(198, 18, 0, 2), 30, Ipv6Addr::LOCALHOST, 128),
+        1420,
+        2,
+        4096,
+        Duration::from_secs(60),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .unwrap();
+    let exhausted = *stack.free_flow_slots.last().unwrap();
+    stack.generations.slots[exhausted] = u32::MAX - 1;
+    assert!(stack.enqueue(&ipv4_tcp(), true));
+    let entry = stack.take_tcp_flow(exhausted).unwrap();
+    stack.sockets.remove(entry.socket);
+    drop(entry);
+    assert!(stack.generations.current(exhausted).is_none());
+    assert!(
+        stack.enqueue(&ipv4_tcp(), true),
+        "another slot remains usable"
+    );
+    assert_eq!(stack.live_tcp_flows(), 1);
+    assert!(stack.flows[exhausted].is_none());
+}
+
+#[test]
 fn tcp_five_tuple_admission_is_bounded_before_socket_or_buffer_creation() {
     let flow_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (mut stack, _flows) = Stack::new(

@@ -161,7 +161,7 @@ impl Stack {
         let indexed = self.flow_index.remove(&entry.tuple);
         debug_assert_eq!(indexed, Some(entry.generation));
         self.live_tcp_flow_count -= 1;
-        if self.generations.recycle(entry.generation) {
+        if self.generations.recycle(entry.generation) && self.generations.current(slot).is_some() {
             self.free_flow_slots.push(slot);
         }
         self.flow_count.fetch_sub(1, Ordering::AcqRel);
