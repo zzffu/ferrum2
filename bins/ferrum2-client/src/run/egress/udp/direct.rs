@@ -149,9 +149,24 @@ impl DirectUdpSocket for ClientDirectUdpSocket {
     }
 }
 
+pub(super) enum DirectSocketState {
+    Pending(ClientUdpSocketFactory),
+    Bound(ClientDirectUdpSocket),
+}
+impl DirectSocketState {
+    async fn bind(&mut self, target: SocketAddr) -> io::Result<&ClientDirectUdpSocket> {
+        if let Self::Pending(factory) = self {
+            *self = Self::Bound(factory.open(target).await?);
+        }
+        match self {
+            Self::Bound(socket) => Ok(socket),
+            Self::Pending(_) => unreachable!("successful bind publishes socket"),
+        }
+    }
+}
+
 pub(in crate::run::egress) async fn send_direct_target_lazy(
-    socket: &mut Option<ClientDirectUdpSocket>,
-    factory: &ClientUdpSocketFactory,
+    socket: &mut DirectSocketState,
     resolver: &impl UdpResolver,
     candidate_hints: &mut DirectUdpCandidateHints,
     target: &TargetAddr,
@@ -160,16 +175,8 @@ pub(in crate::run::egress) async fn send_direct_target_lazy(
 ) -> io::Result<(usize, SocketAddr)> {
     let deadline = Instant::now() + timeout;
     if let Some(target) = target.as_socket_addr() {
-        if socket.is_none() {
-            *socket = Some(factory.open(target).await?);
-        }
-        let length = send_direct_candidate(
-            socket.as_ref().expect("direct UDP socket opened"),
-            payload,
-            target,
-            deadline,
-        )
-        .await?;
+        let length =
+            send_direct_candidate(socket.bind(target).await?, payload, target, deadline).await?;
         return Ok((length, target));
     }
     let TargetHostRef::Domain(host) = target.host() else {
@@ -187,11 +194,8 @@ pub(in crate::run::egress) async fn send_direct_target_lazy(
         return Err(io::Error::other("direct UDP resolution was empty"));
     }
     let first_index = candidate_hints.start_index(host, port) % candidates.len();
-    if socket.is_none() {
-        *socket = Some(factory.open(candidates[first_index]).await?);
-    }
     let (length, peer, last_successful_index) = send_direct_candidates(
-        socket.as_ref().expect("direct UDP socket opened"),
+        socket.bind(candidates[first_index]).await?,
         payload,
         &candidates,
         first_index,

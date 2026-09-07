@@ -101,6 +101,7 @@ async fn udp_send_lifecycle_covers_socket_io_session_idle_and_process_cancel() {
         move |_stream, mut cancellation| {
             let ready_sender = Arc::clone(&ready_sender);
             async move {
+                let (mut control, _control_peer) = tokio::io::duplex(16);
                 let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
                     .await
                     .expect("UDP receiver");
@@ -108,9 +109,10 @@ async fn udp_send_lifecycle_covers_socket_io_session_idle_and_process_cancel() {
                     .await
                     .expect("UDP sender");
                 let (_session_sender, mut session) = tokio::sync::watch::channel(false);
-                let sent = send_with_lifecycle(
+                let sent = send_with_control(
                     sender.send_to(b"ok", receiver.local_addr().expect("receiver address")),
-                    &mut cancellation,
+                    &mut control,
+                    cancellation.cancelled(),
                     &mut session,
                     Instant::now() + Duration::from_secs(5),
                 )
@@ -124,38 +126,41 @@ async fn udp_send_lifecycle_covers_socket_io_session_idle_and_process_cancel() {
                     .await
                     .expect("unconnected UDP");
                 assert_eq!(
-                    send_with_lifecycle(
+                    send_with_control(
                         unconnected.send(b"failure"),
-                        &mut cancellation,
+                        &mut control,
+                        cancellation.cancelled(),
                         &mut session,
                         Instant::now() + Duration::from_secs(5),
                     )
                     .await,
-                    Err(UdpSendError::Io)
+                    Err(SocksSendError::Io)
                 );
 
                 let (session_sender, mut session) = tokio::sync::watch::channel(false);
                 session_sender.send_replace(true);
                 assert_eq!(
-                    send_with_lifecycle(
+                    send_with_control(
                         std::future::pending::<io::Result<usize>>(),
-                        &mut cancellation,
+                        &mut control,
+                        cancellation.cancelled(),
                         &mut session,
                         Instant::now() + Duration::from_secs(5),
                     )
                     .await,
-                    Err(UdpSendError::Cancelled)
+                    Err(SocksSendError::Cancelled)
                 );
                 let (_idle_sender, mut session) = tokio::sync::watch::channel(false);
                 assert_eq!(
-                    send_with_lifecycle(
+                    send_with_control(
                         std::future::pending::<io::Result<usize>>(),
-                        &mut cancellation,
+                        &mut control,
+                        cancellation.cancelled(),
                         &mut session,
                         Instant::now(),
                     )
                     .await,
-                    Err(UdpSendError::Idle)
+                    Err(SocksSendError::Idle)
                 );
 
                 ready_sender
@@ -167,14 +172,15 @@ async fn udp_send_lifecycle_covers_socket_io_session_idle_and_process_cancel() {
                     .expect("ready");
                 let (_process_sender, mut session) = tokio::sync::watch::channel(false);
                 assert_eq!(
-                    send_with_lifecycle(
+                    send_with_control(
                         std::future::pending::<io::Result<usize>>(),
-                        &mut cancellation,
+                        &mut control,
+                        cancellation.cancelled(),
                         &mut session,
                         Instant::now() + Duration::from_secs(5),
                     )
                     .await,
-                    Err(UdpSendError::Cancelled)
+                    Err(SocksSendError::Cancelled)
                 );
             }
         },

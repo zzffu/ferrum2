@@ -14,7 +14,8 @@ use tokio::time::Instant;
 
 use crate::run::egress::context::ClientOutboundContext;
 
-use super::association::ClientUdpPlan;
+use super::lease::UdpAccounting;
+use super::proxy::ClientUdpPlan;
 use super::request::composed_udp_plan_limit;
 
 pub(super) fn dns_response_target_matches(expected: &TargetAddr, actual: &TargetAddr) -> bool {
@@ -40,7 +41,7 @@ pub(super) fn commit_final_udp_response(
     mut commits: Vec<UdpResponseCommit>,
     manager: &UdpSessionManager,
     handle: UdpSessionHandle,
-    meter_global_buffers: bool,
+    accounting: UdpAccounting,
     clock: &(impl Clock + ?Sized),
 ) -> Result<AccountedDatagram, UdpPlanResponseError> {
     let socks_len = 3_usize
@@ -48,18 +49,24 @@ pub(super) fn commit_final_udp_response(
         .and_then(|len| len.checked_add(pending.payload().len()));
     if socks_len.is_none_or(|len| len > MAX_SOCKS_UDP_DATAGRAM_BYTES)
         || pending.payload().len()
-            > composed_udp_plan_limit(outbounds, hops, true, pending.encoded_target_len())
+            > composed_udp_plan_limit(
+                outbounds,
+                hops,
+                ferrum2_shadowsocks::UdpPacketDirection::Response,
+                pending.encoded_target_len(),
+            )
     {
         return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
     }
-    let reservation = if meter_global_buffers {
-        manager.reserve_datagram(handle, UdpDirection::ToClient, pending.allocated_capacity())
-    } else {
-        manager.reserve_unmetered_datagram(
+    let reservation = match accounting {
+        UdpAccounting::Metered => {
+            manager.reserve_datagram(handle, UdpDirection::ToClient, pending.allocated_capacity())
+        }
+        UdpAccounting::TunUnmetered => manager.reserve_unmetered_datagram(
             handle,
             UdpDirection::ToClient,
             pending.allocated_capacity(),
-        )
+        ),
     }
     .map_err(UdpPlanResponseError::Runtime)?;
     let (datagram, commit) = pending.materialize().into_parts();

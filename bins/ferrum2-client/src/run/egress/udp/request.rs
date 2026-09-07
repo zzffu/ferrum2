@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::io;
 use std::sync::Mutex;
 
 #[cfg(test)]
@@ -11,11 +10,11 @@ use ferrum2_shadowsocks::{
     MAX_UDP_WIRE_LEN, UdpClientSession, UdpPacketDirection, max_udp_payload_len_for_encoded_target,
 };
 use ferrum2_socks5::MAX_SOCKS_UDP_DATAGRAM_BYTES;
-use tokio::time::Instant;
 
 use crate::run::egress::context::ClientOutboundContext;
 
-use super::association::{ClientUdpLeg, MAX_UDP_PLAN_HOPS};
+use super::association::MAX_UDP_PLAN_HOPS;
+use super::proxy::ClientUdpLeg;
 
 pub(super) fn register_udp_plan(
     outbounds: &[ClientOutboundContext],
@@ -77,28 +76,6 @@ pub(super) fn register_udp_session<K: ferrum2_crypto::MethodKeyProvider>(
     Ok((protocol, id))
 }
 
-pub(in crate::run) async fn send_with_lifecycle(
-    send: impl std::future::Future<Output = io::Result<usize>>,
-    cancellation: &mut ferrum2_runtime::CancellationToken,
-    session_cancellation: &mut tokio::sync::watch::Receiver<bool>,
-    idle_deadline: Instant,
-) -> Result<usize, UdpSendError> {
-    tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => Err(UdpSendError::Cancelled),
-        _ = session_cancellation.changed() => Err(UdpSendError::Cancelled),
-        _ = tokio::time::sleep_until(idle_deadline) => Err(UdpSendError::Idle),
-        sent = send => sent.map_err(|_| UdpSendError::Io),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::run) enum UdpSendError {
-    Io,
-    Cancelled,
-    Idle,
-}
-
 #[cfg(test)]
 pub(in crate::run) fn composed_udp_request_limit(
     method: MethodProfile,
@@ -134,7 +111,7 @@ pub(in crate::run) fn composed_udp_response_limit(
 pub(in crate::run) fn composed_udp_plan_limit(
     outbounds: &[ClientOutboundContext],
     hops: &[usize],
-    response: bool,
+    direction: UdpPacketDirection,
     encoded_target_len: usize,
 ) -> usize {
     if hops.is_empty() || hops.len() > MAX_UDP_PLAN_HOPS {
@@ -158,17 +135,8 @@ pub(in crate::run) fn composed_udp_plan_limit(
             } else {
                 7
             };
-            let payload = max_udp_payload_len_for_encoded_target(
-                profile,
-                if response {
-                    UdpPacketDirection::Response
-                } else {
-                    UdpPacketDirection::Request
-                },
-                target_len,
-                0,
-            )
-            .ok()?;
+            let payload =
+                max_udp_payload_len_for_encoded_target(profile, direction, target_len, 0).ok()?;
             total.checked_add(MAX_UDP_WIRE_LEN.checked_sub(payload)?)
         });
     overhead

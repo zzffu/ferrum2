@@ -85,7 +85,7 @@ fn select_udp_target_with_scratch(
             let request_payload_bound = composed_udp_plan_limit(
                 &request.routing.outbounds,
                 plan.hops(),
-                false,
+                ferrum2_shadowsocks::UdpPacketDirection::Request,
                 encoded_target_len,
             );
             TunUdpPlan::Route {

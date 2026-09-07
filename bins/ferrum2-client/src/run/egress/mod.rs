@@ -17,8 +17,7 @@ pub(in crate::run) use network::test_application_resolver;
 #[cfg(all(windows, not(test)))]
 pub(in crate::run) use network::{ClientNetworkSocketService, NetworkServiceConnector};
 pub(super) use udp::{
-    ClientUdpAssociation, ClientUdpContext, UdpPlanResponseError, UdpSendError,
-    composed_udp_plan_limit, send_with_lifecycle,
+    ClientUdpAssociation, ClientUdpContext, UdpPlanResponseError, composed_udp_plan_limit,
 };
 #[cfg(test)]
 pub(super) use udp::{

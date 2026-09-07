@@ -9,12 +9,12 @@ use ferrum2_core::route::Network;
 use ferrum2_runtime::BoundedSupervisor;
 use ferrum2_socks5::{SocksStream, decode_udp_datagram};
 
-use super::association::{relay_udp_association, run_udp_association};
-use super::endpoint::SocksUdpEndpoint;
+use super::admission::SocksUdpEndpoint;
+use super::association::run_udp_association;
+use super::relay::relay_udp_association;
 use crate::run::egress::{
     ClientUdpAssociation, IdSequenceRandom, MAX_UDP_PLAN_HOPS, UdpIoFaultPlan, UdpIoOperation,
-    UdpSendError, composed_udp_plan_limit, composed_udp_request_limit, composed_udp_response_limit,
-    send_with_lifecycle,
+    composed_udp_plan_limit, composed_udp_request_limit, composed_udp_response_limit,
 };
 use crate::run::routing::ClientTerminalRoute;
 use crate::run::test_support::*;
@@ -156,7 +156,6 @@ async fn start_udp_relay(
                     &mut cancellation,
                     &context,
                     &routing,
-                    None,
                 )
                 .await;
                 let _ = done_sender
@@ -395,7 +394,12 @@ async fn eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers() {
         tokio::task::yield_now().await;
     }
     let target = TargetAddr::ip("[2001:db8::1]:53".parse().expect("IPv6 target")).expect("target");
-    let limit = composed_udp_plan_limit(&routing.outbounds, &hops, false, 19);
+    let limit = composed_udp_plan_limit(
+        &routing.outbounds,
+        &hops,
+        ferrum2_shadowsocks::UdpPacketDirection::Request,
+        19,
+    );
     let mut socks = vec![0; MAX_SOCKS_UDP_DATAGRAM_BYTES];
     let one_over = encode_udp_datagram(&target, &vec![0x5a; limit + 1], &mut socks)
         .expect("SOCKS-valid eight-hop maximum+1");
@@ -847,8 +851,12 @@ async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) 
         .into_iter()
         .enumerate()
         {
-            let limit =
-                composed_udp_plan_limit(&bound_outbounds, &[0, 1], false, encoded_target_len);
+            let limit = composed_udp_plan_limit(
+                &bound_outbounds,
+                &[0, 1],
+                ferrum2_shadowsocks::UdpPacketDirection::Request,
+                encoded_target_len,
+            );
             let before = protocols[0]
                 .session_snapshot(outer_accepted.capability())
                 .expect("outer snapshot")
@@ -926,3 +934,5 @@ async fn stock_udp_chain_case(methods: [MethodProfile; 2], invalid_inner: bool) 
     std::fs::remove_file(path).expect("remove chain config");
     assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
 }
+
+use super::send::{SocksSendError, send_with_control};

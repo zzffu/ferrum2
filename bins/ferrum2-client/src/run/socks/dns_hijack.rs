@@ -1,100 +1,98 @@
-use ferrum2_core::TargetAddr;
+use super::admission::{CandidateRequest, SocksUdpEndpoint, admit_answer, receive_candidate};
+use crate::run::context::ClientContext;
 use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
-use ferrum2_observability::{Direction, Reason, Stage};
 use ferrum2_runtime::CancellationToken;
 use ferrum2_socks5::SocksStream;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
-use crate::run::context::ClientContext;
-use crate::run::observation::record_udp_drop;
+pub(super) enum DnsDisposition {
+    Admitted,
+    Dropped,
+    Terminated,
+}
 
-use super::endpoint::{SocksUdpEndpoint, SocksUdpPacket};
-
-pub(super) async fn relay_hijacked_udp<IO>(
+pub(super) async fn relay_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
     endpoint: &mut SocksUdpEndpoint,
     control: &mut SocksStream<IO>,
     cancellation: &mut CancellationToken,
     context: &ClientContext,
     inbound: usize,
     proxy: &DnsProxy,
-    first: Option<(TargetAddr, Vec<u8>)>,
-) where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    if let Some((target, payload)) = first
-        && !answer_hijacked_udp(endpoint, cancellation, inbound, proxy, &target, &payload).await
-    {
-        return;
-    }
-    let mut control_byte = [0; 1];
+) {
+    let mut control_byte = [0];
     loop {
-        let idle_deadline = endpoint.idle_deadline(context.runtime.idle_timeout);
-        let received = tokio::select! {
+        let deadline = endpoint.idle_deadline(context.runtime.idle_timeout);
+        let candidate = tokio::select! {
             _ = cancellation.cancelled() => return,
-            _ = tokio::time::sleep_until(idle_deadline) => return,
-            read = control.read(&mut control_byte) => {
-                if !matches!(read, Ok(1)) {
-                    return;
-                }
-                continue;
-            }
-            received = endpoint.receive() => received,
+            _ = tokio::time::sleep_until(deadline) => return,
+            read = control.read(&mut control_byte) => { if !matches!(read, Ok(1)) { return; } continue; }
+            received = receive_candidate(endpoint, context) => match received { Ok(Some(candidate)) => candidate, Ok(None) => continue, Err(_) => return },
         };
-        let (decoded, source_port) = match received {
-            Ok(SocksUdpPacket::Valid {
-                datagram,
-                source_port,
-            }) => (datagram, source_port),
-            Ok(SocksUdpPacket::WrongSource) => {
-                record_udp_drop(
-                    context,
-                    Direction::ClientToTarget,
-                    Stage::Socks5,
-                    Reason::Address,
-                );
-                continue;
-            }
-            Ok(SocksUdpPacket::InvalidWire) => {
-                record_udp_drop(
-                    context,
-                    Direction::ClientToTarget,
-                    Stage::Socks5,
-                    Reason::Bounds,
-                );
-                continue;
-            }
-            Err(_) => return,
-        };
-        let target = decoded.to_target_addr();
-        let payload = decoded.payload().to_vec();
-        endpoint.accept(source_port);
-        if !answer_hijacked_udp(endpoint, cancellation, inbound, proxy, &target, &payload).await {
+        if matches!(
+            answer_hijacked_udp(
+                endpoint,
+                control,
+                cancellation,
+                inbound,
+                proxy,
+                candidate,
+                context.runtime.idle_timeout
+            )
+            .await,
+            DnsDisposition::Terminated
+        ) {
             return;
         }
     }
 }
 
-pub(super) async fn answer_hijacked_udp(
+pub(super) async fn answer_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
     endpoint: &mut SocksUdpEndpoint,
+    control: &mut SocksStream<IO>,
     cancellation: &mut CancellationToken,
     inbound: usize,
     proxy: &DnsProxy,
-    target: &TargetAddr,
-    request: &[u8],
-) -> bool {
-    let response = tokio::select! {
-        _ = cancellation.cancelled() => return false,
-        response = proxy.answer(
+    candidate: CandidateRequest,
+    idle_timeout: Duration,
+) -> DnsDisposition {
+    let deadline = endpoint.idle_deadline(idle_timeout);
+    let mut control_byte = [0];
+    let response = {
+        let answering = proxy.answer(
             ProxyIngress::Ordinary(inbound),
             ProxyTransport::Udp,
-            request,
-        ) => response,
+            &candidate.payload,
+        );
+        tokio::pin!(answering);
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return DnsDisposition::Terminated,
+                _ = tokio::time::sleep_until(deadline) => return DnsDisposition::Terminated,
+                read = control.read(&mut control_byte) => { if !matches!(read, Ok(1)) { return DnsDisposition::Terminated; } }
+                response = &mut answering => break response,
+            }
+        }
     };
     let Some(response) = response else {
-        return true;
+        return DnsDisposition::Dropped;
     };
-    tokio::select! {
-        _ = cancellation.cancelled() => false,
-        result = endpoint.send(target, &response) => result.is_ok(),
+    let Ok(length) = admit_answer(endpoint, candidate, &response) else {
+        return DnsDisposition::Dropped;
+    };
+    // Successful admission renewed endpoint activity; the response gets that
+    // configured idle period rather than the pre-answer deadline.
+    let deadline = endpoint.idle_deadline(idle_timeout);
+    let sending = endpoint.send_encoded(length);
+    tokio::pin!(sending);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return DnsDisposition::Terminated,
+            _ = tokio::time::sleep_until(deadline) => return DnsDisposition::Terminated,
+            read = control.read(&mut control_byte) => { if !matches!(read, Ok(1)) { return DnsDisposition::Terminated; } }
+            result = &mut sending => return if result.is_ok() { DnsDisposition::Admitted } else { DnsDisposition::Terminated },
+        }
     }
 }

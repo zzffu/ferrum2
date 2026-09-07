@@ -400,7 +400,12 @@ async fn routed_udp_first_valid_packet_selects_association_once() {
     assert!(udp.live_ids.lock().expect("live IDs").is_empty());
 
     wire[2] = 0;
-    let plan_limit = composed_udp_plan_limit(&routing.outbounds, &[1, 2], false, 17);
+    let plan_limit = composed_udp_plan_limit(
+        &routing.outbounds,
+        &[1, 2],
+        ferrum2_shadowsocks::UdpPacketDirection::Request,
+        17,
+    );
     let one_over = encode_udp_datagram(&target, &vec![0x5a; plan_limit + 1], &mut wire)
         .expect("SOCKS-valid selected-plan maximum+1");
     let unclassified = registry.snapshot();

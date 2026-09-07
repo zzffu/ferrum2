@@ -596,3 +596,203 @@ fn fixed_two_hop_udp_chain_uses_distinct_credentials_and_reaps() {
         assert_eq!(active_child_count(), baseline);
     }
 }
+
+#[test]
+fn request_budget_rejection_releases_first_route_before_another_source_is_admitted() {
+    let directory = tempfile::tempdir().expect("budget source-pin directory");
+    let client_address = unused_loopback();
+    let metrics = unused_loopback();
+    let proxy = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy sink");
+    proxy
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    let first_target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("first route target");
+    let later_target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("later route target");
+    let first_address = first_target.local_addr().unwrap();
+    let later_address = later_target.local_addr().unwrap();
+    let first_echo = echo_datagrams(first_target, 1);
+    let later_echo = echo_datagrams(later_target, 5);
+    let config = directory.path().join("budget-source-pin.toml");
+    std::fs::write(&config, format!(
+        "schema_version = 2\n\
+         [[inbounds]]\ntag = \"in\"\nlisten = \"{client_address}\"\n\
+         [[outbounds]]\ntag = \"proxy\"\ntype = \"shadowsocks\"\nserver = \"{proxy_address}\"\nmethod = \"2022-blake3-aes-128-gcm\"\npsk = \"{SYNTHETIC_PSK}\"\n\
+         [[outbounds]]\ntag = \"direct\"\ntype = \"direct\"\n\
+         [route]\nfinal = \"direct\"\n\
+         [[route.rules]]\nnetwork = \"udp\"\nport = {}\naction = \"route\"\noutbound = \"proxy\"\n\
+         [udp]\nmax_sessions = 16\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n\
+         [metrics]\nlisten = \"{metrics}\"\n", first_address.port(),
+    )).unwrap();
+    let mut client = ChildGuard::spawn("ferrum2-client", &config);
+    wait_for_listener(&mut client, client_address);
+    wait_for_metrics(metrics);
+    let first_wire = target_wire(first_address);
+    let later_wire = target_wire(later_address);
+    let mut warmups = Vec::new();
+    let mut encrypted = [0; 2048];
+    // Three proxy paths and four direct paths retain 851591 fixed bytes. A new
+    // proxy path still fits, leaving 464 bytes for its first request reservation.
+    for _ in 0..3 {
+        let (control, application, relay) = udp_associate(client_address, false);
+        application
+            .send_to(&socks_datagram_for_target(&first_wire, b"warm"), relay)
+            .unwrap();
+        proxy
+            .recv_from(&mut encrypted)
+            .expect("accepted proxy warmup");
+        warmups.push((control, application));
+    }
+    for _ in 0..4 {
+        let (control, application, relay) = udp_associate(client_address, false);
+        round_trip(&application, relay, &later_wire, &later_wire, b"warm");
+        warmups.push((control, application));
+    }
+    const BASELINE: &str = "ferrum2_udp_buffered_bytes{role=\"client\"} 851591";
+    wait_for_metrics_sample(metrics, BASELINE);
+    let (control, rejected_source, relay) = udp_associate(client_address, false);
+    rejected_source
+        .send_to(
+            &socks_datagram_for_target(&first_wire, &vec![0; 1024]),
+            relay,
+        )
+        .unwrap();
+    wait_for_metrics_sample(
+        metrics,
+        "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"rejected\"} 1",
+    );
+    wait_for_metrics_sample(metrics, BASELINE);
+    assert_no_datagram(&proxy);
+    let winner = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    winner
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    round_trip(
+        &winner,
+        relay,
+        &later_wire,
+        &later_wire,
+        b"new-source-new-route",
+    );
+    // The newly admitted Direct path remains frozen even for the target whose
+    // rule would select the proxy on a fresh association.
+    round_trip(&winner, relay, &first_wire, &first_wire, b"frozen-direct");
+    rejected_source
+        .send_to(&socks_datagram_for_target(&later_wire, b"loser"), relay)
+        .unwrap();
+    assert_no_datagram(&rejected_source);
+    assert_no_datagram(&proxy);
+    first_echo.join().unwrap();
+    later_echo.join().unwrap();
+    drop((control, warmups));
+    wait_for_metrics_sample(metrics, "ferrum2_udp_sessions_active{role=\"client\"} 0");
+    wait_for_metrics_sample(metrics, "ferrum2_udp_buffered_bytes{role=\"client\"} 0");
+    client.terminate_and_reap(Duration::from_secs(5));
+    wait_udp_rebind(relay, "budget source pin relay rebind");
+}
+
+#[test]
+fn unanswered_dns_candidate_neither_pins_source_nor_freezes_hijack_route() {
+    let directory = tempfile::tempdir().expect("DNS source-pin directory");
+    let client_address = unused_loopback();
+    let metrics = unused_loopback();
+    let dns_listen = unused_tcp_udp_loopback();
+    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("DNS upstream sink");
+    let upstream_address = upstream.local_addr().unwrap();
+    let echo = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("direct target");
+    let target = target_wire(echo.local_addr().unwrap());
+    let echo = echo_datagrams(echo, 1);
+    let config = directory.path().join("dns-source-pin.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version = 2\n\
+         [[inbounds]]\ntag = \"in\"\nlisten = \"{client_address}\"\n\
+         [[outbounds]]\ntag = \"direct\"\ntype = \"direct\"\ndomain_resolver = \"dns\"\n\
+         [route]\nfinal = \"direct\"\n\
+         [[route.rules]]\nnetwork = \"udp\"\nport = 53\naction = \"hijack-dns\"\n\
+         [dns]\nmax_inflight = 4\n\
+         [[dns.inbounds]]\ntag = \"dedicated\"\nlisten = \"{dns_listen}\"\n\
+         [[dns.servers]]\ntag = \"dns\"\ntransport = \"udp\"\naddress = \"{upstream_address}\"\n\
+         [dns.route]\nfinal = \"dns\"\n\
+         [udp]\nmax_sessions = 8\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n\
+         [metrics]\nlisten = \"{metrics}\"\n"
+        ),
+    )
+    .unwrap();
+    let mut client = ChildGuard::spawn("ferrum2-client", &config);
+    wait_for_listener(&mut client, client_address);
+    let (control, rejected, relay) = udp_associate(client_address, false);
+    let dns_target = target_wire(SocketAddr::from(([127, 0, 0, 1], 53)));
+    rejected
+        .send_to(&socks_datagram_for_target(&dns_target, &[0]), relay)
+        .unwrap();
+    assert_no_datagram(&rejected);
+    assert_no_datagram(&upstream);
+    let winner = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    winner
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    round_trip(
+        &winner,
+        relay,
+        &target,
+        &target,
+        b"ordinary-after-unanswered-dns",
+    );
+    echo.join().unwrap();
+    drop(control);
+    wait_for_metrics_sample(metrics, "ferrum2_udp_sessions_active{role=\"client\"} 0");
+    wait_for_metrics_sample(metrics, "ferrum2_udp_buffered_bytes{role=\"client\"} 0");
+    client.terminate_and_reap(Duration::from_secs(5));
+    wait_udp_rebind(relay, "unanswered DNS relay rebind");
+}
+
+#[test]
+fn control_eof_reaps_a_direct_association_while_tagged_resolution_is_pending() {
+    let directory = tempfile::tempdir().unwrap();
+    let client_address = unused_loopback();
+    let metrics = unused_loopback();
+    let dns_listen = unused_tcp_udp_loopback();
+    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    upstream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let config = directory.path().join("pending-direct-control.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version = 2\n\
+         [[inbounds]]\ntag = \"in\"\nlisten = \"{client_address}\"\n\
+         [[outbounds]]\ntag = \"direct\"\ntype = \"direct\"\ndomain_resolver = \"dns\"\n\
+         [route]\nfinal = \"direct\"\n\
+         [dns]\nmax_inflight = 4\ntimeout_ms = 30000\n\
+         [[dns.inbounds]]\ntag = \"dedicated\"\nlisten = \"{dns_listen}\"\n\
+         [[dns.servers]]\ntag = \"dns\"\ntransport = \"udp\"\naddress = \"{upstream_address}\"\n\
+         [dns.route]\nfinal = \"dns\"\n\
+         [runtime]\nconnect_timeout_ms = 30000\n\
+         [udp]\nmax_sessions = 8\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n\
+         [metrics]\nlisten = \"{metrics}\"\n"
+        ),
+    )
+    .unwrap();
+    let mut client = ChildGuard::spawn("ferrum2-client", &config);
+    wait_for_listener(&mut client, client_address);
+    let (control, application, relay) = udp_associate(client_address, false);
+    let target = domain_target_wire("pending-control.test", 12345);
+    application
+        .send_to(&socks_datagram_for_target(&target, b"pending"), relay)
+        .unwrap();
+    upstream
+        .recv_from(&mut [0; 512])
+        .expect("Direct resolution is pending at the DNS fixture");
+    control.shutdown(Shutdown::Write).unwrap();
+    // Rebinding must complete within the existing five-second cleanup bound,
+    // while the unresolved request has a thirty-second deadline.
+    wait_udp_rebind(relay, "control EOF cancels pending Direct lookup");
+    wait_for_metrics_sample(metrics, "ferrum2_udp_sessions_active{role=\"client\"} 0");
+    wait_for_metrics_sample(metrics, "ferrum2_udp_buffered_bytes{role=\"client\"} 0");
+    drop(control);
+    client.terminate_and_reap(Duration::from_secs(5));
+}

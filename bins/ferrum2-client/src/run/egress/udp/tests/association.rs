@@ -63,7 +63,7 @@ async fn direct_tun_udp_defers_adf_port_filtering_and_has_no_outstanding_send_ga
         assert_eq!(budget.reserved_bytes(), budget_limit);
     }
     assert!(
-        association.direct_peers.is_empty(),
+        association.outstanding_requests() == 0,
         "TUN sends must not consume the SOCKS/DNS outstanding queue"
     );
 
@@ -506,12 +506,6 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
     );
     association.recycle_application_response(response);
     assert_eq!(registry.snapshot(), provisional);
-    let recycled = association
-        .direct_wire
-        .as_ref()
-        .expect("recycled direct wire buffer");
-    assert!(recycled.is_empty());
-    assert_eq!(recycled.capacity(), MAX_UDP_WIRE_DATAGRAM_BYTES);
     assert!(live_ids.lock().expect("live IDs").is_empty());
     drop(association);
     assert_eq!(registry.snapshot(), baseline);
@@ -694,7 +688,7 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
             .unwrap_or_else(|_| panic!("queued direct request"));
         association.send_encoded_request(length).await.unwrap();
     }
-    assert_eq!(association.direct_peers.len(), UDP_SESSION_QUEUE_DEPTH);
+    assert_eq!(association.outstanding_requests(), UDP_SESSION_QUEUE_DEPTH);
     let length = association
         .prepare_application_request(
             &engine,
@@ -712,7 +706,7 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
             .kind(),
         io::ErrorKind::WouldBlock
     );
-    assert_eq!(association.direct_peers.len(), UDP_SESSION_QUEUE_DEPTH);
+    assert_eq!(association.outstanding_requests(), UDP_SESSION_QUEUE_DEPTH);
     for _ in 0..UDP_SESSION_QUEUE_DEPTH {
         echo_a.recv_from(&mut wire).await.expect("queued datagram");
     }

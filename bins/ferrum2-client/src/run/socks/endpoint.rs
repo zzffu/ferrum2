@@ -13,9 +13,9 @@ use tokio::time::Instant;
 #[cfg(test)]
 use crate::run::egress::{UdpIoFaultPlan, UdpIoOperation};
 
-use super::source_pinning::SocksUdpSourcePin;
+use super::super::source_pinning::SocksUdpSourcePin;
 
-pub(super) struct SocksUdpEndpoint {
+pub(in crate::run::socks) struct SocksUdpEndpoint {
     socket: UdpSocket,
     source: SocksUdpSourcePin,
     wire: Vec<u8>,
@@ -24,17 +24,17 @@ pub(super) struct SocksUdpEndpoint {
     io_fault: Option<Arc<UdpIoFaultPlan>>,
 }
 
-pub(super) enum SocksUdpPacket<'a> {
+pub(in crate::run::socks) enum SocksUdpPacket<'a> {
     Valid {
         datagram: SocksUdpDatagram<'a>,
-        source_port: u16,
+        source: SourceCandidate,
     },
     WrongSource,
     InvalidWire,
 }
 
 impl SocksUdpEndpoint {
-    pub(super) async fn bind<F, Fut>(
+    pub(in crate::run::socks) async fn bind<F, Fut>(
         local_ip: Ipv4Addr,
         peer_ip: IpAddr,
         requested_port: u16,
@@ -54,14 +54,14 @@ impl SocksUdpEndpoint {
         })
     }
 
-    pub(super) fn local_addr(&self) -> io::Result<SocketAddrV4> {
+    pub(in crate::run::socks) fn local_addr(&self) -> io::Result<SocketAddrV4> {
         match self.socket.local_addr()? {
             SocketAddr::V4(address) => Ok(address),
             SocketAddr::V6(_) => Err(io::Error::other("SOCKS UDP endpoint is not IPv4")),
         }
     }
 
-    pub(super) async fn receive(&mut self) -> io::Result<SocksUdpPacket<'_>> {
+    pub(in crate::run::socks) async fn receive(&mut self) -> io::Result<SocksUdpPacket<'_>> {
         #[cfg(test)]
         if self
             .io_fault
@@ -79,16 +79,36 @@ impl SocksUdpEndpoint {
         };
         Ok(SocksUdpPacket::Valid {
             datagram,
-            source_port: source.port(),
+            source: SourceCandidate {
+                port: source.port(),
+            },
         })
     }
 
-    pub(super) fn accept(&mut self, source_port: u16) {
-        self.source.accept_valid(source_port);
-        self.last_valid = Instant::now();
+    pub(super) fn accept_admitted(&mut self, source: SourceCandidate, observed_at: Instant) {
+        self.source.accept_valid(source.port);
+        self.last_valid = self.last_valid.max(observed_at);
     }
 
-    pub(super) async fn send(&mut self, target: &TargetAddr, payload: &[u8]) -> io::Result<usize> {
+    pub(super) fn prepare_response(
+        &mut self,
+        target: &TargetAddr,
+        payload: &[u8],
+    ) -> io::Result<usize> {
+        encode_udp_datagram(target, payload, &mut self.wire)
+            .map_err(|_| io::Error::other("SOCKS UDP response encoding failed"))
+    }
+
+    pub(in crate::run::socks) async fn send(
+        &mut self,
+        target: &TargetAddr,
+        payload: &[u8],
+    ) -> io::Result<usize> {
+        let length = self.prepare_response(target, payload)?;
+        self.send_encoded(length).await
+    }
+
+    pub(in crate::run::socks) async fn send_encoded(&mut self, length: usize) -> io::Result<usize> {
         #[cfg(test)]
         if self
             .io_fault
@@ -97,8 +117,6 @@ impl SocksUdpEndpoint {
         {
             return Err(io::Error::other("injected application send failure"));
         }
-        let length = encode_udp_datagram(target, payload, &mut self.wire)
-            .map_err(|_| io::Error::other("SOCKS UDP response encoding failed"))?;
         let destination = self.source.destination()?;
         let sent = self
             .socket
@@ -113,12 +131,17 @@ impl SocksUdpEndpoint {
         Ok(sent)
     }
 
-    pub(super) fn idle_deadline(&self, timeout: std::time::Duration) -> Instant {
+    pub(in crate::run::socks) fn idle_deadline(&self, timeout: std::time::Duration) -> Instant {
         self.last_valid + timeout
     }
 
     #[cfg(test)]
-    pub(super) fn set_io_fault(&mut self, fault: Option<Arc<UdpIoFaultPlan>>) {
+    pub(in crate::run::socks) fn set_io_fault(&mut self, fault: Option<Arc<UdpIoFaultPlan>>) {
         self.io_fault = fault;
     }
+}
+
+/// A move-only source candidate can only be minted by a valid endpoint receive.
+pub(in crate::run::socks) struct SourceCandidate {
+    port: u16,
 }

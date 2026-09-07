@@ -1,7 +1,9 @@
+mod admission;
 mod association;
 mod dns_hijack;
-mod endpoint;
 mod listener;
+mod relay;
+mod send;
 mod source_pinning;
 mod tcp_command;
 
