@@ -13,38 +13,40 @@ function Start-Ferrum2ProductTrial {
     )
     $adapterName = "$($Network.adapter_name_prefix)-$('{0:D3}' -f $Sequence)"
     Set-Ferrum2OwnedAdapterPlan -Context $Context -AdapterName $adapterName
-    $clientMetrics = Get-Ferrum2FreeTcpPort
-    [uint16]$serverPort = 0
-    [uint16]$serverMetrics = 0
-    if ($Topology -ceq "EndToEnd") {
-        $serverPort = Get-Ferrum2FreeDualPort -Address "127.0.0.1"
-        $serverMetrics = Get-Ferrum2FreeTcpPort
-        if (@(@($serverPort, $clientMetrics, $serverMetrics) |
-                Sort-Object -Unique).Count -ne 3) {
-            throw "product ports are not distinct"
-        }
-        Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address "127.0.0.1" `
-            -Port $serverPort -Purpose "server-tcp"
-        Add-Ferrum2OwnedPort -Context $Context -Protocol "udp" -Address "127.0.0.1" `
-            -Port $serverPort -Purpose "server-udp"
-        Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address "127.0.0.1" `
-            -Port $serverMetrics -Purpose "server-metrics"
-    }
-    Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address "127.0.0.1" `
-        -Port $clientMetrics -Purpose "client-metrics"
-    $configs = Write-Ferrum2TrialConfigs -Context $Context -Network $Network -Loopback $Loopback `
-        -AdapterName $adapterName -Topology $Topology -ServerPort $serverPort `
-        -ClientMetricsPort $clientMetrics -ServerMetricsPort $serverMetrics -Sequence $Sequence
-    Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.client `
-        -Config $configs.client -LogPrefix "trial-$Sequence-client-config-check"
+    $ports = New-Ferrum2ProductPorts -Context $Context -Sequence $Sequence -Topology $Topology
     $server = $null
     $client = $null
     try {
+        $clientMetrics = $ports.client_metrics.port
+        [uint16]$serverPort = 0
+        [uint16]$serverMetrics = 0
+        if ($Topology -ceq "EndToEnd") {
+            $serverPort = $ports.server.port
+            $serverMetrics = $ports.server_metrics.port
+            if (@(@($serverPort, $clientMetrics, $serverMetrics) |
+                    Sort-Object -Unique).Count -ne 3) {
+                throw "product ports are not distinct"
+            }
+            Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address "127.0.0.1" `
+                -Port $serverPort -Purpose "server-tcp"
+            Add-Ferrum2OwnedPort -Context $Context -Protocol "udp" -Address "127.0.0.1" `
+                -Port $serverPort -Purpose "server-udp"
+            Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address "127.0.0.1" `
+                -Port $serverMetrics -Purpose "server-metrics"
+        }
+        Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address "127.0.0.1" `
+            -Port $clientMetrics -Purpose "client-metrics"
+        $configs = Write-Ferrum2TrialConfigs -Context $Context -Network $Network -Loopback $Loopback `
+            -AdapterName $adapterName -Topology $Topology -ServerPort $serverPort `
+            -ClientMetricsPort $clientMetrics -ServerMetricsPort $serverMetrics -Sequence $Sequence
+        Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.client `
+            -Config $configs.client -LogPrefix "trial-$Sequence-client-config-check"
+        Close-Ferrum2PortReservation -Reservation $ports.client_metrics
         $client = Start-Ferrum2OwnedNativeProcess -Context $Context -Application $Member.client `
             -Arguments "--config `"$($configs.client)`"" `
             -WorkingDirectory (Split-Path -Parent $Member.client) `
             -LogPrefix "trial-$Sequence-client" -Purpose "trial-$Sequence-client"
-        [void](Wait-Ferrum2Metric -Port $clientMetrics -Name "ferrum2_tun_session_active" -Minimum 1)
+        [void](Wait-Ferrum2Metric -Process $client -Port $clientMetrics -Name "ferrum2_tun_session_active" -Minimum 1)
         $adapter = Complete-Ferrum2OwnedAdapterIdentity -Context $Context -AdapterName $adapterName
         $route = @(Get-NetRoute -AddressFamily IPv4 `
             -DestinationPrefix "$($Network.support_address)/32" `
@@ -66,11 +68,13 @@ function Start-Ferrum2ProductTrial {
         if ($Topology -ceq "EndToEnd") {
             Invoke-Ferrum2ConfigCheck -Context $Context -Binary $Member.server `
                 -Config $configs.server -LogPrefix "trial-$Sequence-server-config-check"
+            Close-Ferrum2PortReservation -Reservation $ports.server
+            Close-Ferrum2PortReservation -Reservation $ports.server_metrics
             $server = Start-Ferrum2OwnedNativeProcess -Context $Context -Application $Member.server `
                 -Arguments "--config `"$($configs.server)`"" `
                 -WorkingDirectory (Split-Path -Parent $Member.server) `
                 -LogPrefix "trial-$Sequence-server" -Purpose "trial-$Sequence-server"
-            [void](Wait-Ferrum2Metric -Port $serverMetrics -Name "ferrum2_network_generation" -Minimum 1)
+            [void](Wait-Ferrum2Metric -Process $server -Port $serverMetrics -Name "ferrum2_network_generation" -Minimum 1)
         }
         $proofs = Get-Ferrum2TrialRouteProofs -Network $Network -Loopback $Loopback `
             -TunInterfaceIndex ([uint32]$adapter.ifIndex) -Topology $Topology
@@ -90,6 +94,10 @@ function Start-Ferrum2ProductTrial {
         Export-Ferrum2ProductFailureLogs -Context $Context -Client $client `
             -Server $server -Sequence $Sequence
         throw $failure
+    } finally {
+        foreach ($reservation in @($ports.client_metrics, $ports.server, $ports.server_metrics)) {
+            Close-Ferrum2PortReservation -Reservation $reservation
+        }
     }
 }
 

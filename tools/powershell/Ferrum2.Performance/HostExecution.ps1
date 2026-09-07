@@ -278,23 +278,98 @@ function Test-Ferrum2UdpPortAvailable {
     } catch { return $false } finally { if ($null -ne $socket) { $socket.Dispose() } }
 }
 
-function Get-Ferrum2FreeTcpPort {
-    param([string]$Address = "127.0.0.1")
-    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse($Address), 0)
-    try {
-        $listener.Start()
-        return [uint16]([Net.IPEndPoint]$listener.LocalEndpoint).Port
-    } finally { $listener.Stop() }
+function ConvertFrom-Ferrum2DynamicPortRange {
+    param([string]$Text, [ValidateSet('tcp', 'udp')][string]$Protocol)
+    $numbers = [regex]::Matches($Text, '(?m)^[^\r\n:：]+[:：]\s*([0-9]+)\s*\r?$')
+    [int]$start = 0
+    [int]$count = 0
+    if ($numbers.Count -ne 2 -or
+        -not [int]::TryParse($numbers[0].Groups[1].Value, [ref]$start) -or
+        -not [int]::TryParse($numbers[1].Groups[1].Value, [ref]$count) -or
+        $start -lt 1 -or $count -lt 1 -or [long]$start + $count -gt 65536) {
+        throw 'dynamic port range readback is invalid'
+    }
+    return [pscustomobject]@{ protocol = $Protocol; start_port = $start; end_port = $start + $count - 1 }
 }
 
-function Get-Ferrum2FreeDualPort {
-    param([Parameter(Mandatory = $true)][string]$Address)
+function Get-Ferrum2DynamicPortRanges {
+    param([object]$Context, [int]$Sequence)
+    $netsh = Join-Path $env:SystemRoot 'System32/netsh.exe'
+    $ranges = @(foreach ($protocol in @('tcp', 'udp')) {
+        $process = Invoke-Ferrum2OwnedCommand -Context $Context -Application $netsh `
+            -Arguments "int ipv4 show dynamicport $protocol" -WorkingDirectory $Context.run_root `
+            -LogPrefix "ports-$Sequence-$protocol" -TimeoutSeconds 10
+        # The command has joined and its private stdout is now immutable.
+        $item = Get-Item -LiteralPath $process.stdout -ErrorAction Stop
+        if ($item.Length -le 0 -or $item.Length -gt 16KB) { throw 'dynamic port range output is invalid' }
+        $text = Get-Content -LiteralPath $process.stdout -Raw -ErrorAction Stop
+        ConvertFrom-Ferrum2DynamicPortRange -Text $text -Protocol $protocol
+    })
+    $root = Join-Path $Context.evidence_directory 'port-ranges'
+    New-Item -ItemType Directory -Path $root -Force -ErrorAction Stop | Out-Null
+    Write-AtomicJsonFile -Path (Join-Path $root "$Sequence.json") `
+        -Document ([pscustomobject]@{ sequence = $Sequence; ipv4_dynamic_ranges = $ranges })
+    return $ranges
+}
+
+function New-Ferrum2PortReservation {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$DynamicRanges,
+        [Parameter(Mandatory = $true)][ValidateSet('tcp', 'udp')][string[]]$Protocols
+    )
     foreach ($attempt in 1..256) {
-        $port = [uint16](Get-Random -Minimum 20000 -Maximum 60000)
-        if ((Test-Ferrum2TcpPortAvailable -Address $Address -Port $port) -and
-            (Test-Ferrum2UdpPortAvailable -Address $Address -Port $port)) { return $port }
+        [uint16]$port = Get-Random -Minimum 1024 -Maximum 65536
+        if (@($DynamicRanges | Where-Object {
+            $_.protocol -in $Protocols -and $port -ge $_.start_port -and $port -le $_.end_port
+        }).Count -ne 0) { continue }
+        $sockets = [Collections.Generic.List[Net.Sockets.Socket]]::new()
+        try {
+            foreach ($protocol in $Protocols) {
+                $socket = if ($protocol -ceq 'tcp') {
+                    [Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::InterNetwork,
+                        [Net.Sockets.SocketType]::Stream, [Net.Sockets.ProtocolType]::Tcp)
+                } else {
+                    [Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::InterNetwork,
+                        [Net.Sockets.SocketType]::Dgram, [Net.Sockets.ProtocolType]::Udp)
+                }
+                $sockets.Add($socket)
+                $socket.ExclusiveAddressUse = $true
+                $socket.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $port))
+            }
+            return [pscustomobject]@{ port = $port; sockets = $sockets.ToArray() }
+        } catch {
+            foreach ($socket in $sockets) { $socket.Dispose() }
+            if ($_.Exception.InnerException -isnot [Net.Sockets.SocketException] -and
+                $_.Exception -isnot [Net.Sockets.SocketException]) { throw }
+        }
     }
-    throw "unable to allocate an available TCP/UDP port"
+    throw 'unable to reserve product listener ports outside dynamic ranges'
+}
+
+function Close-Ferrum2PortReservation {
+    param([AllowNull()][object]$Reservation)
+    if ($null -eq $Reservation) { return }
+    foreach ($socket in $Reservation.sockets) { $socket.Dispose() }
+    $Reservation.sockets = @()
+}
+
+function New-Ferrum2ProductPorts {
+    param([object]$Context, [int]$Sequence, [ValidateSet('ClientDirect', 'EndToEnd')][string]$Topology)
+    $ranges = @(Get-Ferrum2DynamicPortRanges -Context $Context -Sequence $Sequence)
+    $ports = [pscustomobject]@{ client_metrics = $null; server = $null; server_metrics = $null }
+    try {
+        $ports.client_metrics = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp
+        if ($Topology -ceq 'EndToEnd') {
+            $ports.server = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp
+            $ports.server_metrics = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp
+        }
+        return $ports
+    } catch {
+        foreach ($reservation in @($ports.client_metrics, $ports.server, $ports.server_metrics)) {
+            Close-Ferrum2PortReservation -Reservation $reservation
+        }
+        throw
+    }
 }
 
 function Get-Ferrum2FreeSupportPorts {
@@ -327,16 +402,16 @@ function Start-Ferrum2OwnedNativeProcess {
     New-Item -ItemType Directory -Path $logRoot -Force -ErrorAction Stop | Out-Null
     $stdout = Join-Path $logRoot "$LogPrefix.stdout.log"
     $stderr = Join-Path $logRoot "$LogPrefix.stderr.log"
-    $pid = [Ferrum2PerfProcessGroup]::Start($Application, $Arguments, $WorkingDirectory, $stdout, $stderr)
+    $ownedProcessId = [Ferrum2PerfProcessGroup]::Start($Application, $Arguments, $WorkingDirectory, $stdout, $stderr)
     try {
-        [void](Add-Ferrum2OwnedProcess -Context $Context -ProcessId $pid `
+        [void](Add-Ferrum2OwnedProcess -Context $Context -ProcessId $ownedProcessId `
             -Executable $Application -Purpose $Purpose)
     } catch {
-        [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$pid)
-        [Ferrum2PerfProcessGroup]::Close([uint32]$pid)
+        [void][Ferrum2PerfProcessGroup]::Terminate([uint32]$ownedProcessId)
+        [Ferrum2PerfProcessGroup]::Close([uint32]$ownedProcessId)
         throw
     }
-    return [pscustomobject]@{ pid = $pid; stdout = $stdout; stderr = $stderr }
+    return [pscustomobject]@{ pid = $ownedProcessId; stdout = $stdout; stderr = $stderr }
 }
 
 function Wait-Ferrum2Text {
@@ -364,9 +439,16 @@ function Get-Ferrum2Metrics {
 }
 
 function Wait-Ferrum2Metric {
-    param([uint16]$Port, [string]$Name, [double]$Minimum, [int]$TimeoutSeconds = 30)
+    param(
+        [Parameter(Mandatory = $true)][object]$Process,
+        [uint16]$Port, [string]$Name, [double]$Minimum, [int]$TimeoutSeconds = 30
+    )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
+        if ([Ferrum2PerfProcessGroup]::Wait([uint32]$Process.pid, 0)) {
+            $exit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$Process.pid)
+            throw "product exited before metric readiness: $Name; exit=$exit"
+        }
         try {
             $metrics = Get-Ferrum2Metrics -Port $Port
             $value = Get-Ferrum2MetricValue -Metrics $metrics -Name $Name

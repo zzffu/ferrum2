@@ -1458,3 +1458,46 @@ Measurement uses the same product baseline cba03a4488935a4d40cfd22f8cd658c74f436
 30ee68939ee844357d46c2ea8fb3de2017d839b0, with the newly committed controller, Quick/EndToEnd,
 three pairs/four scenarios/2s warmup/10s active. Execute A/A once, then A/B once even if A/A fails;
 preserve each terminal result and cleanup. No optimization or additional measurement run follows.
+
+
+### M8 attempts and M9 startup ownership repair
+
+M8 used controller1fb5c6dd with the original product baseline/candidate. A/A run36440d958ee4
+completed18/24, then trial19 failed product startup: the baseline server emitted startup.bind,
+while the runner waited for network_generation and eventually timed out. Runner1/validator2,
+cleanup PASS and five residue counts0; elapsed549.4718s. A/B run461c30a7e3b0 completed24/24,
+runner0/validator3 (valid complete evidence, REGRESSION), cleanup0. Primary pair median improvement:
+TCP throughput+6.697%, TCP request p99+1.922%, UDP-4.329%, fragments-2.406%; request CPU/work also
+prevents acceptance. These are historical observations, not the final requested pair of full runs.
+Requests and outputs are retained as `target/remediation-audit/m8-{aa,ab}-*`.
+
+The user then instructed "修复" and "要完整AA AB", superseding the one-attempt stopping limit.
+The active A/B was allowed to finish under its unchanged controller before any implementation.
+No performance workload was cancelled or silently omitted. The endpoint error cannot identify the
+specific baseline port because that product has the old flat diagnostic. Static examination shows
+metrics ports were allocated from the ephemeral range and immediately released; server ports were
+unprotected through client configuration/startup and repeated HTTP probes. The finite old-helper
+probe confirmed another owner can bind its returned port (`m9-port-window-red.log`). This proves
+the ownership gap, not a unique retrospective cause of trial19's collision.
+
+M9 keeps product listener reservations in the existing startup owner, chooses outside the actual
+IPv4 TCP/UDP dynamic ranges, and holds server reservations through client startup. Range readback
+uses10s bounded joined read-only netsh processes, bounded16KiB completed output and closed parsed
+intervals, recorded per trial. Exclusive TCP/UDP sockets close on partial admission failure,
+allocation rollback, handoff and startup exit. Actual product endpoint arguments and timed workload
+are unchanged. Final close-before-exec still permits an unrelated explicit binder to race; it is
+not inherited socket transfer and no failure is converted into a retry or success. Readiness now
+checks the owned process handle before polling metrics and reports early exit immediately.
+The obsolete free-TCP/dual-port APIs were removed and all callers/tests migrated.
+
+Seven finite tests verify exclusive port ownership/release, partial dual-protocol admission,
+cohort rollback, actual product handoff through injected operations, closed locale-independent
+range parsing, actual Windows netsh through the owned process helper, and early process exit.
+The new native probe first exposed `$pid` colliding with read-only PowerShell `$PID` in directly
+loaded scope; renamed it to `$ownedProcessId`, retained the failure log, and the probe then passed.
+Full performance controller144, platform Python9 and PS nonmutating qualification contract passed;
+PowerShell parsing/module validation passed. No Rust/product changes or privileged test suite ran.
+Performance bundle58f790088fbd3cbd4c0d1c46b8a4d5ed92af140137c5f70e66c6055d50dd1785;
+shared qualification bundle75251dc597099cfc88c58618d2122f957b15805a7e0f3ca715318370adcd0966.
+Next: freeze this controller and obtain complete24/24 A/A and A/B under identical conditions,
+then report and stop without product optimization. All earlier failures remain retained.

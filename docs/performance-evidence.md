@@ -102,6 +102,16 @@ identities, and schema 1. This does not permit different executed workloads or s
 bundle's exact closure/content verification. Old evidence remains historical and must be read
 with its original controller; there is no compatibility reader in the current schema.
 
+Product listener setup reads the host's IPv4 TCP/UDP dynamic port ranges through bounded,
+joined read-only commands and records them in `port-ranges/<sequence>.json`. It selects listener
+ports outside the applicable ranges and holds exclusive socket reservations through configuration
+checks and preceding product startup. Each reservation is released immediately before its owning
+product starts; pending reservations are disposed on every failure. This prevents this runner's
+HTTP readiness probes from automatically consuming a future listener port. It does not transfer
+an inherited socket to the product, so an unrelated explicit bind during the final handoff is still
+possible and remains a failed trial. Early product exit is reported before further metrics polling.
+There is no hidden startup retry, changed timed load, or successful-result substitution.
+
 The Windows performance PowerShell implementation is owned by
 `tools/powershell/Ferrum2.Performance`. Its only public composition root is
 `tools/windows-tun/performance/run_windows_tun_performance_host.ps1`. The runner interface exposes

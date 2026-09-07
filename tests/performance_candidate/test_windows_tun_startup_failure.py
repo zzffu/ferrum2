@@ -36,9 +36,10 @@ $WarningPreference = 'SilentlyContinue'
 . (Join-Path $Owners 'HostExecution.ps1')
 . (Join-Path $Owners 'HostProduct.ps1')
 function Set-Ferrum2OwnedAdapterPlan { }
-$script:nextFixturePort = 41000
-function Get-Ferrum2FreeTcpPort { $script:nextFixturePort += 1; return $script:nextFixturePort }
-function Get-Ferrum2FreeDualPort { return 41003 }
+function New-Ferrum2ProductPorts {
+    return @{ client_metrics = @{ port = 41001; sockets = @() };
+        server = @{ port = 41003; sockets = @() }; server_metrics = @{ port = 41002; sockets = @() } }
+}
 function Add-Ferrum2OwnedPort { }
 function Write-Ferrum2TrialConfigs { return @{ client = 'client.toml'; server = 'server.toml' } }
 function Invoke-Ferrum2ConfigCheck { }
@@ -50,7 +51,7 @@ function Start-Ferrum2OwnedNativeProcess {
     }
 }
 function Wait-Ferrum2Metric {
-    param($Port, $Name, $Minimum)
+    param($Process, $Port, $Name, $Minimum)
     if (($FailedRole -eq 'client' -and $Name -eq 'ferrum2_tun_session_active') -or
         ($FailedRole -eq 'server' -and $Name -eq 'ferrum2_network_generation')) {
         throw 'injected product readiness failure'
