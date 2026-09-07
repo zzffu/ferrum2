@@ -67,6 +67,8 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 
 | M3h3 / D6编排 | coordinator先publish再全部hooks再cancel/wait；两端hooks只fence，barrier后retire/reopen；client hub共用driver覆盖capture到completion，失败保留同代cohort，stop结果由全局cleanup消费；native保留暂停旧stack到callback完成，replacement失败复用已完成snapshot | 顺序测试旧实现失败后通过；server admission锁测试先失败后通过；runtime/server完整包（server60）、两端严格lint及client compile-only、TUN safe138通过；m0相关17通过/4旧ignored。native实际Win32重置与同代失败恢复仍待host资格；没有性能结果 |
 
+| M3h host / `a2b53ebd` | 仓库唯一Windows正确性runner，已提升权限并使用已授权AcknowledgeHostNetworkMutation；run `ca98576d5c3b` | 8/8 PASS、QUALIFIED，supervisor102.689s；TUN TCP/UDP、窄路由、live WFP读回、通知保持WFP身份、强制进程树恢复、独立五类残留全0。bundle `dcbcbe96...`；未注入所有hook/stack构造失败，未测性能 |
+
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
 TUN dispatch、sniff、TCP耗尽槽与D6重置已实施；D6之前的冻结门禁17项全部通过（含doc及3个M4有限filter）。
