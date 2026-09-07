@@ -125,6 +125,8 @@ Interface 的行为合同：
 
 - read、write、flush、shutdown 在 generation fence 后返回既有类别的连接重置错误。
 - fence 必须唤醒已经 Pending 的读写；不能只在下一次主动调用时检查 atomic 标志。
+- 普通读写由 Tokio 的 `poll_read`／`poll_write` 驱动就绪循环；虚假就绪后的 `WouldBlock`
+  必须重新注册 reactor 唤醒，不能仅保存 generation fence waker 后返回 `Pending`。
 - peer FIN 产生 read EOF，但仍允许写入；本地 shutdown 只关闭写半边，继续允许读取。
 - shutdown 成功表示 Windows 接受写半关闭，不再承诺“FIN 已经被 Ferrum2 写入 Wintun”。
   原来依赖 smoltcp FIN 发包时刻的测试不应重新钉到另一个实现时刻。

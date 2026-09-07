@@ -38,30 +38,15 @@ impl AsyncRead for TcpFlow {
         if destination.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        let socket = shared.stream.lock().expect("TUN TCP flow socket");
-        let Some(stream) = socket.as_ref() else {
+        let mut socket = shared.stream.lock().expect("TUN TCP flow socket");
+        let Some(stream) = socket.as_mut() else {
             return Poll::Ready(Err(connection_reset()));
         };
 
-        match stream.poll_read_ready(context) {
-            Poll::Ready(Ok(())) => {
+        match Pin::new(stream).poll_read(context, destination) {
+            Poll::Ready(result) => {
                 shared.clear_read_waker();
-                match stream.try_read_buf(destination) {
-                    Ok(_) => Poll::Ready(Ok(())),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        shared.register_read_waker(context.waker());
-                        if shared.valid.load(Ordering::Acquire) {
-                            Poll::Pending
-                        } else {
-                            Poll::Ready(Err(connection_reset()))
-                        }
-                    }
-                    Err(error) => Poll::Ready(Err(shared.map_io_error(error))),
-                }
-            }
-            Poll::Ready(Err(error)) => {
-                shared.clear_read_waker();
-                Poll::Ready(Err(shared.map_io_error(error)))
+                Poll::Ready(result.map_err(|error| shared.map_io_error(error)))
             }
             Poll::Pending => {
                 shared.register_read_waker(context.waker());
@@ -95,29 +80,14 @@ impl AsyncWrite for TcpFlow {
             return Poll::Ready(Ok(0));
         }
 
-        let socket = shared.stream.lock().expect("TUN TCP flow socket");
-        let Some(stream) = socket.as_ref() else {
+        let mut socket = shared.stream.lock().expect("TUN TCP flow socket");
+        let Some(stream) = socket.as_mut() else {
             return Poll::Ready(Err(connection_reset()));
         };
-        match stream.poll_write_ready(context) {
-            Poll::Ready(Ok(())) => {
+        match Pin::new(stream).poll_write(context, source) {
+            Poll::Ready(result) => {
                 shared.clear_write_waker();
-                match stream.try_write(source) {
-                    Ok(written) => Poll::Ready(Ok(written)),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        shared.register_write_waker(context.waker());
-                        if shared.valid.load(Ordering::Acquire) {
-                            Poll::Pending
-                        } else {
-                            Poll::Ready(Err(connection_reset()))
-                        }
-                    }
-                    Err(error) => Poll::Ready(Err(shared.map_io_error(error))),
-                }
-            }
-            Poll::Ready(Err(error)) => {
-                shared.clear_write_waker();
-                Poll::Ready(Err(shared.map_io_error(error)))
+                Poll::Ready(result.map_err(|error| shared.map_io_error(error)))
             }
             Poll::Pending => {
                 shared.register_write_waker(context.waker());
@@ -398,6 +368,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exhausted_readiness_wakes_again_when_more_data_arrives() {
+        let (mut flow, mut peer, _lease) =
+            tcp_flow_for_test("192.0.2.1:443".parse().expect("target"))
+                .await
+                .expect("flow");
+        peer.write_all(b"a").await.expect("first write");
+        let mut byte = [0_u8; 1];
+        flow.read_exact(&mut byte).await.expect("first read");
+        assert_eq!(&byte, b"a");
+
+        let wake = Arc::new(ReadinessWake(tokio::sync::Notify::new()));
+        let waker = Waker::from(Arc::clone(&wake));
+        let mut context = Context::from_waker(&waker);
+        let mut read = ReadBuf::new(&mut byte);
+        assert!(matches!(
+            AsyncRead::poll_read(Pin::new(&mut flow), &mut context, &mut read),
+            Poll::Pending
+        ));
+
+        peer.write_all(b"b").await.expect("second write");
+        tokio::time::timeout(std::time::Duration::from_secs(2), wake.0.notified())
+            .await
+            .expect("new socket data must wake the pending read");
+        flow.read_exact(&mut byte).await.expect("second read");
+        assert_eq!(&byte, b"b");
+    }
+
+    #[tokio::test]
     async fn dropping_flow_closes_the_real_socket_even_while_owner_lease_exists() {
         let (flow, mut peer, _lease) = tcp_flow_for_test("192.0.2.1:443".parse().expect("target"))
             .await
@@ -434,6 +432,18 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
         let error = flow.shutdown().await.expect_err("fenced shutdown");
         assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+    }
+
+    struct ReadinessWake(tokio::sync::Notify);
+
+    impl Wake for ReadinessWake {
+        fn wake(self: Arc<Self>) {
+            self.0.notify_one();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.notify_one();
+        }
     }
 
     struct WakeFlag(AtomicBool);
