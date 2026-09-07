@@ -179,6 +179,19 @@ TTL cache.
 
 ## Observability
 
+Server process failures retain the required root role and, for an inbound endpoint,
+its zero-based declaration index. Acquisition failures distinguish `socket_create`,
+`configure`, `bind`, and `listen`, with a closed I/O category. For example:
+
+```text
+error[startup.bind] process: root=tcp_inbound[1] phase=prepare cause=startup.bind acquisition=bind io_kind=address_in_use cleanup=complete
+```
+
+The supervisor attaches the actual root identity after all rollback/reaping work.
+If cleanup also fails, the exit category is `shutdown.cleanup` and the original
+root, phase and cause remain in the same diagnostic alongside cleanup failures.
+The diagnostic contains no listener address, configuration path, tag, or OS error message.
+
 Rule, DNS, cache, load, refresh, and resolver metrics use only closed bounded
 labels. DNS upstream and RuleSet download observations distinguish numeric,
 system-resolved, configured-resolved, and deferred-to-detour targets without

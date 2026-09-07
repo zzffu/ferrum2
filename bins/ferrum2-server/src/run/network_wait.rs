@@ -86,8 +86,8 @@ impl<M: NetworkChangeMonitor> NetworkChangeOwner<M> {
         )
     }
     pub(super) async fn shutdown(&mut self) -> Result<(), RunError> {
-        if let Some(result) = self.completed {
-            return result;
+        if let Some(result) = &self.completed {
+            return result.clone();
         }
         // Signal before taking the state lock: an active waiter may hold that lock
         // while awaiting the retained native operation.
@@ -114,7 +114,7 @@ impl<M: NetworkChangeMonitor> NetworkChangeOwner<M> {
         } else {
             Ok(())
         };
-        self.completed = Some(result);
+        self.completed = Some(result.clone());
         result
     }
 }

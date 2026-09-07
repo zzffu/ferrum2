@@ -86,7 +86,7 @@ async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
     config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut server, listen).await;
+    wait_until_active(&mut server, &registry).await;
 
     let keys = aes_keys();
     let connector = ProtocolClientConnector {
@@ -454,7 +454,7 @@ async fn route_sniff_reject_tcp_timeout_continues_to_final() {
     config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut server, listen).await;
+    wait_until_active(&mut server, &registry).await;
 
     let keys = aes_keys();
     let connector = ProtocolClientConnector {

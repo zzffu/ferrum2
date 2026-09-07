@@ -1,5 +1,4 @@
 pub(in crate::run) use std::collections::BTreeSet;
-pub(in crate::run) use std::io;
 pub(in crate::run) use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 pub(in crate::run) use std::path::PathBuf;
 pub(in crate::run) use std::sync::atomic::{AtomicUsize, Ordering};
@@ -223,9 +222,9 @@ pub(in crate::run) fn encoded_udp_request(
     wire.truncate(length);
     wire
 }
-pub(in crate::run) async fn wait_until_bound(
+pub(in crate::run) async fn wait_until_active(
     server: &mut tokio::task::JoinHandle<Result<(), RunError>>,
-    address: SocketAddrV4,
+    registry: &OwnerRegistry,
 ) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -233,10 +232,10 @@ pub(in crate::run) async fn wait_until_bound(
             let result = (&mut *server).await.expect("server task before readiness");
             panic!("server exited before readiness: {result:?}");
         }
-        match std::net::TcpListener::bind(address) {
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => return,
-            Ok(listener) => drop(listener),
-            Err(error) => panic!("bind readiness failed: {error}"),
+        // All required endpoints are prepared before any root becomes active.
+        // A bind probe would itself compete with the endpoint being prepared.
+        if registry.snapshot().active_process_roots != 0 {
+            return;
         }
         assert!(
             tokio::time::Instant::now() < deadline,

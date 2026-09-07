@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, OnceLock};
 
@@ -8,14 +7,14 @@ use ferrum2_dns::TaggedResolver;
 use ferrum2_net::{DialOptions, RouteNetworkOptions};
 use ferrum2_observability::{Metrics, RuleProgram, RuleProgramMode, json_subscriber};
 use ferrum2_rule::RuleCompileError;
-use ferrum2_runtime::{
-    AffineConnectionExecutor, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot,
-    ProcessRootExit, ProcessSupervisor, UdpSessionManager,
-};
+use ferrum2_runtime::{AffineConnectionExecutor, OwnerRegistry, ProcessRoot, UdpSessionManager};
 use ferrum2_shadowsocks::{MethodKeyAdapter, TcpReplayStore, UdpServer};
-use tokio::net::UdpSocket;
 
 mod dns;
+mod error;
+mod report;
+pub(crate) use error::RunError;
+use report::{RootDescriptor, RootRole, ServerRoots};
 #[path = "dns_egress.rs"]
 mod dns_egress;
 mod materialize;
@@ -34,81 +33,10 @@ use dns::{ServerDnsDependentRoot, ServerDnsDrain, ServerDnsRoot};
 use observation::{ServerMetricsRoot, log_level};
 use routing::ServerRouting;
 use tcp::{ServerContext, ServerTcpListeners, ServerTcpRoot};
-use tokio_io::{bind_listener, shutdown_signal};
+use tokio_io::{bind_datagram, bind_listener, shutdown_signal};
 #[cfg(all(windows, not(test)))]
 use udp::ServerUdpNetworkReset;
 use udp::{ServerUdpShared, UdpMappings, prepare_udp_server_with_network, udp_runtime_limits};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RunError {
-    StartupObservability,
-    StartupRuntime,
-    StartupBind,
-    StartupProtocol,
-    ConfigResourceMaterialization,
-    DnsResolve,
-    RuleCompile,
-    RuleAllocation,
-    RuleSetDownload,
-    RuleSetCache,
-    RuleSetFormat,
-    RuleSetUnsupportedMatcher,
-    RuleSetCompile,
-    RuntimeListener,
-    RuntimeChild,
-    RuntimeRoot,
-    ShutdownCleanup,
-}
-
-impl std::fmt::Display for RunError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::StartupObservability => {
-                "error[startup.observability] process: unable to initialize diagnostics"
-            }
-            Self::StartupRuntime => {
-                "error[startup.runtime] process: unable to create asynchronous runtime"
-            }
-            Self::StartupBind => "error[startup.bind] process: unable to prepare required endpoint",
-            Self::StartupProtocol => {
-                "error[startup.protocol] process: unable to prepare protocol resources"
-            }
-            Self::ConfigResourceMaterialization => {
-                "error[config.resource_materialization] configuration: supplied resources are invalid"
-            }
-            Self::DnsResolve => {
-                "error[dns.resolve] materialization: fixed endpoint resolution failed"
-            }
-            Self::RuleCompile => {
-                "error[rule.compile] materialization: rule compilation failed"
-            }
-            Self::RuleAllocation => {
-                "error[rule.allocation] materialization: rule allocation failed"
-            }
-            Self::RuleSetDownload => {
-                "error[ruleset.download] materialization: RuleSet download failed"
-            }
-            Self::RuleSetCache => {
-                "error[ruleset.cache] materialization: RuleSet cache failed"
-            }
-            Self::RuleSetFormat => {
-                "error[ruleset.format] materialization: RuleSet format is invalid"
-            }
-            Self::RuleSetUnsupportedMatcher => {
-                "error[ruleset.unsupported_matcher] materialization: RuleSet matcher is unsupported"
-            }
-            Self::RuleSetCompile => {
-                "error[ruleset.compile] materialization: RuleSet compilation failed"
-            }
-            Self::RuntimeListener => "error[runtime.listener] process: required listener failed",
-            Self::RuntimeChild => "error[runtime.child] process: required child failed",
-            Self::RuntimeRoot => "error[runtime.root] process: required root stopped",
-            Self::ShutdownCleanup => {
-                "error[shutdown.cleanup] process: unable to reap all process owners"
-            }
-        })
-    }
-}
 
 /// Classifies rule scratch construction failures after configuration has
 /// already passed semantic validation. Allocation and index-capacity failures
@@ -412,7 +340,7 @@ where
             })
             .collect::<Vec<_>>()
             .into();
-        let mut roots = Vec::with_capacity(
+        let mut roots = ServerRoots::with_capacity(
             config.inbounds.len() * usize::from(config.udp.enabled)
                 + 2
                 + usize::from(dns.is_some())
@@ -431,25 +359,33 @@ where
                 .as_ref()
                 .cloned()
                 .ok_or(RunError::StartupProtocol)?;
-            roots.push(ProcessRoot::new(move || async move {
-                let egress = Arc::new(
-                    dns_egress::ServerDnsEgress::new(root_physical_sockets)
-                        .with_outbound_resolvers(root_direct_resolvers.iter().cloned().collect()),
-                );
-                let (resolver, mut owner) =
-                    TaggedResolver::new(servers, timeout, max_inflight, egress)
+            roots.push(
+                RootDescriptor {
+                    role: RootRole::Dns,
+                    declaration_index: None,
+                },
+                ProcessRoot::new(move || async move {
+                    let egress = Arc::new(
+                        dns_egress::ServerDnsEgress::new(root_physical_sockets)
+                            .with_outbound_resolvers(
+                                root_direct_resolvers.iter().cloned().collect(),
+                            ),
+                    );
+                    let (resolver, mut owner) =
+                        TaggedResolver::new(servers, timeout, max_inflight, egress)
+                            .map_err(|_| RunError::StartupProtocol)?;
+                    owner.ready().await.map_err(|_| RunError::StartupProtocol)?;
+                    let resolver = Arc::new(resolver);
+                    root_tagged_dns
+                        .set(Arc::downgrade(&resolver))
                         .map_err(|_| RunError::StartupProtocol)?;
-                owner.ready().await.map_err(|_| RunError::StartupProtocol)?;
-                let resolver = Arc::new(resolver);
-                root_tagged_dns
-                    .set(Arc::downgrade(&resolver))
-                    .map_err(|_| RunError::StartupProtocol)?;
-                Ok(ServerDnsRoot {
-                    _resolver: resolver,
-                    owner,
-                    drain: root_dns_drain,
-                })
-            }));
+                    Ok(ServerDnsRoot {
+                        _resolver: resolver,
+                        owner,
+                        drain: root_dns_drain,
+                    })
+                }),
+            );
         }
 
         let mut tcp_listens = Vec::with_capacity(config.inbounds.len());
@@ -515,71 +451,116 @@ where
                 let udp_network_sockets = Arc::clone(&network_sockets);
                 let udp_outbound_dial_options = Arc::clone(&outbound_dial_options);
                 let udp_route_network = Arc::clone(&route_network);
-                roots.push(ProcessRoot::new(move || async move {
-                    let listener = Arc::new(
-                        UdpSocket::bind(SocketAddr::V4(listen))
-                            .await
-                            .map_err(|_| RunError::StartupBind)?,
-                    );
-                    prepare_udp_server_with_network(
-                        inbound_id,
-                        listener,
-                        shared,
-                        udp_network_sockets,
-                        udp_outbound_dial_options,
-                        udp_route_network,
-                    )
-                    .map(|root| ServerDnsDependentRoot::new(root, udp_dns_lease))
-                }));
+                let descriptor = RootDescriptor {
+                    role: RootRole::UdpInbound,
+                    declaration_index: Some(inbound_id),
+                };
+                roots.push(
+                    descriptor,
+                    ProcessRoot::new(move || async move {
+                        let listener = Arc::new(bind_datagram(listen).map_err(|acquisition| {
+                            RunError::StartupBind {
+                                descriptor,
+                                acquisition,
+                            }
+                        })?);
+                        prepare_udp_server_with_network(
+                            inbound_id,
+                            listener,
+                            shared,
+                            udp_network_sockets,
+                            udp_outbound_dial_options,
+                            udp_route_network,
+                        )
+                        .map(|root| ServerDnsDependentRoot::new(root, udp_dns_lease))
+                    }),
+                );
             }
         }
         let tcp_registry = registry.clone();
         let tcp_dns_lease = dns_drain.as_ref().map(ServerDnsDrain::lease);
-        roots.push(ProcessRoot::new(move || async move {
-            let mut listeners = Vec::with_capacity(tcp_listens.len());
-            for listen in tcp_listens {
-                listeners.push(bind_listener(listen, listen_backlog)?);
-            }
-            let executor = AffineConnectionExecutor::new(
-                ServerTcpListeners {
-                    listeners,
-                    next: AtomicUsize::new(0),
-                },
-                max_connections,
-                shutdown_grace,
-                tcp_registry,
-            )
-            .map_err(|_| RunError::StartupProtocol)?;
-            Ok(ServerDnsDependentRoot::new(
-                ServerTcpRoot {
-                    executor: Some(executor),
-                    contexts: Arc::new(tcp_contexts),
-                },
-                tcp_dns_lease,
-            ))
-        }));
+        roots.push(
+            RootDescriptor {
+                role: RootRole::TcpInbound,
+                declaration_index: None,
+            },
+            ProcessRoot::new(move || async move {
+                let mut listeners = Vec::with_capacity(tcp_listens.len());
+                for (declaration_index, listen) in tcp_listens.into_iter().enumerate() {
+                    let descriptor = RootDescriptor {
+                        role: RootRole::TcpInbound,
+                        declaration_index: Some(declaration_index),
+                    };
+                    listeners.push(bind_listener(listen, listen_backlog).map_err(
+                        |acquisition| RunError::StartupBind {
+                            descriptor,
+                            acquisition,
+                        },
+                    )?);
+                }
+                let executor = AffineConnectionExecutor::new(
+                    ServerTcpListeners {
+                        listeners,
+                        next: AtomicUsize::new(0),
+                    },
+                    max_connections,
+                    shutdown_grace,
+                    tcp_registry,
+                )
+                .map_err(|_| RunError::StartupProtocol)?;
+                Ok(ServerDnsDependentRoot::new(
+                    ServerTcpRoot {
+                        executor: Some(executor),
+                        contexts: Arc::new(tcp_contexts),
+                    },
+                    tcp_dns_lease,
+                ))
+            }),
+        );
         if let Some(metrics_config) = config.metrics {
             let metrics_registry = registry.clone();
-            roots.push(ProcessRoot::new(move || async move {
-                let listener = bind_listener(metrics_config.listen, 16)?;
-                Ok(ServerMetricsRoot {
-                    listener: Some(listener),
-                    metrics,
-                    registry: metrics_registry,
-                })
-            }));
+            let descriptor = RootDescriptor {
+                role: RootRole::Metrics,
+                declaration_index: None,
+            };
+            roots.push(
+                descriptor,
+                ProcessRoot::new(move || async move {
+                    let listener =
+                        bind_listener(metrics_config.listen, 16).map_err(|acquisition| {
+                            RunError::StartupBind {
+                                descriptor,
+                                acquisition,
+                            }
+                        })?;
+                    Ok(ServerMetricsRoot {
+                        listener: Some(listener),
+                        metrics,
+                        registry: metrics_registry,
+                    })
+                }),
+            );
         }
         // Transfer the already-prepared refresh owner only after every other
         // fallible composition step has completed. Once transferred, the
         // supervisor rolls it back if any listener root fails to prepare.
         if let Some(prepared) = materialization_root.take() {
-            roots.insert(0, ProcessRoot::new(move || async move { Ok(prepared) }));
+            roots.prepend(
+                RootDescriptor {
+                    role: RootRole::Rules,
+                    declaration_index: None,
+                },
+                ProcessRoot::new(move || async move { Ok(prepared) }),
+            );
         }
         // This must be the first required root. If any later root cannot prepare,
         // its rollback explicitly closes the pre-start network-change monitor.
         #[cfg(all(windows, not(test)))]
-        roots.insert(
-            0,
+        roots.prepend(
+            RootDescriptor {
+                role: RootRole::Network,
+                declaration_index: None,
+            },
             network::network_change_process_root(
                 network_change_monitor,
                 Arc::clone(&network_sockets),
@@ -588,10 +569,9 @@ where
                 udp_network_reset,
             ),
         );
-        let supervisor = ProcessSupervisor::new(roots, shutdown_grace, registry)
-            .map_err(|_| RunError::StartupProtocol)?
-            .with_process_resources(process_resources);
-        report_result(supervisor.run_until(shutdown).await)
+        roots
+            .run_until(shutdown_grace, registry, process_resources, shutdown)
+            .await
     }
     .await;
     if let Some(mut root) = materialization_root {
@@ -631,25 +611,6 @@ const fn rule_program_mode(mode: ferrum2_rule::RuleProgramMode) -> RuleProgramMo
     match mode {
         ferrum2_rule::RuleProgramMode::SmallLinear => RuleProgramMode::SmallLinear,
         ferrum2_rule::RuleProgramMode::Indexed => RuleProgramMode::Indexed,
-    }
-}
-
-fn report_result(report: ProcessReport<RunError>) -> Result<(), RunError> {
-    if report.cleanup_failure().is_some() {
-        return Err(RunError::ShutdownCleanup);
-    }
-    match report.cause() {
-        ProcessCause::ExternalShutdown => Ok(()),
-        ProcessCause::PreparationFailed { error, .. }
-        | ProcessCause::ActivationFailed { error, .. } => Err(*error),
-        ProcessCause::PreparationPanicked { .. } | ProcessCause::ActivationPanicked { .. } => {
-            Err(RunError::StartupProtocol)
-        }
-        ProcessCause::RootStopped { exit, .. } => match exit {
-            ProcessRootExit::Failed(error) => Err(*error),
-            ProcessRootExit::Panicked | ProcessRootExit::JoinFailed => Err(RunError::RuntimeChild),
-            ProcessRootExit::Completed => Err(RunError::RuntimeRoot),
-        },
     }
 }
 

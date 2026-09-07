@@ -19,8 +19,6 @@ pub(super) const SERVER_BASE: &str = "schema_version = 2\n[[inbounds]]\ntag = \"
 pub(super) const PAIRED_PORT_ATTEMPTS: usize = 256;
 pub(super) const STARTUP_BIND_DIAGNOSTIC: &str =
     "error[startup.bind] process: unable to prepare required endpoint";
-pub(super) const STARTUP_BIND_STDERR: &[u8] =
-    b"error[startup.bind] process: unable to prepare required endpoint\n";
 pub(super) const CLIENT_SHUTDOWN_REPORT_FIELDS: [&str; 17] = [
     "actual_grace_deadline_elapsed_ns",
     "actual_grace_deadline_source",
@@ -310,9 +308,12 @@ pub(super) fn assert_startup_bind_failure(
                 "{context} disclosed the configuration path"
             );
             assert_sensitive_config_values_absent(&config, stderr, context);
+            let root = stderr.strip_prefix("error[startup.bind] process: root=")
+                .and_then(|rest| rest.strip_suffix(" phase=prepare cause=startup.bind acquisition=bind io_kind=address_in_use cleanup=complete\n"))
+                .expect("server endpoint diagnostic retains acquisition and cleanup");
             assert!(
-                output.stderr == STARTUP_BIND_STDERR,
-                "{context} server canonical startup error"
+                ["udp_inbound[0]", "tcp_inbound[0]", "metrics"].contains(&root),
+                "{context} unexpected root"
             );
             None
         }

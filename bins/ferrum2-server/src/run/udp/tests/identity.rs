@@ -596,7 +596,7 @@ max_sessions = 1
     let registry = OwnerRegistry::new();
     let baseline = active(registry.snapshot());
     let (stop, mut server) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut server, listen).await;
+    wait_until_active(&mut server, &registry).await;
 
     let keys = aes_keys();
     let clock = SystemClock::new();

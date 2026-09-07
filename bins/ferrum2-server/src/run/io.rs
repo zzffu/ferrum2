@@ -2,21 +2,43 @@ use std::net::SocketAddr;
 
 use tokio::net::{TcpListener, TcpSocket};
 
-use super::RunError;
+use super::error::{EndpointAcquireError, EndpointAcquireStage};
 
 pub(super) fn bind_listener(
     address: std::net::SocketAddrV4,
     backlog: u32,
-) -> Result<TcpListener, RunError> {
-    let socket = TcpSocket::new_v4().map_err(|_| RunError::StartupBind)?;
+) -> Result<TcpListener, EndpointAcquireError> {
+    let socket = TcpSocket::new_v4()
+        .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::SocketCreate, error))?;
     #[cfg(unix)]
     socket
         .set_reuseaddr(true)
-        .map_err(|_| RunError::StartupBind)?;
+        .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Configure, error))?;
     socket
         .bind(SocketAddr::V4(address))
-        .map_err(|_| RunError::StartupBind)?;
-    socket.listen(backlog).map_err(|_| RunError::StartupBind)
+        .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Bind, error))?;
+    socket
+        .listen(backlog)
+        .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Listen, error))
+}
+
+pub(super) fn bind_datagram(
+    address: std::net::SocketAddrV4,
+) -> Result<tokio::net::UdpSocket, EndpointAcquireError> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::SocketCreate, error))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Configure, error))?;
+    socket
+        .bind(&socket2::SockAddr::from(SocketAddr::V4(address)))
+        .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Bind, error))?;
+    tokio::net::UdpSocket::from_std(socket.into())
+        .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Configure, error))
 }
 
 pub(super) async fn shutdown_signal() {
@@ -83,7 +105,10 @@ mod tests {
         let rebound = bind_listener(address, 1).expect("exact listener restart");
         assert_eq!(
             bind_listener(address, 1).expect_err("live contender"),
-            RunError::StartupBind
+            EndpointAcquireError::new(
+                EndpointAcquireStage::Bind,
+                std::io::Error::from(std::io::ErrorKind::AddrInUse)
+            )
         );
         drop(rebound);
     }

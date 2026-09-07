@@ -185,7 +185,18 @@ fn assert_bind_failure_stderr(
     if binary == "ferrum2-client" {
         assert_client_bind_failure_report(stderr, client_root.0, client_root.1, expected_rollbacks);
     } else {
-        assert_eq!(stderr, STARTUP_BIND_DIAGNOSTIC, "{binary}");
+        let root = if client_root.0 == "metrics" {
+            "metrics"
+        } else {
+            "tcp_inbound[0]"
+        };
+        assert_eq!(
+            stderr,
+            format!(
+                "error[startup.bind] process: root={root} phase=prepare cause=startup.bind acquisition=bind io_kind=address_in_use cleanup=complete\n"
+            ),
+            "{binary}"
+        );
     }
 }
 

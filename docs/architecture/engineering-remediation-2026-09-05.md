@@ -71,10 +71,12 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 
 | M4f / unused server DNS proxy | 删除ServerDnsState/proxy/仅测试使用的configured backend与未使用runtime cache交接；真实DNS root直接拥有tagged resolver及owner；materialized类型构造前验证policy，实际bootstrap/RuleSet cache保留 | server58、strictlint/fmt/build通过；m0 materialize2及tagged UDP/TCP/system UDP各1通过。删除3个旧proxy路径测试，替换真实Direct observation及materialization拒绝边界；没有删真实Direct协议/生命周期覆盖。编译初轮暴露未迁移测试调用及unused import/helper，修正后未放宽lint；未测RSS或吞吐 |
 
+| M4g / C6 | endpoint acquisition保留create/configure/bind/listen及closed IO kind；ServerRoots绑定role/index和插入次序，owned failure同时保留primary与全部cleanup prior；UDP显式socket2阶段，删除旧扁平诊断 | Windows server60、WSL server61、strictlint/fmt、m0 CLI3/config runtime4通过；7个占用位置验证精确role/index及回滚，两项supervisor故障测试验证完整owned对象和redaction。WSL首次bind冲突未隐藏：移除会竞争bind的普通readiness probe，改用真实owner registry激活状态，完整重跑通过；该次冲突不能唯一归因probe。依赖无升级，仅server继承已锁socket2边；新增诊断分配仅启动/失败路径 |
+
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
 TUN dispatch、sniff、TCP耗尽槽与D6重置已实施；D6之前的冻结门禁17项全部通过（含doc及3个M4有限filter）。
-剩余主要实施是server startup诊断、network诊断接口及net具名状态。
+剩余主要实施是network诊断接口及net具名状态。
 随后执行最终整合门禁、实际Windows资格和架构前后性能验收；当前仍未完成这些验收。
 后续由主代理直接实施，不再启动或重启子代理。M2a性能记录`709e123`不能
 归给后续源码；CT-05/07及CPU完整采样资格继续后置，工具整改范围没有重新开放。

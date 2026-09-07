@@ -504,7 +504,7 @@ async fn udp_real_socket_session_saturation_never_reaches_second_target() {
             .expect("finish bounded server config");
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut server, listen).await;
+    wait_until_active(&mut server, &registry).await;
 
     let stalled_target = udp_loopback().await;
     let stalled_address = stalled_target.local_addr().expect("stalled address");

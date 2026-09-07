@@ -41,8 +41,7 @@ async fn tagged_udp_is_process_bounded_and_bound_to_its_local_inbound() {
     let selector = config.selector_control();
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut server, first_listen).await;
-    wait_until_bound(&mut server, second_listen).await;
+    wait_until_active(&mut server, &registry).await;
 
     let keys = aes_keys();
     let clock = SystemClock::new();
@@ -143,8 +142,7 @@ async fn tagged_tcp_shares_static_direct_mapping_and_one_replay_store() {
     config.outbounds.truncate(1);
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut server, first_listen).await;
-    wait_until_bound(&mut server, second_listen).await;
+    wait_until_active(&mut server, &registry).await;
 
     let keys = aes_keys();
     let timestamp = SystemClock::new().unix_seconds().expect("wall clock");
@@ -272,9 +270,23 @@ async fn tagged_prepare_failure_positions_rollback_every_bound_address() {
         };
         let registry = OwnerRegistry::new();
         let baseline = active(registry.snapshot());
+        let error = run_with_registry(config, registry.clone(), std::future::pending())
+            .await
+            .unwrap_err();
+        let root = [
+            "tcp_inbound[0]",
+            "tcp_inbound[1]",
+            "tcp_inbound[2]",
+            "udp_inbound[0]",
+            "udp_inbound[1]",
+            "udp_inbound[2]",
+            "metrics",
+        ][block];
         assert_eq!(
-            run_with_registry(config, registry.clone(), std::future::pending()).await,
-            Err(RunError::StartupBind)
+            error.to_string(),
+            format!(
+                "error[startup.bind] process: root={root} phase=prepare cause=startup.bind acquisition=bind io_kind=address_in_use cleanup=complete"
+            )
         );
         drop(incumbent);
         for listen in listens {

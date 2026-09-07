@@ -14,7 +14,7 @@ async fn udp_proxy_returns_unsolicited_same_family_source_with_actual_endpoint()
     let registry = OwnerRegistry::new();
     let baseline = active(registry.snapshot());
     let (stop, mut server) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut server, listen).await;
+    wait_until_active(&mut server, &registry).await;
 
     let keys = aes_keys();
     let clock = SystemClock::new();

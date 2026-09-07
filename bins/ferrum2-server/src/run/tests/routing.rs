@@ -42,7 +42,7 @@ async fn route_sniff_reject_udp_freezes_first_terminal_before_reservation() {
     config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut server, listen).await;
+    wait_until_active(&mut server, &registry).await;
     let baseline = registry.snapshot();
     let peer = udp_loopback().await;
     let mut received = [0_u8; MAX_UDP_WIRE_DATAGRAM_BYTES];

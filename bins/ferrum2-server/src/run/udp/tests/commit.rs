@@ -178,7 +178,7 @@ async fn udp_composition_three_methods_echo_and_deferred_client_commit_table() {
         let (path, config) = server_test_config_for_method(listen, method, encoded_psk);
         let registry = OwnerRegistry::new();
         let (stop, mut server) = spawn_test_server(config, &registry);
-        wait_until_bound(&mut server, listen).await;
+        wait_until_active(&mut server, &registry).await;
 
         let keys = MethodKeyAdapter::new(MethodSinglePskProvider::new(
             MethodPsk::try_from_slice(profile, psk).expect("method key"),

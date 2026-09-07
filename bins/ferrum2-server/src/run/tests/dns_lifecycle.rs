@@ -130,7 +130,7 @@ async fn operational_dns_outlives_tcp_quiesce_drain() {
     let registry = OwnerRegistry::new();
     let baseline = registry.snapshot();
     let (shutdown_sender, mut run_task) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut run_task, listen).await;
+    wait_until_active(&mut run_task, &registry).await;
 
     let keys = aes_keys();
     let connector = ProtocolClientConnector {

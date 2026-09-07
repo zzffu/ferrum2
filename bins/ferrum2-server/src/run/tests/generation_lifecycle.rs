@@ -38,7 +38,7 @@ async fn unresolved_udp_selection_is_cancelled_before_session_admission() {
     let registry = OwnerRegistry::new();
     let baseline = registry.snapshot();
     let (shutdown_sender, mut run_task) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut run_task, listen).await;
+    wait_until_active(&mut run_task, &registry).await;
 
     let keys = aes_keys();
     let clock = SystemClock::new();
@@ -79,7 +79,6 @@ async fn unresolved_udp_selection_is_cancelled_before_session_admission() {
 
 #[tokio::test]
 async fn lifecycle_composition_contract_production_registry_witnesses_live_then_baseline() {
-    let listen = reserve_address();
     let target_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("target listener");
@@ -87,11 +86,12 @@ async fn lifecycle_composition_contract_production_registry_witnesses_live_then_
         SocketAddr::V4(address) => address,
         SocketAddr::V6(_) => unreachable!("IPv4 target"),
     };
+    let listen = reserve_address();
     let (config_path, config) = server_test_config(listen);
     let registry = OwnerRegistry::new();
     let baseline = registry.snapshot();
     let (shutdown_sender, mut run_task) = spawn_test_server(config, &registry);
-    wait_until_bound(&mut run_task, listen).await;
+    wait_until_active(&mut run_task, &registry).await;
 
     let target_accept =
         tokio::spawn(async move { target_listener.accept().await.expect("target accept").0 });
