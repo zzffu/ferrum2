@@ -1,4 +1,5 @@
 mod device;
+mod lifecycle;
 mod tcp;
 mod udp;
 
@@ -33,7 +34,7 @@ use crate::reassembly::{ReassemblyDropReason, ReassemblyOutcome, ReassemblyTable
 use crate::udp::{Admission as UdpAdmission, GenerationId, GenerationTable, UdpTable};
 use crate::{
     INGRESS_SLOTS, OwnerWake, TcpFlow, TunEvent, TunEventSink, TunRejectReason, UdpCandidate,
-    UdpFiltering, UdpResponseDropReason,
+    UdpFiltering,
 };
 use device::udp_datagram_from_parsed;
 
@@ -56,6 +57,8 @@ pub(crate) struct Stack {
     pub(crate) next_flow_cursor: Option<usize>,
     pub(crate) next_reap_cursor: Option<usize>,
     pub(crate) packet_generation: u64,
+    session_generation: u64,
+    fenced_generation: Option<u64>,
     pub(crate) reassembly: ReassemblyTable,
     pub(crate) control_limiter: ControlRateLimiter,
     pub(crate) flow_sender: tokio::sync::mpsc::Sender<TcpFlow>,
@@ -177,6 +180,8 @@ impl Stack {
                 next_flow_cursor: None,
                 next_reap_cursor: None,
                 packet_generation: 0,
+                session_generation,
+                fenced_generation: None,
                 reassembly: ReassemblyTable::new(0),
                 control_limiter: ControlRateLimiter::new(),
                 flow_sender,
@@ -432,45 +437,6 @@ impl Stack {
             self.events.emit(TunEvent::ReassemblyDroppedTimeout);
             self.reject(TunRejectReason::FragmentTimeout);
         }
-    }
-
-    pub(crate) fn quiesce(
-        &mut self,
-        next_generation: u64,
-        udp_response_drop_reason: UdpResponseDropReason,
-    ) -> usize {
-        let mut sockets = Vec::new();
-        let mut reset = 0_usize;
-        while let Some(slot) = self.active_flow_head {
-            self.flows[slot]
-                .as_mut()
-                .expect("TCP active-list head is live")
-                .owner
-                .mark_reset();
-            let entry = self
-                .take_tcp_flow(slot)
-                .expect("TCP active-list head remains removable");
-            sockets.push(entry.socket);
-            reset += 1;
-        }
-        for socket in sockets {
-            self.sockets.remove(socket);
-        }
-        if reset != 0 {
-            for _ in 0..reset {
-                self.events.emit(TunEvent::TcpFlowResetRestart);
-            }
-        }
-        self.udp
-            .invalidate_session(next_generation, udp_response_drop_reason);
-        self.reassembly.clear();
-        self.device.clear_session_buffers();
-        self.packet_generation = next_generation;
-        self.events.emit(TunEvent::TcpFlowsActive(0));
-        self.events.emit(TunEvent::UdpAssociationsActive(0));
-        self.events.emit(TunEvent::UdpCandidatesActive(0));
-        self.events.emit(TunEvent::ReassemblyEntriesActive(0));
-        reset
     }
 
     pub(crate) fn next_wait_duration(&mut self, now_millis: i64) -> Duration {

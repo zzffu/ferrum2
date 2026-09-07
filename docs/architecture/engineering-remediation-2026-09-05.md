@@ -63,6 +63,8 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 
 | M3h1 / D6 UDP能力 | manager在原mutex内fence旧关联代数，保持队列/预算/取消状态；同代retire/reopen幂等，exact-owner rollback仍释放fenced entry，shutdown永久关闭 | UDP generation7及runtime完整包、严格lint/fmt通过；新2项有限能力/rollback/资源基线测试。此批仅提供分阶段能力，binary/native调用迁移仍在继续，D6尚未完成 |
 
+| M3h2 / D6 TUN能力 | Stack私有lifecycle owner分离fence与retire；TCP原锁内先拒绝旧缓冲读/写，UDP在receive返回前检查epoch，peer能力显式StaleGeneration；终止quiesce仍组合清理 | TUN safe138及allfeatures严格lint、client compile-only、格式通过；新增TCP旧缓冲/UDP已排队数据和peer reservation边界，原stack测试增加fence前后storage与错误代retire断言。首次新测试误用不存在counts accessor编译失败已修正；native普通reset编排尚未迁移 |
+
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
 剩余主要实施是D6普通network reset的publish→hooks→cancel→retire顺序与同代重试，

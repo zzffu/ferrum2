@@ -95,6 +95,20 @@ impl FlowOwner {
         }
     }
 
+    pub(crate) fn fence_generation(&mut self) {
+        let mut bridge = self.bridge.lock().expect("TUN TCP bridge");
+        bridge.generation_valid = false;
+        let wakers = [
+            bridge.read_waker.take(),
+            bridge.write_waker.take(),
+            bridge.shutdown_waker.take(),
+        ];
+        drop(bridge);
+        for waker in wakers.into_iter().flatten() {
+            waker.wake();
+        }
+    }
+
     pub(crate) fn is_aborted(&self) -> bool {
         self.bridge.lock().expect("TUN TCP bridge").aborted
     }
@@ -125,6 +139,7 @@ pub(crate) fn tcp_flow_pair_with_events(
         to_stack: ByteQueue::new(capacity),
         remote_closed: false,
         reset: false,
+        generation_valid: true,
         shutdown_requested: false,
         fin_sent: false,
         aborted: false,

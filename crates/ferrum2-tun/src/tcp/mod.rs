@@ -35,6 +35,9 @@ impl AsyncRead for TcpFlow {
         destination: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let mut bridge = self.bridge.lock().expect("TUN TCP bridge");
+        if !bridge.generation_valid {
+            return Poll::Ready(Err(connection_reset()));
+        }
         let copied = bridge.to_application.pop(destination.initialize_unfilled());
         if copied != 0 {
             destination.advance(copied);
@@ -61,7 +64,7 @@ impl AsyncWrite for TcpFlow {
         source: &[u8],
     ) -> Poll<io::Result<usize>> {
         let mut bridge = self.bridge.lock().expect("TUN TCP bridge");
-        if bridge.reset {
+        if bridge.reset || !bridge.generation_valid {
             return Poll::Ready(Err(connection_reset()));
         }
         if bridge.shutdown_requested {
@@ -89,7 +92,7 @@ impl AsyncWrite for TcpFlow {
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut bridge = self.bridge.lock().expect("TUN TCP bridge");
-        if bridge.reset {
+        if bridge.reset || !bridge.generation_valid {
             return Poll::Ready(Err(connection_reset()));
         }
         if bridge.to_stack.is_empty() {
@@ -102,7 +105,7 @@ impl AsyncWrite for TcpFlow {
 
     fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut bridge = self.bridge.lock().expect("TUN TCP bridge");
-        if bridge.reset {
+        if bridge.reset || !bridge.generation_valid {
             return Poll::Ready(Err(connection_reset()));
         }
         let changed = !bridge.shutdown_requested;
@@ -142,6 +145,7 @@ struct Bridge {
     to_stack: ByteQueue,
     remote_closed: bool,
     reset: bool,
+    generation_valid: bool,
     shutdown_requested: bool,
     fin_sent: bool,
     aborted: bool,

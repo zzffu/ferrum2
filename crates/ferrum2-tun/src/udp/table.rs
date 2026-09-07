@@ -788,6 +788,11 @@ impl UdpTable {
             .collect();
     }
 
+    /// Invalidates external capabilities while retaining all owner-thread storage.
+    pub(crate) fn fence_session(&self, new_generation: u64) {
+        self.session_epoch.store(new_generation, Ordering::Release);
+    }
+
     /// Invalidates every old-session handle before a rebuilt session admits work.
     #[allow(dead_code)]
     pub(crate) fn invalidate_session(
@@ -795,7 +800,7 @@ impl UdpTable {
         new_generation: u64,
         response_drop_reason: UdpResponseDropReason,
     ) {
-        self.session_epoch.store(new_generation, Ordering::Release);
+        self.fence_session(new_generation);
         for slot in 0..self.slots.len() {
             if self.slots[slot].is_some()
                 && let Some(id) = self.generations.current(slot)

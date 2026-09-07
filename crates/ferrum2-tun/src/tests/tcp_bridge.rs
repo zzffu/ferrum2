@@ -1,6 +1,39 @@
 use super::support::*;
 
 #[tokio::test]
+async fn generation_fence_rejects_buffered_reads_and_writes_without_discarding_storage() {
+    let (mut flow, mut owner) = tcp_flow_pair("192.0.2.10:443".parse().unwrap(), 4);
+    owner.write_from_stack(b"old");
+    flow.write_all(b"sent").await.unwrap();
+    owner.fence_generation();
+    owner.fence_generation();
+    let mut bytes = [0; 4];
+    assert_eq!(
+        flow.read(&mut bytes).await.unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionReset
+    );
+    assert_eq!(bytes, [0; 4]);
+    assert_eq!(
+        owner.application_capacity(),
+        1,
+        "buffer remains owned until retirement"
+    );
+    assert_eq!(owner.stack_buffered(), 4);
+    assert_eq!(
+        flow.write(b"x").await.unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionReset
+    );
+    assert_eq!(
+        flow.flush().await.unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionReset
+    );
+    assert_eq!(
+        flow.shutdown().await.unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionReset
+    );
+}
+
+#[tokio::test]
 async fn tcp_flow_queue_backpressure_partial_writes_fin_and_reset_are_lossless() {
     let target: SocketAddr = "192.0.2.10:443".parse().expect("target");
     let (mut flow, mut owner) = tcp_flow_pair(target, 4);

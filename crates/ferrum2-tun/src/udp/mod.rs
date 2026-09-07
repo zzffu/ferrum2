@@ -103,6 +103,7 @@ pub enum UdpPeerAuthorization {
     NotRequired,
     InvalidPeer,
     LimitReached,
+    StaleGeneration,
 }
 
 /// Result of reserving one ADF peer before an outbound datagram is sent.
@@ -112,6 +113,7 @@ pub enum UdpPeerReservationOutcome {
     NotRequired,
     InvalidPeer,
     LimitReached,
+    StaleGeneration,
 }
 
 /// Result of queueing one response for owner-thread injection.
@@ -429,6 +431,9 @@ pub struct UdpPeerReservation {
 
 impl UdpPeerReservation {
     pub fn commit(mut self) -> UdpPeerAuthorization {
+        if self.policy.is_stale() {
+            return UdpPeerAuthorization::StaleGeneration;
+        }
         self.active = false;
         self.policy.peer_policy.finish_reservation(self.peer, true)
     }
@@ -454,11 +459,17 @@ impl UdpPeerPolicyHandle {
     }
 
     pub fn authorize_peer(&self, peer: IpAddr) -> UdpPeerAuthorization {
+        if self.inner.is_stale() {
+            return UdpPeerAuthorization::StaleGeneration;
+        }
         self.inner.peer_policy.authorize(peer)
     }
 
     /// Reserves bounded ADF capacity without authorizing responses before send succeeds.
     pub fn reserve_peer(&self, peer: IpAddr) -> UdpPeerReservationOutcome {
+        if self.inner.is_stale() {
+            return UdpPeerReservationOutcome::StaleGeneration;
+        }
         if !same_ip_family(self.inner.peer_policy.local_ip, peer) || !valid_unicast_ip(peer) {
             return UdpPeerReservationOutcome::InvalidPeer;
         }
@@ -766,7 +777,11 @@ impl UdpAssociation {
     }
 
     pub async fn receive(&mut self) -> Option<UdpDatagram> {
-        self.receiver.recv().await
+        if self.lease.is_stale() {
+            return None;
+        }
+        let datagram = self.receiver.recv().await?;
+        (!self.lease.is_stale()).then_some(datagram)
     }
 
     pub fn send_response(&self, source: SocketAddr, payload: &[u8]) -> UdpResponseSendOutcome {

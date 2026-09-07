@@ -374,6 +374,20 @@ async fn session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state() 
     );
     assert!(stack.pending() != 0 && stack.has_output());
 
+    let before_fence = (stack.pending(), flow_count.load(Ordering::Acquire));
+    stack.fence_generation(8).unwrap();
+    stack.fence_generation(8).unwrap();
+    assert!(stack.fence_generation(9).is_err());
+    assert_eq!(
+        (stack.pending(), flow_count.load(Ordering::Acquire)),
+        before_fence
+    );
+    assert!(stack.has_output(), "fencing does not clear packet storage");
+    assert!(
+        stack
+            .retire_generation(9, UdpResponseDropReason::SessionReset)
+            .is_err()
+    );
     assert_eq!(stack.quiesce(8, UdpResponseDropReason::SessionReset), 1);
     assert_eq!(
         stack.quiesce(8, UdpResponseDropReason::SessionReset),

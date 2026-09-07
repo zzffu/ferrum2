@@ -46,6 +46,58 @@ async fn commit(table: &mut UdpTable, candidate: UdpCandidate, now_millis: i64) 
     task.await.expect("commit task").expect("association")
 }
 
+#[tokio::test]
+async fn session_fence_rejects_buffered_receive_and_peer_commit_before_retirement() {
+    let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::AddressDependent, 7);
+    assert_ne!(
+        table.admit(endpoints(10000, "192.0.2.1:53"), b"queued", 128, 0, true),
+        Admission::Dropped
+    );
+    let candidate = candidates.try_recv().unwrap();
+    let mut association = commit(&mut table, candidate, 0).await;
+    let peer = "192.0.2.1".parse().unwrap();
+    let policy = association.peer_policy();
+    let reservation = match policy.reserve_peer(peer) {
+        UdpPeerReservationOutcome::Reserved(reservation) => reservation,
+        _ => panic!("live peer reservation"),
+    };
+    table.fence_session(8);
+    assert!(
+        association.receive().await.is_none(),
+        "queued old packet cannot escape the fence"
+    );
+    assert_eq!(
+        policy.authorize_peer(peer),
+        UdpPeerAuthorization::StaleGeneration
+    );
+    assert!(matches!(
+        policy.reserve_peer(peer),
+        UdpPeerReservationOutcome::StaleGeneration
+    ));
+    assert_eq!(reservation.commit(), UdpPeerAuthorization::StaleGeneration);
+    let peers = policy
+        .inner
+        .peer_policy
+        .peers
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap();
+    assert!(peers.authorized.is_empty());
+    assert!(
+        peers.reserved.is_empty(),
+        "stale reservation still releases its own capacity"
+    );
+    drop(peers);
+    assert_eq!(
+        table.active_associations(),
+        1,
+        "fence retains native storage"
+    );
+    table.invalidate_session(8, UdpResponseDropReason::SessionReset);
+    assert_eq!(table.active_associations(), 0);
+}
+
 #[test]
 fn invalid_admission_endpoints_emit_exact_source_or_destination_reason() {
     let (mut table, _candidates, _) = table(1, 60_000, UdpFiltering::AddressDependent, 1);

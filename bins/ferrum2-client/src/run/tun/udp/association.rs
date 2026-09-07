@@ -439,7 +439,8 @@ pub(super) fn reserve_tun_udp_peer(
         ferrum2_tun::UdpPeerReservationOutcome::AlreadyAuthorized
         | ferrum2_tun::UdpPeerReservationOutcome::NotRequired => Some(TunUdpPeerReservation::Ready),
         ferrum2_tun::UdpPeerReservationOutcome::InvalidPeer
-        | ferrum2_tun::UdpPeerReservationOutcome::LimitReached => None,
+        | ferrum2_tun::UdpPeerReservationOutcome::LimitReached
+        | ferrum2_tun::UdpPeerReservationOutcome::StaleGeneration => None,
     }
 }
 
