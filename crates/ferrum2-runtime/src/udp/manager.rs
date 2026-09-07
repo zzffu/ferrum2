@@ -14,6 +14,9 @@ use super::{
     UDP_SESSION_QUEUE_DEPTH, UdpDirection, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
 };
 
+mod reset;
+use reset::NetworkFence;
+
 pub(super) struct SessionEntry {
     pub(super) generation: u64,
     pub(super) last_activity: Instant,
@@ -31,6 +34,8 @@ pub(super) struct SessionState {
     pub(super) next_generation: u64,
     pub(super) shutting_down: bool,
     pub(super) cleanup_failed: bool,
+    network_fence: Option<NetworkFence>,
+    completed_network_generation: u64,
 }
 
 pub(super) struct UdpSessionManagerInner {
@@ -110,7 +115,7 @@ impl UdpSessionManager {
     /// check does not reserve capacity, refresh activity, or wake workers.
     pub fn retain_live_sessions(&self, handles: &mut Vec<UdpSessionHandle>) {
         let state = lock_state(&self.inner);
-        if state.shutting_down {
+        if state.shutting_down || state.network_fence.is_some() {
             handles.clear();
             return;
         }
@@ -128,7 +133,7 @@ impl UdpSessionManager {
     /// entry is removed. Active and provisional state is never evicted.
     pub fn reserve_session(&self, now: Instant) -> Result<PendingUdpSession, UdpRuntimeError> {
         let mut state = lock_state(&self.inner);
-        if state.shutting_down {
+        if state.shutting_down || state.network_fence.is_some() {
             return Err(UdpRuntimeError::Cancelled);
         }
         if state.entries.len() == self.inner.limits.max_sessions() {
@@ -404,6 +409,12 @@ pub(super) fn matching_entry(
     state: &SessionState,
     handle: UdpSessionHandle,
 ) -> Result<&SessionEntry, UdpRuntimeError> {
+    if state
+        .network_fence
+        .is_some_and(|fence| handle.generation <= fence.cutoff)
+    {
+        return Err(UdpRuntimeError::Cancelled);
+    }
     state
         .entries
         .get(&handle.slot)
@@ -415,6 +426,12 @@ pub(super) fn matching_entry_mut(
     state: &mut SessionState,
     handle: UdpSessionHandle,
 ) -> Result<&mut SessionEntry, UdpRuntimeError> {
+    if state
+        .network_fence
+        .is_some_and(|fence| handle.generation <= fence.cutoff)
+    {
+        return Err(UdpRuntimeError::Cancelled);
+    }
     state
         .entries
         .get_mut(&handle.slot)
@@ -482,7 +499,12 @@ pub(super) fn release_pending(
     handle: UdpSessionHandle,
     direction: UdpDirection,
 ) {
-    if let Ok(entry) = matching_entry_mut(state, handle) {
+    // Rollback still owns its exact entry after capability fencing.
+    if let Some(entry) = state
+        .entries
+        .get_mut(&handle.slot)
+        .filter(|entry| entry.generation == handle.generation)
+    {
         let pending = &mut entry.pending[direction.index()];
         if let Some(remaining) = pending.checked_sub(1) {
             *pending = remaining;

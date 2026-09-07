@@ -61,6 +61,8 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 
 | M3g / PLAT-12 | TCP slot代数耗尽后永久退出free list，不挡住其他空闲slot | 两槽近耗尽行为测试旧实现失败；修正后TUN safe136及alltargets/allfeatures严格lint通过；不扫描free list或修改全局代数语义 |
 
+| M3h1 / D6 UDP能力 | manager在原mutex内fence旧关联代数，保持队列/预算/取消状态；同代retire/reopen幂等，exact-owner rollback仍释放fenced entry，shutdown永久关闭 | UDP generation7及runtime完整包、严格lint/fmt通过；新2项有限能力/rollback/资源基线测试。此批仅提供分阶段能力，binary/native调用迁移仍在继续，D6尚未完成 |
+
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
 剩余主要实施是D6普通network reset的publish→hooks→cancel→retire顺序与同代重试，

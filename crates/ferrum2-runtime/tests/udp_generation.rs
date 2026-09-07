@@ -185,6 +185,103 @@ fn removal_subscription_reports_each_exact_generation() {
 }
 
 #[test]
+fn network_fence_rejects_capabilities_without_retiring_storage_or_signalling_cancellation() {
+    let registry = OwnerRegistry::new();
+    let baseline = registry.snapshot();
+    let manager = UdpSessionManager::new(limits(3), registry.clone());
+    let now = Instant::now();
+    let first = committed_session(&manager, now, b"first");
+    let provisional = manager.reserve_session(now).unwrap();
+    let pending = manager
+        .reserve_datagram(first, UdpDirection::ToTarget, 8)
+        .unwrap();
+    let cancellation = manager.cancellation(first).unwrap();
+    let mut removals = manager.subscribe_removals();
+    let admitted = registry.snapshot();
+
+    manager.fence_network_generation(17).unwrap();
+    manager.fence_network_generation(17).unwrap();
+    assert_eq!(registry.snapshot(), admitted);
+    assert!(!*cancellation.borrow());
+    assert!(!cancellation.has_changed().unwrap());
+    assert!(removals.try_recv().is_err());
+    assert_eq!(
+        manager.reserve_session(now).unwrap_err(),
+        UdpRuntimeError::Cancelled
+    );
+    assert!(matches!(
+        manager.pop(first, UdpDirection::ToTarget),
+        Err(UdpRuntimeError::Cancelled)
+    ));
+    assert_eq!(
+        manager
+            .reserve_unmetered_datagram(first, UdpDirection::ToTarget, 1)
+            .unwrap_err(),
+        UdpRuntimeError::Cancelled
+    );
+    let mut live = vec![first];
+    manager.retain_live_sessions(&mut live);
+    assert!(live.is_empty());
+    let called = AtomicUsize::new(0);
+    assert!(matches!(
+        pending.commit_with(ip_datagram_with_capacity(b"late", 8), now, || {
+            called.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), ()>(())
+        }),
+        Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled))
+    ));
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    assert!(
+        !manager.cleanup_failed(),
+        "pending rollback still owns the fenced entry"
+    );
+    drop(provisional);
+    assert_eq!(manager.session_count(), 1);
+    assert!(manager.reopen_network_generation(17).is_err());
+    assert!(manager.fence_network_generation(18).is_err());
+    assert_eq!(manager.retire_network_generation(17), Ok(1));
+    assert_eq!(manager.retire_network_generation(17), Ok(0));
+    assert!(*cancellation.borrow());
+    assert_eq!(registry.snapshot(), baseline);
+    manager.reopen_network_generation(17).unwrap();
+    let fresh = committed_session(&manager, now, b"fresh");
+    manager.fence_network_generation(17).unwrap();
+    assert!(
+        manager.idle_deadline(fresh).is_ok(),
+        "completed retry cannot fence new work"
+    );
+    assert!(manager.fence_network_generation(16).is_err());
+    manager.remove(fresh);
+    assert_eq!(registry.snapshot(), baseline);
+}
+
+#[test]
+fn fenced_owner_drop_and_shutdown_preserve_exact_cleanup_without_reopening() {
+    let registry = OwnerRegistry::new();
+    let baseline = registry.snapshot();
+    let manager = UdpSessionManager::new(limits(2), registry.clone());
+    let first = committed_session(&manager, Instant::now(), b"first");
+    let pending = manager
+        .reserve_datagram(first, UdpDirection::ToClient, 8)
+        .unwrap();
+    manager.fence_network_generation(1).unwrap();
+    assert!(manager.remove(first));
+    drop(pending);
+    assert!(!manager.cleanup_failed());
+    manager.signal_all();
+    assert_eq!(manager.retire_network_generation(1), Ok(0));
+    assert_eq!(
+        manager.reopen_network_generation(1),
+        Err(UdpRuntimeError::Cancelled)
+    );
+    assert_eq!(
+        manager.reserve_session(Instant::now()).unwrap_err(),
+        UdpRuntimeError::Cancelled
+    );
+    assert_eq!(registry.snapshot(), baseline);
+}
+
+#[test]
 fn lagged_removal_subscription_recovers_with_one_batch_liveness_pass() {
     let registry = OwnerRegistry::new();
     let manager = UdpSessionManager::new(limits(1), registry.clone());
