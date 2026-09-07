@@ -575,6 +575,7 @@ pub enum NetworkFullRebuildReason {
     AddressDamage,
     RouteDamage,
     DnsDamage,
+    MtuDamage,
     StrictRouteDamage,
     OwnershipLedgerDamage,
 }
@@ -587,6 +588,7 @@ impl NetworkFullRebuildReason {
             Self::AddressDamage => "address_damage",
             Self::RouteDamage => "route_damage",
             Self::DnsDamage => "dns_damage",
+            Self::MtuDamage => "mtu_damage",
             Self::StrictRouteDamage => "strict_route_damage",
             Self::OwnershipLedgerDamage => "ownership_ledger_damage",
         }

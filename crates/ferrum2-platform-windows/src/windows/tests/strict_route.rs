@@ -12,11 +12,7 @@ use super::support::{
 
 #[test]
 fn managed_state_health_reports_owned_route_dns_and_strict_route_damage() {
-    for readback in [
-        ManagedRouteRead::Absent,
-        ManagedRouteRead::Present(2),
-        ManagedRouteRead::Failed,
-    ] {
+    for readback in [ManagedRouteRead::Absent, ManagedRouteRead::Present(2)] {
         let mut routes = InjectedRouteCleanup {
             reads: [readback].into(),
             delete_error: false,
@@ -462,15 +458,21 @@ fn managed_device_health_is_closed_and_checks_owned_state_in_order() {
         ),
     ] {
         assert_eq!(
-            managed_device_health(adapter, session, address_ledger, || identity, || addresses,),
-            ManagedTunHealth::Damaged(expected),
+            managed_device_health(
+                adapter,
+                session,
+                address_ledger,
+                || Ok(identity),
+                || Ok(addresses),
+            ),
+            Ok(ManagedTunHealth::Damaged(expected)),
             "{name}"
         );
     }
 
     assert_eq!(
-        managed_device_health(true, true, true, || true, || true),
-        ManagedTunHealth::Healthy
+        managed_device_health(true, true, true, || Ok(true), || Ok(true)),
+        Ok(ManagedTunHealth::Healthy)
     );
 
     let identity_calls = Cell::new(0);
@@ -482,14 +484,14 @@ fn managed_device_health_is_closed_and_checks_owned_state_in_order() {
             true,
             || {
                 identity_calls.set(identity_calls.get() + 1);
-                true
+                Ok(true)
             },
             || {
                 address_calls.set(address_calls.get() + 1);
-                true
+                Ok(true)
             },
         ),
-        ManagedTunHealth::Damaged(ManagedStateDamage::Adapter)
+        Ok(ManagedTunHealth::Damaged(ManagedStateDamage::Adapter))
     );
     assert_eq!(identity_calls.get(), 0);
     assert_eq!(address_calls.get(), 0);
@@ -601,5 +603,44 @@ fn ownership_ledger_damage_is_constructible_from_every_managed_owner_family() {
         },
     ] {
         assert!(!exact(Some(damaged)));
+    }
+}
+
+#[test]
+fn unavailable_health_preserves_closed_error_classification() {
+    for error in [
+        Error::recoverable_session(),
+        Error::invalid_input(),
+        Error::cleanup(),
+    ] {
+        assert_eq!(
+            managed_device_health(
+                true,
+                true,
+                true,
+                || Err(error),
+                || panic!("identity unavailable")
+            ),
+            Err(error)
+        );
+        assert_eq!(
+            managed_device_health(true, true, true, || Ok(true), || Err(error)),
+            Err(error)
+        );
+        let mut routes = InjectedRouteCleanup {
+            reads: [ManagedRouteRead::Failed(error)].into(),
+            delete_error: false,
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            managed_state_health(
+                &[1],
+                &mut routes,
+                || panic!("route unavailable"),
+                || panic!("route unavailable")
+            ),
+            Err(error)
+        );
+        assert_eq!(routes.calls, ["get"]);
     }
 }

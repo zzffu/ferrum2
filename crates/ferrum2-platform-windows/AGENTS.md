@@ -38,6 +38,12 @@ they must not tear down the long-lived managed plane. Underlay binding is target
 generation-checked; do not restore a unique-default-route assumption. A full send ring returns an
 explicit drop outcome without retry or session failure.
 
+Health readback distinguishes exact state, confirmed damage, and unavailable observations.
+An unavailable query closes underlay admission and preserves its original closed error;
+it does not prove damage or release owned adapter/session/journals. Check every enabled
+family's MTU against its journal. AdapterConfig fields stay private so construction cannot
+bypass validated family, MTU, ring and managed-network relationships.
+
 ## Focused Verification
 
 Run on ordinary Linux or Windows x86_64:

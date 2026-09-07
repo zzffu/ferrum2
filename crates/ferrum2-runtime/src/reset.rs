@@ -123,6 +123,7 @@ pub enum ManagedNetworkDamage {
     ManagedAddressDamaged,
     ManagedRouteDamaged,
     ManagedDnsDamaged,
+    ManagedMtuDamaged,
     StrictRouteDamaged,
     OwnershipLedgerUntrusted,
     ManagedObjectMissing,

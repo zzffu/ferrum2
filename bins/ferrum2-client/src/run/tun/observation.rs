@@ -258,6 +258,9 @@ pub(super) const fn map_runtime_full_rebuild_reason(
         ferrum2_tun::TunNetworkFullRebuildReason::DnsDamage => {
             ManagedNetworkDamage::ManagedDnsDamaged
         }
+        ferrum2_tun::TunNetworkFullRebuildReason::MtuDamage => {
+            ManagedNetworkDamage::ManagedMtuDamaged
+        }
         ferrum2_tun::TunNetworkFullRebuildReason::StrictRouteDamage => {
             ManagedNetworkDamage::StrictRouteDamaged
         }
@@ -284,6 +287,7 @@ const fn map_observability_full_rebuild_reason(
             NetworkFullRebuildReason::RouteDamage
         }
         ferrum2_tun::TunNetworkFullRebuildReason::DnsDamage => NetworkFullRebuildReason::DnsDamage,
+        ferrum2_tun::TunNetworkFullRebuildReason::MtuDamage => NetworkFullRebuildReason::MtuDamage,
         ferrum2_tun::TunNetworkFullRebuildReason::StrictRouteDamage => {
             NetworkFullRebuildReason::StrictRouteDamage
         }

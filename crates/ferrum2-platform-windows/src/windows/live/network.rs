@@ -528,7 +528,7 @@ pub(super) fn require_catalog_managed_identity(
     let luid = NET_LUID_LH {
         Value: managed_tun.luid,
     };
-    managed_interface_identity_matches(luid, managed_tun.index)
+    managed_interface_identity_matches(luid, managed_tun.index)?
         .then_some(())
         .ok_or(Error)
 }

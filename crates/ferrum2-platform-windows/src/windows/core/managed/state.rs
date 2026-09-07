@@ -29,22 +29,24 @@ pub(in crate::windows) fn managed_device_health(
     adapter_present: bool,
     session_present: bool,
     ownership_ledger_exact: bool,
-    mut identity_matches: impl FnMut() -> bool,
-    mut addresses_match: impl FnMut() -> bool,
-) -> ManagedTunHealth {
-    if !adapter_present || !identity_matches() {
-        return ManagedTunHealth::Damaged(ManagedStateDamage::Adapter);
+    mut identity_matches: impl FnMut() -> Result<bool, Error>,
+    mut addresses_match: impl FnMut() -> Result<bool, Error>,
+) -> Result<ManagedTunHealth, Error> {
+    if !adapter_present || !identity_matches()? {
+        return Ok(ManagedTunHealth::Damaged(ManagedStateDamage::Adapter));
     }
     if !session_present {
-        return ManagedTunHealth::Damaged(ManagedStateDamage::Session);
+        return Ok(ManagedTunHealth::Damaged(ManagedStateDamage::Session));
     }
     if !ownership_ledger_exact {
-        return ManagedTunHealth::Damaged(ManagedStateDamage::OwnershipLedger);
+        return Ok(ManagedTunHealth::Damaged(
+            ManagedStateDamage::OwnershipLedger,
+        ));
     }
-    if !addresses_match() {
-        return ManagedTunHealth::Damaged(ManagedStateDamage::Address);
+    if !addresses_match()? {
+        return Ok(ManagedTunHealth::Damaged(ManagedStateDamage::Address));
     }
-    ManagedTunHealth::Healthy
+    Ok(ManagedTunHealth::Healthy)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -91,7 +93,7 @@ pub(in crate::windows) fn managed_state_health<O: ManagedRouteCleanupOperations>
     mut dns_matches: impl FnMut() -> Result<bool, Error>,
     mut strict_route_matches: impl FnMut() -> Result<bool, Error>,
 ) -> Result<ManagedTunHealth, Error> {
-    if !managed_routes_match(routes, route_operations) {
+    if !managed_routes_match(routes, route_operations).is_exact()? {
         return Ok(ManagedTunHealth::Damaged(ManagedStateDamage::Route));
     }
     if !dns_matches()? {

@@ -94,6 +94,8 @@ pub enum ManagedStateDamage {
     Session,
     /// One or more owned interface-address rows are absent or no longer exact.
     Address,
+    /// An owned interface MTU is absent or differs from its journal.
+    Mtu,
     /// One or more owned capture-route rows are absent or no longer exact.
     Route,
     /// One or more managed DNS leases are absent or no longer exact.
@@ -107,12 +109,12 @@ pub enum ManagedStateDamage {
 /// Complete validated setup input for one newly-created Wintun adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdapterConfig {
-    pub name: Box<str>,
-    pub ipv4: Option<Ipv4Prefix>,
-    pub ipv6: Option<Ipv6Prefix>,
-    pub mtu: u16,
-    pub ring_capacity: u32,
-    pub ready_timeout: Duration,
+    name: Box<str>,
+    ipv4: Option<Ipv4Prefix>,
+    ipv6: Option<Ipv6Prefix>,
+    mtu: u16,
+    ring_capacity: u32,
+    ready_timeout: Duration,
     managed: Option<ManagedNetworkConfig>,
 }
 

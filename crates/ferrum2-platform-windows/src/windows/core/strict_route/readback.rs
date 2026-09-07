@@ -58,6 +58,6 @@ pub(in crate::windows) fn wfp_readback_present(status: u32, not_found: i32) -> R
         0 => Ok(true),
         value if value == not_found as u32 => Ok(false),
         value if value == windows_sys::Win32::Foundation::FWP_E_SESSION_ABORTED as u32 => Ok(false),
-        _ => Err(Error),
+        _ => Err(Error::recoverable_session()),
     }
 }

@@ -142,6 +142,9 @@ pub(super) unsafe extern "system" fn route_changed(
     row: *const MIB_IPFORWARD_ROW2,
     _: i32,
 ) {
+    // SAFETY: registration pins this context until confirmed cancellation has waited
+    // for callbacks; failed cancellation retains it. OS row storage is borrowed only
+    // for this callback, with null handled before any field access below.
     let context = unsafe { &*context.cast::<NotificationContext>() };
     classify_notification_luid(
         context,
@@ -159,6 +162,9 @@ pub(super) unsafe extern "system" fn interface_changed(
     row: *const MIB_IPINTERFACE_ROW,
     _: i32,
 ) {
+    // SAFETY: registration pins this context until confirmed cancellation has waited
+    // for callbacks; failed cancellation retains it. OS row storage is borrowed only
+    // for this callback, with null handled before any field access below.
     let context = unsafe { &*context.cast::<NotificationContext>() };
     classify_notification_luid(
         context,
@@ -176,6 +182,9 @@ pub(super) unsafe extern "system" fn address_changed(
     row: *const MIB_UNICASTIPADDRESS_ROW,
     _: i32,
 ) {
+    // SAFETY: registration pins this context until confirmed cancellation has waited
+    // for callbacks; failed cancellation retains it. OS row storage is borrowed only
+    // for this callback, with null handled before any field access below.
     let context = unsafe { &*context.cast::<NotificationContext>() };
     classify_notification_luid(
         context,

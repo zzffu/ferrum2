@@ -5,6 +5,7 @@ mod readback;
 
 pub(in crate::windows) use readback::{guid_matches, wfp_readback_present};
 
+/// Owns a dynamic WFP transaction. Successful creates must retain exact object identities for readback and reverse cleanup; partial installation and close failures must remain observable and ownership must survive failed explicit close.
 pub(in crate::windows) trait StrictRouteOperations {
     type Session;
 

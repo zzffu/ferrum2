@@ -132,7 +132,9 @@ impl ManagedRouteCleanupOperations for InjectedRouteCleanup {
 
     fn read(&mut self, _intended: &Self::Row) -> ManagedRouteRead<Self::Row> {
         self.calls.push("get");
-        self.reads.pop_front().unwrap_or(ManagedRouteRead::Failed)
+        self.reads
+            .pop_front()
+            .unwrap_or(ManagedRouteRead::Failed(Error::recoverable_session()))
     }
 
     fn matches(&self, intended: &Self::Row, current: &Self::Row) -> bool {
@@ -177,12 +179,18 @@ fn managed_route_cleanup_preserves_replacements_and_audits_every_delete() {
         "a third-party replacement is preserved"
     );
     assert_eq!(
-        run(vec![ManagedRouteRead::Failed], false),
+        run(
+            vec![ManagedRouteRead::Failed(Error::recoverable_session())],
+            false
+        ),
         (true, vec!["get"])
     );
     for (delete_error, final_read) in [
         (true, ManagedRouteRead::Absent),
-        (false, ManagedRouteRead::Failed),
+        (
+            false,
+            ManagedRouteRead::Failed(Error::recoverable_session()),
+        ),
         (false, ManagedRouteRead::Present(1)),
     ] {
         assert_eq!(
@@ -203,7 +211,9 @@ impl ManagedAddressCleanupOperations for InjectedAddressCleanup {
 
     fn read(&mut self, _intended: &Self::Row) -> ManagedAddressRead<Self::Row> {
         self.calls.push("get");
-        self.reads.pop_front().unwrap_or(ManagedAddressRead::Failed)
+        self.reads
+            .pop_front()
+            .unwrap_or(ManagedAddressRead::Failed(Error::recoverable_session()))
     }
 
     fn matches(&self, intended: &Self::Row, current: &Self::Row) -> bool {
@@ -249,7 +259,10 @@ fn managed_address_readback_and_cleanup_are_exact_and_foreign_safe() {
     );
     for (delete_error, final_read) in [
         (true, ManagedAddressRead::Absent),
-        (false, ManagedAddressRead::Failed),
+        (
+            false,
+            ManagedAddressRead::Failed(Error::recoverable_session()),
+        ),
         (false, ManagedAddressRead::Present(1)),
     ] {
         assert_eq!(

@@ -12,6 +12,7 @@ use crate::Error;
 
 use super::super::network::InterfaceIdentity;
 
+/// Applies resolved socket bindings. Implementors must validate the requested identity and generation and report failures without unbound fallback.
 pub(in crate::windows) trait ResolvedSocketBindingOperations {
     fn bind_interface(
         &mut self,

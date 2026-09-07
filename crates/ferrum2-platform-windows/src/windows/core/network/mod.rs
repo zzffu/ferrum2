@@ -179,6 +179,7 @@ impl UnderlayPolicy {
     }
 }
 
+/// Binds the supplied socket to the selected family and interface index. Implementors must reject invalid indices and report OS failure without silently falling back to another interface.
 pub(in crate::windows) trait SocketBindingOperations {
     fn bind(&mut self, family: std::net::IpAddr, interface_index: u32) -> Result<(), Error>;
 }
@@ -203,6 +204,7 @@ pub(in crate::windows) fn bind_fixed_with(
     policy.require_generation(generation)
 }
 
+/// Queries target-aware underlay state without changing the host network. Results must exclude the managed adapter and describe the requested family/interface; read failures must remain errors, never invented routes.
 pub(in crate::windows) trait UnderlayOperations {
     fn eligible_interfaces(
         &mut self,

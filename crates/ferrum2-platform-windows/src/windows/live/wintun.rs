@@ -189,9 +189,20 @@ impl Adapter {
         Ok(Some(next))
     }
 
-    /// Reads back only Ferrum2-owned adapter, address, route, DNS, and strict-route state.
+    /// Reads back only Ferrum2-owned adapter, address, MTU, route, DNS, and strict-route state.
+    /// An unavailable read closes policy admission without releasing any owned resource.
     pub fn managed_health(&self) -> Result<ManagedTunHealth, Error> {
-        let device_health = self.managed_device_health();
+        let health = self.read_managed_health();
+        if health != Ok(ManagedTunHealth::Healthy)
+            && let Some(state) = &self.managed
+        {
+            state.policy.invalidate();
+        }
+        health
+    }
+
+    fn read_managed_health(&self) -> Result<ManagedTunHealth, Error> {
+        let device_health = self.managed_device_health()?;
         if device_health != ManagedTunHealth::Healthy {
             return Ok(device_health);
         }
@@ -231,7 +242,7 @@ impl Adapter {
         )
     }
 
-    fn managed_device_health(&self) -> ManagedTunHealth {
+    fn managed_device_health(&self) -> Result<ManagedTunHealth, Error> {
         let expected_addresses = usize::from(self.config.ipv4.is_some())
             .saturating_add(usize::from(self.config.ipv6.is_some()));
         let owned = InterfaceIdentity {
@@ -259,10 +270,10 @@ impl Adapter {
             self.pending_address.is_some(),
             self.addresses.len(),
             expected_addresses,
-            self.network_catalog.managed_tun().ok().flatten(),
+            self.network_catalog.managed_tun()?,
             owned,
         );
-        managed_device_health(
+        let device = managed_device_health(
             self.adapter.is_some_and(|adapter| !adapter.is_null()),
             self.session
                 .as_ref()
@@ -270,17 +281,36 @@ impl Adapter {
             ownership_ledger_exact,
             || managed_interface_identity_matches(self.luid, self.interface_index),
             || {
-                self.addresses.iter().all(|intended| {
-                    read_owned_address(intended)
-                        .is_ok_and(|current| managed_address_matches(intended, &current))
-                })
+                super::super::core::managed::addresses_match(
+                    &self.addresses,
+                    &mut super::managed::PlatformManagedAddressCleanup,
+                )
+                .is_exact()
+            },
+        )?;
+        if device != ManagedTunHealth::Healthy {
+            return Ok(device);
+        }
+        super::super::core::managed::mtu_health(
+            [self.config.ipv4.is_some(), self.config.ipv6.is_some()],
+            u32::from(self.config.mtu),
+            self.mtus
+                .map(|state| state.map(|state| (state.family, state.configured))),
+            |family| {
+                super::managed::read_owned_ip_interface(self.luid, family)
+                    .map(|row| row.map(|row| row.NlMtu))
             },
         )
     }
 
     /// Revalidates one stable, debounced notification burst against managed state.
     pub fn revalidate_network_change(&mut self) -> Result<NetworkChangeOutcome, Error> {
-        if let ManagedTunHealth::Damaged(reason) = self.managed_device_health() {
+        let health = self.managed_device_health().inspect_err(|_| {
+            if let Some(state) = &self.managed {
+                state.policy.invalidate();
+            }
+        })?;
+        if let ManagedTunHealth::Damaged(reason) = health {
             if let Some(state) = &self.managed {
                 state.policy.invalidate();
             }
@@ -294,11 +324,11 @@ impl Adapter {
             Ok(ManagedNetworkValidationOutcome::ManagedStateDamaged(reason)) => {
                 Ok(NetworkChangeOutcome::ManagedStateDamaged(reason))
             }
-            Err(_) => {
+            Err(error) => {
                 if let Some(state) = &self.managed {
                     state.policy.invalidate();
                 }
-                Err(Error::recoverable_session())
+                Err(error)
             }
         }
     }
@@ -306,6 +336,9 @@ impl Adapter {
     pub fn receive(&mut self) -> Result<Option<ReceivedPacket<'_>>, Error> {
         let session = self.session.as_ref().ok_or(Error)?.handle;
         let mut len = 0_u32;
+        // SAFETY: the live session and pinned export outlive this call. Wintun returns
+        // a borrowed ring buffer whose validated length and exclusive Adapter borrow
+        // are retained by ReceivedPacket until exactly one release.
         let packet = unsafe { (self.library.exports.receive_packet)(session, &mut len) };
         if packet.is_null() {
             return classify_receive_null(unsafe {
@@ -338,6 +371,8 @@ impl Adapter {
         let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
         let result = {
             let _wait = self.session_journal.begin_wait()?;
+            // SAFETY: all four handles remain owned for this synchronous call and
+            // the array supplies exactly four entries. The wait journal blocks teardown.
             unsafe { WaitForMultipleObjects(4, handles.as_ptr(), 0, millis) }
         };
         let outcome = classify_wait_result(result)?;
@@ -359,6 +394,8 @@ impl Adapter {
         if output.is_null() {
             return classify_send_allocation_failure(unsafe { GetLastError() });
         }
+        // SAFETY: Wintun allocated len writable bytes for this session, separate from
+        // the borrowed input slice. Sending transfers the allocation exactly once.
         unsafe {
             std::ptr::copy_nonoverlapping(packet.as_ptr(), output, packet.len());
             (self.library.exports.send_packet)(session, output);

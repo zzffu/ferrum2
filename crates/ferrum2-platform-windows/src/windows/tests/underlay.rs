@@ -62,6 +62,41 @@ fn network_change_revalidates_underlay_and_owned_routes_before_shutdown() {
     assert_eq!(validated_generation, 1);
     assert_eq!(owned_routes.calls, ["get"]);
 
+    for error in [
+        Error::recoverable_session(),
+        Error::invalid_input(),
+        Error::cleanup(),
+    ] {
+        let policy = snapshot_underlay_with(&config, &mut underlay.clone()).unwrap();
+        let mut owned_routes = InjectedRouteCleanup {
+            reads: [ManagedRouteRead::Failed(error)].into(),
+            delete_error: false,
+            calls: Vec::new(),
+        };
+        let mut observed = 1;
+        assert_eq!(
+            revalidate_managed_network(
+                ManagedNetworkValidation {
+                    policy: &policy,
+                    owned: wintun,
+                    routes: &[1],
+                    validated_generation: &mut observed
+                },
+                false,
+                || 2,
+                &mut underlay.clone(),
+                &mut owned_routes,
+                || Ok(true),
+                || Ok(true),
+            ),
+            Err(error)
+        );
+        assert_eq!(observed, 1);
+        assert!(!policy.valid.load(std::sync::atomic::Ordering::Acquire));
+        assert!(bind_fixed_with(&policy, endpoint, &mut InjectedBinder::default()).is_err());
+        assert_eq!(owned_routes.calls, ["get"]);
+    }
+
     for (name, changed_underlay, route_readback, expected) in [
         (
             "underlay",
@@ -73,12 +108,6 @@ fn network_change_revalidates_underlay_and_owned_routes_before_shutdown() {
             "owned route",
             false,
             ManagedRouteRead::Present(2),
-            ManagedNetworkValidationOutcome::ManagedStateDamaged(ManagedStateDamage::Route),
-        ),
-        (
-            "replacement query",
-            false,
-            ManagedRouteRead::Failed,
             ManagedNetworkValidationOutcome::ManagedStateDamaged(ManagedStateDamage::Route),
         ),
     ] {

@@ -120,6 +120,7 @@ pub(in crate::windows) fn cancel_notification_stages<N>(
     outcome
 }
 
+/// Waits for an owned notification source. generation must observe callback publication; reset_network_change must not discard a generation racing the reset. Stop remains dominant, and wait must respect its bounded timeout without releasing callback ownership.
 pub(in crate::windows) trait NetworkChangeWaitOperations {
     fn stop_is_set(&mut self) -> Result<bool, Error>;
     fn generation(&mut self) -> u64;

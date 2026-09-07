@@ -76,8 +76,10 @@ pub(super) fn read_dns_settings(
         Flags: dns_settings_query_flags(family),
         ..DNS_INTERFACE_SETTINGS::default()
     };
+    // The initialized settings output lives until the returned OS allocation is copied
+    // and freed exactly once below. The API retains no pointer to the stack settings.
     if unsafe { GetInterfaceDnsSettings(interface, &mut settings) } != ERROR_SUCCESS {
-        return Err(Error);
+        return Err(Error::recoverable_session());
     }
     // SAFETY: a successful GetInterfaceDnsSettings call owns `NameServer` through `settings`
     // until FreeInterfaceDnsSettings. The API contract supplies a readable NUL-terminated UTF-16

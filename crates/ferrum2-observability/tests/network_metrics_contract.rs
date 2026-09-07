@@ -21,6 +21,7 @@ const REBUILD_REASONS: &[(NetworkFullRebuildReason, &str)] = &[
     (NetworkFullRebuildReason::AddressDamage, "address_damage"),
     (NetworkFullRebuildReason::RouteDamage, "route_damage"),
     (NetworkFullRebuildReason::DnsDamage, "dns_damage"),
+    (NetworkFullRebuildReason::MtuDamage, "mtu_damage"),
     (
         NetworkFullRebuildReason::StrictRouteDamage,
         "strict_route_damage",

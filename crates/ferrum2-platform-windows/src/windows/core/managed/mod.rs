@@ -1,6 +1,8 @@
 use crate::{CreateError, Error, ManagedNetworkConfig};
 
+mod health;
 mod state;
+pub(in crate::windows) use health::{ReadbackMatch, addresses_match, mtu_health};
 
 #[cfg(test)]
 pub(in crate::windows) use state::AdapterCreateFailure;
@@ -23,6 +25,7 @@ pub(in crate::windows) struct ManagedDnsLease<S> {
     pub(in crate::windows) applied: S,
 }
 
+/// Reads and mutates one owned interface DNS family. A successful apply must report its exact applied settings so the caller immediately journals the lease before readback. Failures must never imply that unknown settings can be restored.
 pub(in crate::windows) trait ManagedDnsOperations {
     type Settings: Clone + Eq;
     type Address: Copy;
@@ -68,6 +71,7 @@ pub(in crate::windows) fn restore_managed_dns<O: ManagedDnsOperations>(
     !matches!(operations.readback(), Ok(current) if current == lease.previous)
 }
 
+/// Installs owned capture routes. create_pending must journal any successfully created row before returning; commit_pending transfers that owner only after exact readback. Failures retain all pending owners for rollback.
 pub(in crate::windows) trait ManagedRouteOperations {
     type Row: Copy;
 
@@ -97,9 +101,10 @@ pub(in crate::windows) fn install_managed_routes<O: ManagedRouteOperations>(
 pub(in crate::windows) enum ManagedAddressRead<R> {
     Absent,
     Present(R),
-    Failed,
+    Failed(Error),
 }
 
+/// Reads and deletes only an owned address. matches must establish exact journal ownership; absent is distinct from unavailable. Never delete a mismatched or unreadable row.
 pub(in crate::windows) trait ManagedAddressCleanupOperations {
     type Row: Copy;
 
@@ -118,16 +123,17 @@ pub(in crate::windows) fn delete_managed_address<O: ManagedAddressCleanupOperati
             operations.delete(&current).is_err()
                 | !matches!(operations.read(intended), ManagedAddressRead::Absent)
         }
-        ManagedAddressRead::Present(_) | ManagedAddressRead::Failed => true,
+        ManagedAddressRead::Present(_) | ManagedAddressRead::Failed(_) => true,
     }
 }
 
 pub(in crate::windows) enum ManagedRouteRead<R> {
     Absent,
     Present(R),
-    Failed,
+    Failed(Error),
 }
 
+/// Reads and deletes only an owned route. matches must establish exact journal ownership; absent is distinct from unavailable. Never delete a mismatched or unreadable row.
 pub(in crate::windows) trait ManagedRouteCleanupOperations {
     type Row: Copy;
 
@@ -146,20 +152,24 @@ pub(in crate::windows) fn delete_managed_route<O: ManagedRouteCleanupOperations>
             operations.delete(&current).is_err()
                 | !matches!(operations.read(intended), ManagedRouteRead::Absent)
         }
-        ManagedRouteRead::Present(_) | ManagedRouteRead::Failed => true,
+        ManagedRouteRead::Present(_) | ManagedRouteRead::Failed(_) => true,
     }
 }
 
 pub(in crate::windows) fn managed_routes_match<O: ManagedRouteCleanupOperations>(
     intended: &[O::Row],
     operations: &mut O,
-) -> bool {
-    intended.iter().all(|row| {
-        matches!(
-            operations.read(row),
-            ManagedRouteRead::Present(current) if operations.matches(row, &current)
-        )
-    })
+) -> ReadbackMatch {
+    for row in intended {
+        match operations.read(row) {
+            ManagedRouteRead::Present(current) if operations.matches(row, &current) => {}
+            ManagedRouteRead::Present(_) | ManagedRouteRead::Absent => {
+                return ReadbackMatch::Mismatch;
+            }
+            ManagedRouteRead::Failed(error) => return ReadbackMatch::Unavailable(error),
+        }
+    }
+    ReadbackMatch::Exact
 }
 
 pub(in crate::windows) fn take_last_owned_route<R>(
@@ -190,6 +200,7 @@ pub(in crate::windows) fn finish_setup_transaction(
     }
 }
 
+/// Rolls back journaled resources in reverse order, continuing after individual failures. Each returned step consumes at most one owner and reports cleanup failure. Session idle must be established before teardown; EndSession must never overlap a wait. Unconfirmed notification cancellation must preserve callback context lifetime.
 pub(in crate::windows) trait CleanupOperations {
     fn session_is_idle(&mut self) -> bool;
     fn cancel_notifications(&mut self) -> Option<bool> {
@@ -233,6 +244,7 @@ pub(in crate::windows) fn cleanup_transaction(cleanup: &mut impl CleanupOperatio
     failed
 }
 
+/// Stages one adapter transaction. Every successful mutation must enter its rollback journal before another fallible step; failures must retain partial owners for cleanup. Cancellation and deadline checks must be nonmutating, and DAD may report ready only after every enabled address is preferred.
 pub(in crate::windows) trait SetupOperations {
     fn check_cancelled(&mut self) -> Result<(), Error>;
     fn check_deadline(&mut self) -> Result<(), Error>;

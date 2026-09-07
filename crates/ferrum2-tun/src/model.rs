@@ -160,6 +160,7 @@ pub enum TunNetworkResetReason {
 /// Closed managed-plane damage reason that permits recreating the owned TUN plane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TunNetworkFullRebuildReason {
+    MtuDamage,
     AdapterDamage,
     SessionDamage,
     AddressDamage,

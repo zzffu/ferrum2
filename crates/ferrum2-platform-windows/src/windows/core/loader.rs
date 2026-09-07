@@ -3,6 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::Error;
 use crate::artifact::{ABI_EXPORTS, DLL_BYTES, DLL_SHA256};
 
+/// Loads only the reviewed DLL through held directory and file identities. Implementors must keep each opened resource RAII-owned through every fallible verification, hash the held file with the pinned bound, constrain dependencies to System32, and resolve the complete ABI before publishing the library.
 pub(in crate::windows) trait LoaderOperations {
     fn discover_executable(&mut self) -> Result<(), Error>;
     fn reject_network_and_reparse_directories(&mut self) -> Result<(), Error>;

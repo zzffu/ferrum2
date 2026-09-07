@@ -138,6 +138,7 @@ const NETWORK_FULL_REBUILD_REASONS: &[NetworkFullRebuildReason] = &[
     NetworkFullRebuildReason::AddressDamage,
     NetworkFullRebuildReason::RouteDamage,
     NetworkFullRebuildReason::DnsDamage,
+    NetworkFullRebuildReason::MtuDamage,
     NetworkFullRebuildReason::StrictRouteDamage,
     NetworkFullRebuildReason::OwnershipLedgerDamage,
 ];

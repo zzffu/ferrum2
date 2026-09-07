@@ -85,14 +85,23 @@ pub(super) fn read_ip_interface(
     luid: NET_LUID_LH,
     family: u16,
 ) -> Result<MIB_IPINTERFACE_ROW, Error> {
+    read_owned_ip_interface(luid, family)?.ok_or(Error)
+}
+
+pub(super) fn read_owned_ip_interface(
+    luid: NET_LUID_LH,
+    family: u16,
+) -> Result<Option<MIB_IPINTERFACE_ROW>, Error> {
     let mut row = MIB_IPINTERFACE_ROW::default();
     unsafe { InitializeIpInterfaceEntry(&mut row) };
     row.Family = family;
     row.InterfaceLuid = luid;
-    if unsafe { GetIpInterfaceEntry(&mut row) } == ERROR_SUCCESS {
-        Ok(row)
-    } else {
-        Err(Error)
+    // The initialized row contains only this transaction's LUID and family; the call
+    // borrows its stack storage and retains no pointer.
+    match unsafe { GetIpInterfaceEntry(&mut row) } {
+        ERROR_SUCCESS => Ok(Some(row)),
+        ERROR_NOT_FOUND => Ok(None),
+        _ => Err(Error::recoverable_session()),
     }
 }
 
@@ -134,7 +143,7 @@ impl ManagedAddressCleanupOperations for PlatformManagedAddressCleanup {
         match unsafe { GetUnicastIpAddressEntry(&mut current) } {
             ERROR_NOT_FOUND => ManagedAddressRead::Absent,
             ERROR_SUCCESS => ManagedAddressRead::Present(current),
-            _ => ManagedAddressRead::Failed,
+            _ => ManagedAddressRead::Failed(Error::recoverable_session()),
         }
     }
 
@@ -187,7 +196,7 @@ impl ManagedRouteCleanupOperations for PlatformManagedRouteCleanup {
         match unsafe { GetIpForwardEntry2(&mut current) } {
             ERROR_NOT_FOUND => ManagedRouteRead::Absent,
             ERROR_SUCCESS => ManagedRouteRead::Present(current),
-            _ => ManagedRouteRead::Failed,
+            _ => ManagedRouteRead::Failed(Error::recoverable_session()),
         }
     }
 
@@ -288,6 +297,9 @@ impl CleanupOperations for PlatformCleanup<'_> {
 
     fn end_session(&mut self) -> Option<bool> {
         let session = self.0.session.take()?;
+        // SAFETY: cleanup_transaction proved the session journal idle before teardown.
+        // Taking the sole session owner prevents a second EndSession; Adapter's exclusive
+        // borrow prevents overlapping receives, sends, waits, or outstanding packet borrows.
         unsafe { (self.0.library.exports.end_session)(session.handle) };
         Some(false)
     }
@@ -314,6 +326,8 @@ impl CleanupOperations for PlatformCleanup<'_> {
 
     fn close_adapter(&mut self) -> Option<bool> {
         let adapter = self.0.adapter.take()?;
+        // SAFETY: the adapter was taken from its sole owner after session teardown;
+        // the pinned library remains alive throughout this final handle release.
         unsafe { (self.0.library.exports.close_adapter)(adapter) };
         Some(false)
     }
@@ -325,13 +339,20 @@ pub(super) struct PlatformSetup<'a> {
     pub(super) cancelled: &'a AtomicBool,
 }
 
-pub(super) fn managed_interface_identity_matches(luid: NET_LUID_LH, expected_index: u32) -> bool {
+pub(super) fn managed_interface_identity_matches(
+    luid: NET_LUID_LH,
+    expected_index: u32,
+) -> Result<bool, Error> {
     if unsafe { luid.Value } == 0 || expected_index == 0 {
-        return false;
+        return Ok(false);
     }
     let mut current_index = 0_u32;
-    (unsafe { ConvertInterfaceLuidToIndex(&luid, &mut current_index) }) == ERROR_SUCCESS
-        && current_index == expected_index
+    // Both pointers refer to live stack values; Windows retains neither pointer.
+    match unsafe { ConvertInterfaceLuidToIndex(&luid, &mut current_index) } {
+        ERROR_SUCCESS => Ok(current_index == expected_index),
+        ERROR_NOT_FOUND => Ok(false),
+        _ => Err(Error::recoverable_session()),
+    }
 }
 
 impl SetupOperations for PlatformSetup<'_> {
