@@ -1358,3 +1358,75 @@ Logs `m7-native-contract.log` (original failure), `m7-native-contract-red.log`,
 `m7-native-contract-python-green.log`, `m7-native-contract-green.log`; no failed test was skipped.
 Only Python platform caller/test and evidence documentation changed after the frozen Rust gates;
 product source is identical. No Qualification tool cleanup scope was reopened.
+
+
+### M7h / M7p — final Windows correctness and unsuccessful performance acceptance
+
+Final product candidate: `30ee68939ee844357d46c2ea8fb3de2017d839b0` (Rust product source
+identical to final ordinary-gate source15ff7e87). The acknowledged elevated correctness runner
+returned QUALIFIED, eight of eight checks PASS, supervisor102.5415303s, run97242ecb0a2f.
+Independent final adapter/routes/addresses/processes/ports counts all zero, cleanup1.1647253s.
+Commands/paths are in `m7-host-request.json` and `m7-host-correctness.log`. The tested contract
+covers its fixed real TUN TCP/UDP, narrow route, live WFP, notification identity, forced-tree
+recovery and cleanup checks. It is not exhaustive OS-failure injection or long-load qualification.
+
+Same controller30ee6893 and performance bundle
+`b6c2d5d94b941c8969ba6f576852f6c9b374bab05c99cac8ceae231c4256d165` were used for both
+performance attempts. Windows11Pro26200, Ryzen77700 (8cores/16logical), Rust1.97.1 MSVC,
+release/locked/offline runner builds, balanced power scheme; exact captured metadata is in
+`m7-host-metadata.json`. Quick/EndToEnd fixes four scenarios, three interleaved AB/BA pairs,
+2s warmup and10s active with completed tail accounting. One baseline-built M4 harness is intended
+for both members. TCP request workload is one closed-loop connection with1KiB payload; its clock
+starts immediately before write/read round trip. It does not include an open-loop arrival queue
+and cannot prove overload p99. Raw workload records retain p50/p95/p99, checked units, actual
+active duration, tail work and I/O counts; trial records retain CPU window, CPU, peak working set,
+failure counter deltas and route proofs. No threshold, admission limit or logging level was relaxed.
+
+- A/A: cba03a4488935a4d40cfd22f8cd658c74f4365cf vs itself, runada4c8101b2e.
+  Build111.3943s, execution372.5739s, total486.3450s. Only16/24 completed trial artifacts;
+  the17th (baseline, third UDP pair) failed **during warmup** with UDP receive Windows10060.
+  Its workload never emitted readiness, so the outer runner reported readiness timeout. No
+  application error source beyond those retained logs is established. The16 completed rows were
+  PASS with zero reported failure-counter deltas, but the entire run contains a failure and has
+  no valid overall zero-error-rate or adoption result. Six same-source TCP-throughput values span
+ 111.925–130.359MB/s; these partial observations are not an architecture before/after comparison.
+  Six TCP request rows completed370,383 requests and reported p99 147.6–149.3us; four completed
+  UDP rows are not a complete three-pair cohort. Runner exit1, validator exit2 (missing trial17).
+- A/B: cba03a4488935a4d40cfd22f8cd658c74f4365cf vs final30ee6893, run69b04f188e7c.
+  Build111.6335s, execution0s, total115.0336s. **0/24 workload trials**: HostExecution.ps1
+  rejected different M4 source bundles before publishing builds.json. Old bundle SHA-256
+  `4fc39effe4b51c3306777d1a8b1d93ed9afeb56efa12861097d4c96f12c1c9d3`; new bundle
+  `add5ffe9b7cb0f1f1cb71fc9053536a771333ab03abce7f4a32b1b0ab0258270`.
+  Git comparison confirms the only bundle member change is src/m4_support/self_check.rs,
+  29,023→29,090bytes, migrated with the protocol direction API. Actual timed workload source
+  did not change, but current whole-bundle identity equality still rejects this span. Runner
+  exit1, validator exit2 (no build evidence). This is an evidence-contract limitation, not a
+  measured product performance regression; no performance result exists for this A/B attempt.
+- Both failed transactions independently returned cleanup PASS, benchmark_succeeded=false and
+  all five residue counts zero. No second runner or privileged workaround was used.
+
+Reproduction remains the canonical performance command with each exact request's SHAs:
+`pwsh -NoProfile -File tools/windows-tun/performance/run_windows_tun_performance_host.ps1
+-Mode Quick -Topology EndToEnd -BaselineSha <request.baseline> -CandidateSha <request.candidate>
+-EvidenceDirectory <fresh-external-directory> -AcknowledgeHostNetworkMutation`, followed by
+`python -B -m tools.performance_candidate windows-tun-validate-host-evidence --evidence-root
+<directory> --baseline-sha <baseline> --candidate-sha <candidate> --mode Quick --topology
+EndToEnd --policy tools/windows_tun_performance_policy.json`. These placeholders name recorded
+inputs, not new options. The A/B command remains blocked until the bundle/harness evidence
+contract is deliberately resolved; do not claim that merely rerunning it can pass.
+
+Continuation: product architecture implementation is complete; performance acceptance is not.
+Preserve the two failures, investigate baseline warmup failure, and resolve how a single actual
+harness is bound across product commits with different self-check API source. Do not bypass the
+identity check, silently change the architecture baseline, or broaden M1 cleanup without resolving
+that scope. Then run complete same-condition A/A and A/B. CPU stack profiling/optimization has
+not been performed for this final candidate; there is no throughput, latency or CPU improvement
+claim. Production SLOs, representative overload/fairness and long-duration recovery, complete
+native platform matrix/external interoperability and dedicated Linux sanitizer/fuzz evidence
+remain outside the completed local checks.
+
+All final host, A/A failure, A/B rejection and final gate files were archived under
+`profiles/remediation-final-30ee6893-20260907T065349Z`: 168 files, 1,033,049bytes; manifest SHA-256
+`b40e953bbf4d118199161b0a985b383b656de3d3fa09ee329aa6ad574aa13d97`. The archive and raw logs remain Git-ignored, not committed.
+Original external directories are recorded in the archived request JSON files. Commands actually
+executed and failed outputs are retained; no successful test or failed measurement was relabeled.
