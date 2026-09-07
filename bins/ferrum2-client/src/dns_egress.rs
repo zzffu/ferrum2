@@ -246,8 +246,12 @@ impl DnsEgress for ClientDnsEgress {
     ) -> DnsIoFuture<BoxedDnsTcpIo> {
         let engine = Arc::clone(&self.engine);
         Box::pin(async move {
-            let queue = tasks.own(DnsEgressResourceKind::Queue);
-            let buffer = tasks.own(DnsEgressResourceKind::Buffer);
+            let queue = tasks
+                .own(DnsEgressResourceKind::Queue)
+                .map_err(std::io::Error::other)?;
+            let buffer = tasks
+                .own(DnsEgressResourceKind::Buffer)
+                .map_err(std::io::Error::other)?;
             let (client, mut bridge_front) = tokio::io::duplex(2_048);
             let (mut bridge_back, mut session_io) = tokio::io::duplex(2_048);
             tasks.spawn(DnsEgressTaskKind::Bridge, async move {
@@ -320,11 +324,21 @@ impl DnsEgress for ClientDnsEgress {
             .into_parts();
             let (session_requests, mut requests) = mpsc::channel::<Packet>(1);
             let (session_responses, mut responses) = mpsc::channel::<Packet>(1);
-            let outbound_queue = tasks.own(DnsEgressResourceKind::Queue);
-            let inbound_queue = tasks.own(DnsEgressResourceKind::Queue);
-            let request_queue = tasks.own(DnsEgressResourceKind::Queue);
-            let response_queue = tasks.own(DnsEgressResourceKind::Queue);
-            let buffer = tasks.own(DnsEgressResourceKind::Buffer);
+            let outbound_queue = tasks
+                .own(DnsEgressResourceKind::Queue)
+                .map_err(std::io::Error::other)?;
+            let inbound_queue = tasks
+                .own(DnsEgressResourceKind::Queue)
+                .map_err(std::io::Error::other)?;
+            let request_queue = tasks
+                .own(DnsEgressResourceKind::Queue)
+                .map_err(std::io::Error::other)?;
+            let response_queue = tasks
+                .own(DnsEgressResourceKind::Queue)
+                .map_err(std::io::Error::other)?;
+            let buffer = tasks
+                .own(DnsEgressResourceKind::Buffer)
+                .map_err(std::io::Error::other)?;
             tasks.spawn(DnsEgressTaskKind::Bridge, async move {
                 let (_outbound_queue, _inbound_queue, _request_queue, _response_queue, _buffer) = (
                     outbound_queue,

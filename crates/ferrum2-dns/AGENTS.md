@@ -26,3 +26,9 @@ Preserve their hashes, `resolver.test` identity, provenance, and test-only statu
 Queries use one selected server, one aggregate admission permit, and one absolute deadline. Keep Hickory caching, hosts-file lookup, retries, and server races disabled; UDP truncation may upgrade only to TCP on the same server. DoT/DoH must authenticate server names and preserve validated HTTPS paths. Preserve closed, peer-redacting `DnsError` values.
 
 Dropping `TaggedResolver` requests shutdown but is nonblocking; the owner must remain retryably awaitable off-worker. Every query, Hickory task, stream, socket, detour bridge/session, queue, and buffer must be registered, cancelled, joined, and reported at zero on successful shutdown. Proxy framing, connection limits, malformed-message handling, and UDP response truncation must stay bounded.
+
+The command-loop parent retains each query's admission, task/resource registration and reply
+through body and descendant cleanup. Registrars are weak capabilities and reject resources
+after closure; callers must propagate that rejection. Failed descendant joins remain a closed
+Runtime failure, including queued dependent commands. Reply delivery and admission release
+follow actual cleanup; cancellation or a fixed number of scheduler yields is not proof of it.

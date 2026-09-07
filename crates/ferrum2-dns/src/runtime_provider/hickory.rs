@@ -17,7 +17,7 @@ use super::admission::{DnsQueryScope, RuntimeCounters};
 use super::egress::{
     BoxedDnsDatagramIo, BoxedDnsTcpIo, DnsEgress, DnsIoFuture, hickory_placeholder,
 };
-use super::tracking::{DnsTaskRegistrar, TaskSet, TrackedHandle};
+use super::tracking::{DnsTaskRegistrar, TaskRegistration, TrackedHandle};
 
 /// Hickory runtime provider bound to one target, deadline, and plan snapshot.
 #[derive(Clone)]
@@ -27,7 +27,7 @@ pub(crate) struct FerrumRuntimeProvider {
     placeholder: SocketAddr,
     plan: Option<EgressPlanSnapshot>,
     deadline: Instant,
-    tasks: TaskSet,
+    tasks: TaskRegistration,
     counters: Arc<RuntimeCounters>,
     query_scope: DnsQueryScope,
 }
@@ -38,7 +38,7 @@ impl FerrumRuntimeProvider {
         target: TargetAddr,
         plan: Option<EgressPlanSnapshot>,
         deadline: Instant,
-        tasks: TaskSet,
+        tasks: TaskRegistration,
         counters: Arc<RuntimeCounters>,
         query_scope: DnsQueryScope,
     ) -> Self {

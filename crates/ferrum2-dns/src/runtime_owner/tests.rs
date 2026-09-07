@@ -329,8 +329,12 @@ impl DnsEgress for ScriptedTlsDetour {
                 crate::runtime_provider::DnsEgressTaskKind::Session,
                 std::future::pending(),
             );
-            let queue = tasks.own(crate::runtime_provider::DnsEgressResourceKind::Queue);
-            let buffer = tasks.own(crate::runtime_provider::DnsEgressResourceKind::Buffer);
+            let queue = tasks
+                .own(crate::runtime_provider::DnsEgressResourceKind::Queue)
+                .map_err(std::io::Error::other)?;
+            let buffer = tasks
+                .own(crate::runtime_provider::DnsEgressResourceKind::Buffer)
+                .map_err(std::io::Error::other)?;
             let (client, mut bridge) = tokio::io::duplex(4_096);
             tasks.spawn(
                 crate::runtime_provider::DnsEgressTaskKind::Bridge,

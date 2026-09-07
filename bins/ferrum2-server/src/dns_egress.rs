@@ -760,7 +760,7 @@ impl DnsEgress for ServerDnsEgress {
                 _ => return Err(closed_physical_socket_error()),
             };
             let socket = physical.connect_udp(candidate, outbound).await?;
-            Ok(server_dns_datagram(socket, candidate, tasks))
+            server_dns_datagram(socket, candidate, tasks)
         })
     }
 }
@@ -769,14 +769,20 @@ fn server_dns_datagram(
     socket: ServerPhysicalUdpSocket,
     target: SocketAddr,
     tasks: DnsTaskRegistrar,
-) -> BoxedDnsDatagramIo {
+) -> io::Result<BoxedDnsDatagramIo> {
     let (io, mut outgoing_packets, incoming_packets) = ChannelDnsDatagram::bounded(
         NonZeroUsize::new(MAX_DNS_UDP_DATAGRAM_BYTES).expect("non-zero DNS UDP datagram limit"),
     )
     .into_parts();
-    let outgoing_queue = tasks.own(DnsEgressResourceKind::Queue);
-    let incoming_queue = tasks.own(DnsEgressResourceKind::Queue);
-    let buffer = tasks.own(DnsEgressResourceKind::Buffer);
+    let outgoing_queue = tasks
+        .own(DnsEgressResourceKind::Queue)
+        .map_err(std::io::Error::other)?;
+    let incoming_queue = tasks
+        .own(DnsEgressResourceKind::Queue)
+        .map_err(std::io::Error::other)?;
+    let buffer = tasks
+        .own(DnsEgressResourceKind::Buffer)
+        .map_err(std::io::Error::other)?;
     tasks.spawn(DnsEgressTaskKind::Session, async move {
         let (_outgoing_queue, _incoming_queue, _buffer) = (outgoing_queue, incoming_queue, buffer);
         let mut response = BytesMut::with_capacity(MAX_DNS_UDP_DATAGRAM_BYTES);
@@ -801,7 +807,7 @@ fn server_dns_datagram(
             }
         }
     });
-    io
+    Ok(io)
 }
 
 #[cfg(test)]

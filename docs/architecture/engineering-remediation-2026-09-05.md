@@ -40,6 +40,7 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 | M2b / FND-03/04（SRS解码层） | 显式限额与统一累计预算；分配前准入；逐key collector替代完整中间展开；IPv6最大inclusive end正确终止；全部decoder调用迁移 | rule39/config86/ruleset25；四pinned fixture通过；workspace681/5旧ignored；client/qualification compile-only、全workspace严格lint/fmt/doc、safe平台及GNU check通过。未测SRS性能，不属于804f0dc0 |
 | M3a / PLAT-03/04 | pending通知owner覆盖snapshot失败；内外cleanup分类粘住，TUN取消不能掩盖cleanup失败；终态保留underlay失效 | platform safe62/TUN128、live all-features check、两包严格lint/格式通过；32组合与订阅失败完整对象检查；实际Win32失败注入/host及整合门禁待后续 |
 | M3b / PLAT-07/08 | DLL metadata先拒绝错误长度，同一held file固定427,552B+1byte EOF后才hash；目录句柄在可失败验证前进入RAII | platform safe66、all-features check/strictlint/格式通过；4个纯reader合同；真实CNG/CloseHandle失败计数与整合资格未执行 |
+| M2d / RD-01 | command-loop parent保管query admission、reply与实际清理；弱registrar在关闭后拒绝资源；body/descendant失败含queued child统一保留Runtime优先级 | DNS interop完整包、14个unit及全部integration通过；DNS严格clippy、DNS/client/server格式通过；binary clippy因同时进行的TUN/platform接口迁移未通过，整合门禁待冻结后重跑 |
 
 继续位置（基准`07939e2d`）：M2c实现RuleSet单文件cache事务与实际worker所有权；M2d实现
 DNS parent-owned query cleanup及关闭后的资源注册拒绝；M3a通知staged rollback已完成

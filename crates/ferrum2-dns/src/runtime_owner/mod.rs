@@ -606,6 +606,7 @@ impl Drop for TaggedResolverOwner {
 }
 
 mod command_loop;
+mod query_owner;
 
 #[cfg(test)]
 mod tests;

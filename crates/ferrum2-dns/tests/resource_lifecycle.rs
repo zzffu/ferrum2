@@ -181,8 +181,12 @@ impl DnsEgress for ScriptedDetour {
                 .await
                 .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
             let (client, mut bridge) = tokio::io::duplex(4_096);
-            let queue = tasks.own(DnsEgressResourceKind::Queue);
-            let buffer = tasks.own(DnsEgressResourceKind::Buffer);
+            let queue = tasks
+                .own(DnsEgressResourceKind::Queue)
+                .map_err(std::io::Error::other)?;
+            let buffer = tasks
+                .own(DnsEgressResourceKind::Buffer)
+                .map_err(std::io::Error::other)?;
             tasks.spawn(DnsEgressTaskKind::Bridge, async move {
                 let (_queue, _buffer) = (queue, buffer);
                 let mut upstream = upstream;
@@ -227,9 +231,15 @@ impl DnsEgress for ScriptedDetour {
             let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
             let (outgoing, mut outbound) = mpsc::channel::<Vec<u8>>(1);
             let (inbound, incoming) = mpsc::channel::<Vec<u8>>(1);
-            let outbound_queue = tasks.own(DnsEgressResourceKind::Queue);
-            let inbound_queue = tasks.own(DnsEgressResourceKind::Queue);
-            let buffer = tasks.own(DnsEgressResourceKind::Buffer);
+            let outbound_queue = tasks
+                .own(DnsEgressResourceKind::Queue)
+                .map_err(std::io::Error::other)?;
+            let inbound_queue = tasks
+                .own(DnsEgressResourceKind::Queue)
+                .map_err(std::io::Error::other)?;
+            let buffer = tasks
+                .own(DnsEgressResourceKind::Buffer)
+                .map_err(std::io::Error::other)?;
             tasks.spawn(DnsEgressTaskKind::Bridge, async move {
                 let (_outbound_queue, _inbound_queue, _buffer) =
                     (outbound_queue, inbound_queue, buffer);
