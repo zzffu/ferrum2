@@ -35,8 +35,7 @@ impl UdpReplayWindow {
         if distance > UDP_REPLAY_LAG {
             return Err(UdpPacketError::TooOld);
         }
-        let index = usize::try_from(distance).map_err(|_| UdpPacketError::TooOld)?;
-        if self.bit(index) {
+        if self.bit(Self::index(packet_id)) {
             Err(UdpPacketError::Duplicate)
         } else {
             Ok(())
@@ -47,23 +46,19 @@ impl UdpReplayWindow {
     pub fn commit(&mut self, packet_id: u64) -> Result<(), UdpPacketError> {
         self.check(packet_id)?;
         match self.highest {
-            None => {
-                self.highest = Some(packet_id);
-                self.bits[0] = 1;
-            }
+            None => self.highest = Some(packet_id),
             Some(highest) if packet_id > highest => {
-                let advance = packet_id - highest;
-                self.shift(advance);
+                self.shift(highest, packet_id - highest);
                 self.highest = Some(packet_id);
-                self.bits[0] |= 1;
             }
-            Some(highest) => {
-                let distance =
-                    usize::try_from(highest - packet_id).map_err(|_| UdpPacketError::TooOld)?;
-                self.set_bit(distance);
-            }
+            Some(_) => {}
         }
+        self.set_bit(Self::index(packet_id));
         Ok(())
+    }
+
+    fn index(packet_id: u64) -> usize {
+        (packet_id % (UDP_REPLAY_LAG + 1)) as usize
     }
 
     fn bit(&self, index: usize) -> bool {
@@ -74,24 +69,27 @@ impl UdpReplayWindow {
         self.bits[index / 64] |= 1_u64 << (index % 64);
     }
 
-    fn shift(&mut self, advance: u64) {
+    fn shift(&mut self, highest: u64, advance: u64) {
         if advance > UDP_REPLAY_LAG {
             self.bits.fill(0);
             return;
         }
-        let advance = usize::try_from(advance).expect("replay advance is at most 8128");
-        let word_shift = advance / 64;
-        let bit_shift = advance % 64;
-        let old = self.bits;
-        self.bits.fill(0);
-        for destination in word_shift..REPLAY_WORDS {
-            let source = destination - word_shift;
-            self.bits[destination] |= old[source] << bit_shift;
-            if bit_shift != 0 && source > 0 {
-                self.bits[destination] |= old[source - 1] >> (64 - bit_shift);
+        // The new highest ID is marked by commit. Only skipped IDs need their
+        // recycled positions cleared; sequential traffic does not move the bitmap.
+        let mut remaining = advance as usize - 1;
+        let mut index = Self::index(highest + 1);
+        let positions = UDP_REPLAY_LAG as usize + 1;
+        while remaining != 0 {
+            let offset = index % 64;
+            let count = remaining.min(64 - offset).min(positions - index);
+            let mask = (u64::MAX >> (64 - count)) << offset;
+            self.bits[index / 64] &= !mask;
+            remaining -= count;
+            index += count;
+            if index == positions {
+                index = 0;
             }
         }
-        self.bits[REPLAY_WORDS - 1] &= 1;
     }
 }
 

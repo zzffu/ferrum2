@@ -34,7 +34,7 @@ const SESSION_ID_LEN: usize = 8;
 const PADDING_LEN: usize = 2;
 const COMMON_HEADER_LEN: usize = 1 + TIMESTAMP_LEN + PADDING_LEN;
 const RESPONSE_BINDING_LEN: usize = SESSION_ID_LEN;
-const REPLAY_WORDS: usize = 129;
+const REPLAY_WORDS: usize = (UDP_REPLAY_LAG as usize + 1).div_ceil(64);
 
 /// Fixed caller-reusable plaintext storage for packet construction and opening.
 pub struct UdpPacketScratch {

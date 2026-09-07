@@ -41,6 +41,46 @@ fn replay_window_boundary_jump_duplicate_and_overflow_table() {
 }
 
 #[test]
+fn replay_rotation_matches_retained_ids_across_wraps_and_maximum_id() {
+    for initial in [0, u64::MAX - 16 * (UDP_REPLAY_LAG + 1)] {
+        let mut window = UdpReplayWindow::new();
+        let mut accepted = std::collections::BTreeSet::new();
+        let mut highest = initial;
+        let mut random = 0x1234_5678_9abc_def0_u64;
+        for step in 0..4_096 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let packet_id = match step % 7 {
+                0 => highest.saturating_add(1),
+                1 => highest.saturating_add(63),
+                2 => highest.saturating_add(64),
+                3 => highest.saturating_add(65),
+                4 => highest.saturating_sub(random % (UDP_REPLAY_LAG + 2)),
+                5 => highest.saturating_add(UDP_REPLAY_LAG),
+                6 => highest.saturating_add(UDP_REPLAY_LAG + 1),
+                _ => unreachable!(),
+            };
+            let expected = if highest.saturating_sub(packet_id) > UDP_REPLAY_LAG {
+                Err(UdpPacketError::TooOld)
+            } else if accepted.contains(&packet_id) {
+                Err(UdpPacketError::Duplicate)
+            } else {
+                Ok(())
+            };
+            assert_eq!(window.check(packet_id), expected);
+            assert_eq!(window.commit(packet_id), expected);
+            if expected.is_ok() {
+                highest = highest.max(packet_id);
+                accepted.insert(packet_id);
+                accepted.retain(|id| highest - id <= UDP_REPLAY_LAG);
+            }
+            assert_eq!(window.highest(), Some(highest));
+        }
+    }
+}
+
+#[test]
 fn same_authenticated_id_has_one_atomic_winner_across_64_commits() {
     let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
     let clock = Arc::new(FakeClock::new(1_700_000_000, 0));
