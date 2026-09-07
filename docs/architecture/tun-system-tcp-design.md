@@ -3,7 +3,7 @@
 ## 状态与范围
 
 设计基线：`e1f103015d38892a62b184511b1e596e2e55b8d3`。
-本文件是实施前架构与验收合同，不表示系统 TCP 已实现或性能已提升。
+系统 TCP 已完成原子切换，Windows IPv4 宿主机正确性资格已通过；本文件保留设计基线与验收合同，并在末节记录实施证据。尚未进行新旧实现的性能对比。
 
 已确认需求：
 
@@ -19,16 +19,15 @@
 替代此前仅无特权验证的限制。授权不包含默认路由、宿主机 DNS、物理接口或无关状态变更。
 实施必须同步更新资格与零残留合同；新增放行只覆盖受管 TUN 的内部 TCP listener 路径。
 
-## 当前实现与替换边界
+## 设计基线与替换边界
 
-`stack/mod.rs::enqueue_complete` 对 UDP 提取 payload 后直接调用 `UdpTable::admit`，
-随后返回。UDP 没有进入 smoltcp 的 UDP socket 状态机。
+设计基线的 `stack/mod.rs::enqueue_complete` 对 UDP 提取 payload 后直接调用 `UdpTable::admit`，
+随后返回。UDP 没有进入 smoltcp 的 UDP socket 状态机；切换后仍保留这条原生路径。
 
-TCP 当前在 `stack/tcp.rs` 创建 smoltcp socket，`tcp/owner.rs` 驱动双向内存桥，
-`tcp/mod.rs::TcpFlow` 提供 `AsyncRead + AsyncWrite` 和不可变 `target()`。
-`lifecycle/live/session.rs` 在 native owner 的公平调度中轮询 smoltcp、刷新输出和处理生命周期。
-
-切换后保留公共流语义，而不是保留旧内存桥：
+基线 TCP 在 `stack/tcp.rs` 创建 smoltcp socket，`tcp/owner.rs` 驱动双向内存桥，
+`lifecycle/live/session.rs` 负责轮询和生命周期。上述 socket、内存桥与轮询实现现已删除。
+当前 `system_tcp` 私有模块拥有 tuple 转换、映射、listener 和隔离；
+`tcp/mod.rs::TcpFlow` 以真实系统 socket 保留 `AsyncRead + AsyncWrite` 和不可变 `target()`：
 
 ```text
 应用 TCP socket
@@ -246,3 +245,56 @@ UDP 相关行为测试保留，调用方仅做公共构造和时钟类型迁移�
 真实宿主机执行仍要求已有提升权限 shell 和明确的 `-AcknowledgeHostNetworkMutation` 授权。
 普通测试不得创建真实 adapter、修改路由、DNS、WFP 或防火墙。
 没有真实执行的项目必须明确标记未验证，不能写成已完成资格。
+
+## 实施与验证结果
+
+2026-09-07 完成以下分阶段提交：
+
+| 提交 | 内容 |
+|---|---|
+| `c97b6ef2`、`22d1db48` | 设计、方案 B 与受管宿主机授权 |
+| `3416def6` | 原子系统 TCP 切换；移除 smoltcp、旧 byte bridge、tcp_buffer_bytes 和失效指标 |
+| `400e12c6` | 精确 TCP ingress WFP 资格、重置与零残留合同 |
+| `8d799fe1`、`3fedbbcf` | 使用真实出口指纹变化触发重置，并按 Windows 约束先撤销受管测试路由再创建替代项 |
+
+最终实际执行候选：`3fedbbcf4c57d3cc8ff3bbf694ae6d23d5ff7400`。
+资格 source bundle：`39fc258a8c0794d3ac94fe27a825767659f4dd0644c2056544ee3f3d4398af5b`。
+run ID：`01c2cc163c94`；`qualification.json` SHA-256：
+`31a7090e5adb0533c5eec5af3af1ea95a24de851b2e10081c1e91bd78372c2c7`。
+原始本机证据保留在仓库外的 `ferrum2-evidence/system-tcp-3fedbbcf`，不提交二进制或运行日志。
+
+**最终 verdict 为 `QUALIFIED`，八项全部 PASS，总耗时 112.1404339 秒：**
+
+- 真实 Wintun 创建／删除、系统 TCP 双向传输及原生 UDP。
+- run-owned `/32` 隔离与精确六条件、hard-permit TCP ingress WFP 读回。
+- 真实语义网络重置：session generation `2 → 4`，strict-route filter IDs 与实际权重保持；
+  TCP listener `62894 → 65006`，filter ID `203595 → 203597`，旧 filter 已不存在。
+- 重置后再次通过 TCP／UDP；强杀进程树后恢复通过。
+- 最终 adapter、route、address、process、port、strict-route WFP、TCP-ingress WFP 残留均为 0。
+
+此前两次失败分别是无关 loopback 路由未触发语义重置、Windows 拒绝同接口同前缀并存路由；
+均保留失败证据且清理 PASS，不被最终成功覆盖或算作通过。
+
+普通验证已通过：
+
+```text
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test -p ferrum2-tun -p ferrum2-platform-windows --lib --no-default-features --features fuzzing --locked
+cargo build --workspace --bins --locked
+cargo test --workspace --exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --exclude ferrum2-rule-qualification --locked
+cargo test -p ferrum2-client --all-features --no-run --locked
+cargo fmt --all -- --check
+cargo doc --workspace --all-features --no-deps --locked
+python -B -m unittest discover -s tests/performance_candidate -p test_*.py -v
+python -B -m unittest discover -s tests/platform -p test_qualify_native.py -v
+pwsh -NoProfile -File tests/platform/test_windows_tun_host_qualification.ps1
+```
+
+TUN／Windows platform 两个安全 library suite 共 211 passed；普通 workspace gate
+768 passed、5 ignored；client 仅编译测试。Python 分别 144／9 passed。
+生成的 reset selector 配置也已通过真实 client 的 `--check-config`，该检查不创建网络资源。
+
+边界仍然成立：IPv6 仅有确定性包／状态覆盖，未作真实宿主机资格；没有吞吐、CPU 或延迟
+成对测量，不宣称提速。本机包含操作员手动允许的防火墙应用规则，runner 未创建或修改这些
+持久规则，不承诺其他宿主策略下没有首次弹窗。未引入固定路径安装器、安装状态文件或新的
+二进制路径参数；最终使用原有公开 runner。
