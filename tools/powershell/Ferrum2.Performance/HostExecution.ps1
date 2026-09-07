@@ -213,7 +213,7 @@ function Build-Ferrum2HostMember {
         harness_sha256 = if ($IncludeHarness) {
             (Get-FileHash $harness -Algorithm SHA256).Hash.ToLowerInvariant()
         } else { $null }
-        source_bundle_sha256 = $sourceBundleSha256
+        product_m4_source_bundle_sha256 = $sourceBundleSha256
         wintun_dll_sha256 = (Get-FileHash $dllTarget -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 }
@@ -235,17 +235,15 @@ function Initialize-Ferrum2HostBuilds {
         -WintunDll $dll -IncludeHarness
     $candidate = Build-Ferrum2HostMember -Context $Context -Label "candidate" -Sha $CandidateSha `
         -WintunDll $dll
-    if ([string]$baseline.source_bundle_sha256 -cne
-        [string]$candidate.source_bundle_sha256) {
-        throw "baseline and candidate M4 workload source bundles differ"
-    }
+    # Each product tree's M4 bundle was verified independently before its build.
+    # Only the baseline harness executes either workload; candidate harness sources are unused.
     $candidate.harness = $baseline.harness
     $candidate.harness_sha256 = $baseline.harness_sha256
     if ([string]$baseline.harness_sha256 -cne [string]$candidate.harness_sha256) {
         throw "baseline and candidate M4 harness binaries differ"
     }
     $manifest = [pscustomobject][ordered]@{
-        schema_version = 1
+        schema_version = 2
         kind = "ferrum2.windows-tun.host-build-manifest"
         run_id = $Context.run_id
         performance_source_bundle_sha256 = $Context.performance_source_bundle_sha256
@@ -253,7 +251,7 @@ function Initialize-Ferrum2HostBuilds {
         candidate = $candidate
         shared_harness_sha256 = $baseline.harness_sha256
         shared_harness_commit_sha = $BaselineSha
-        shared_source_bundle_sha256 = $baseline.source_bundle_sha256
+        shared_harness_source_bundle_sha256 = $baseline.product_m4_source_bundle_sha256
         wintun_archive_sha256 = $script:ExpectedWintunZipSha256
         wintun_dll_sha256 = $dllHash
     }

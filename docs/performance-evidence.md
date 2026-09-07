@@ -91,6 +91,17 @@ host PowerShell transaction -> closed profile plan -> independently built baseli
 -> host validation/paired summary -> reviewed decision
 ```
 
+Windows build-manifest schema 2 distinguishes product source from the executed workload.
+Each member's `product_m4_source_bundle_sha256` records its independently verified complete M4
+source bundle. These product-tree bundles may differ after API or self-check migrations. The
+candidate's harness is not built or executed: both members use the identical baseline-built
+harness path and SHA-256. `shared_harness_commit_sha` is the baseline commit, and
+`shared_harness_source_bundle_sha256` must equal that baseline's verified M4 bundle. The validator
+rejects mismatched shared paths, binary hashes, source identity or commit, malformed member
+identities, and schema 1. This does not permit different executed workloads or skip either source
+bundle's exact closure/content verification. Old evidence remains historical and must be read
+with its original controller; there is no compatibility reader in the current schema.
+
 The Windows performance PowerShell implementation is owned by
 `tools/powershell/Ferrum2.Performance`. Its only public composition root is
 `tools/windows-tun/performance/run_windows_tun_performance_host.ps1`. The runner interface exposes

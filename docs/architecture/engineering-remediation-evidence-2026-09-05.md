@@ -1430,3 +1430,31 @@ All final host, A/A failure, A/B rejection and final gate files were archived un
 `b40e953bbf4d118199161b0a985b383b656de3d3fa09ee329aa6ad574aa13d97`. The archive and raw logs remain Git-ignored, not committed.
 Original external directories are recorded in the archived request JSON files. Commands actually
 executed and failed outputs are retained; no successful test or failed measurement was relabeled.
+
+
+### M8 — shared harness evidence repair; one A/A and one A/B requested
+
+The user explicitly reopened this bounded performance-test repair and requested exactly one new
+A/A and one new A/B, followed by results and a stop. No subagents or product changes. Build-manifest
+schema2 now records each independently verified `product_m4_source_bundle_sha256`, plus the actual
+shared baseline harness path/hash/commit and `shared_harness_source_bundle_sha256`. Candidate M4
+sources do not build or execute a second harness. The source-closure/content validation before each
+product build remains intact; validator binds the shared source to baseline and requires both
+executed harness paths/hashes to agree. Old schema/member names are rejected, no compatibility reader.
+This permits product API/self-check migrations without accepting different measured workloads.
+
+Red: `m8-build-identity-red.log` reproduces the old distinct-bundle rejection. Green: three new
+behavioral tests cover real PowerShell producer composition with injected builds, exact shared
+identity/old-schema/malformed-evidence rejections and actual source-file tamper/unlisted rejection.
+Full performance controller137 tests, platform Python9 and nonmutating PS contract passed.
+Changed PowerShell parsed and module manifest validated. Logs `target/remediation-audit/m8-*`.
+Both affected source bundles were updated atomically: performance
+`2cd5186e0e34f87e9fe1be9be2cebeab882a3e6c3a1d44a21037e098288af4c5`, shared qualification
+`105bb0b2177e0e02d2b4e20aa4b80ed0e9afd98f24df325371d51ad9be77b0f7`.
+The prior UDP warmup timeout is still a real failed workload observation, not an established tool
+bug. No new retry, widened timeout, omitted request, threshold or load change was introduced.
+
+Measurement uses the same product baseline cba03a4488935a4d40cfd22f8cd658c74f4365cf and candidate
+30ee68939ee844357d46c2ea8fb3de2017d839b0, with the newly committed controller, Quick/EndToEnd,
+three pairs/four scenarios/2s warmup/10s active. Execute A/A once, then A/B once even if A/A fails;
+preserve each terminal result and cleanup. No optimization or additional measurement run follows.

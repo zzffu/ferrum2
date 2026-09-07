@@ -98,7 +98,7 @@ _BUILD_MEMBER_FIELDS = frozenset(
         "client_sha256",
         "server_sha256",
         "harness_sha256",
-        "source_bundle_sha256",
+        "product_m4_source_bundle_sha256",
         "wintun_dll_sha256",
     }
 )
@@ -252,7 +252,7 @@ def _validate_builds(
                 "candidate",
                 "shared_harness_sha256",
                 "shared_harness_commit_sha",
-                "shared_source_bundle_sha256",
+                "shared_harness_source_bundle_sha256",
                 "wintun_archive_sha256",
                 "wintun_dll_sha256",
             }
@@ -260,7 +260,8 @@ def _validate_builds(
         "Windows TUN build evidence",
     )
     if (
-        builds["schema_version"] != 1
+        type(builds["schema_version"]) is not int
+        or builds["schema_version"] != 2
         or builds["kind"] != "ferrum2.windows-tun.host-build-manifest"
         or builds["run_id"] != run_id
         or builds["performance_source_bundle_sha256"]
@@ -270,7 +271,7 @@ def _validate_builds(
         raise CandidateControlError("Windows TUN build evidence identity is invalid")
     for field in (
         "shared_harness_sha256",
-        "shared_source_bundle_sha256",
+        "shared_harness_source_bundle_sha256",
         "wintun_archive_sha256",
         "wintun_dll_sha256",
     ):
@@ -290,15 +291,20 @@ def _validate_builds(
             "client_sha256",
             "server_sha256",
             "harness_sha256",
-            "source_bundle_sha256",
+            "product_m4_source_bundle_sha256",
             "wintun_dll_sha256",
         ):
             if type(member.get(field)) is not str or SHA256.fullmatch(member[field]) is None:
                 raise CandidateControlError(f"Windows TUN {label} build {field} is invalid")
-        if member["source_bundle_sha256"] != builds["shared_source_bundle_sha256"]:
-            raise CandidateControlError("baseline and candidate workload source contracts differ")
         if member["wintun_dll_sha256"] != builds["wintun_dll_sha256"]:
             raise CandidateControlError("Windows TUN build Wintun identities differ")
+    if (
+        builds["baseline"]["product_m4_source_bundle_sha256"]
+        != builds["shared_harness_source_bundle_sha256"]
+    ):
+        raise CandidateControlError("Windows TUN shared harness source identity is inconsistent")
+    if builds["candidate"]["harness"] != builds["baseline"]["harness"]:
+        raise CandidateControlError("Windows TUN shared harness path is inconsistent")
     if any(
         builds[label]["harness_sha256"] != builds["shared_harness_sha256"]
         for label in ("baseline", "candidate")

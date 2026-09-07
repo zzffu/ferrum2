@@ -310,13 +310,13 @@ def write_common(root: Path, mode: str, topology: str, plan: dict[str, object]) 
         "client_sha256": DIGEST,
         "server_sha256": DIGEST,
         "harness_sha256": DIGEST,
-        "source_bundle_sha256": DIGEST,
+        "product_m4_source_bundle_sha256": DIGEST,
         "wintun_dll_sha256": DIGEST,
     }
     write_json(
         root / "builds.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "ferrum2.windows-tun.host-build-manifest",
             "run_id": RUN_ID,
             "performance_source_bundle_sha256": DIGEST,
@@ -328,7 +328,7 @@ def write_common(root: Path, mode: str, topology: str, plan: dict[str, object]) 
             },
             "shared_harness_sha256": DIGEST,
             "shared_harness_commit_sha": BASELINE,
-            "shared_source_bundle_sha256": DIGEST,
+            "shared_harness_source_bundle_sha256": DIGEST,
             "wintun_archive_sha256": DIGEST,
             "wintun_dll_sha256": DIGEST,
         },
