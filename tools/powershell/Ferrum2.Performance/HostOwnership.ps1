@@ -466,6 +466,28 @@ function Add-Ferrum2OwnedRoute {
     return $row
 }
 
+function Remove-Ferrum2OwnedRoute {
+    param([Parameter(Mandatory = $true)][object]$Row)
+    $routeState = [string]$Row.state
+    if ($routeState -notin @("planned", "created")) {
+        throw "owned route ledger state is invalid"
+    }
+    $routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix ([string]$Row.destination_prefix) `
+        -InterfaceIndex ([uint32]$Row.interface_index) -ErrorAction SilentlyContinue | Where-Object {
+            [string]$_.NextHop -ceq [string]$Row.next_hop
+        })
+    if ($routes.Count -gt 1) { throw "owned route identity is not unique" }
+    if ($routes.Count -eq 1) {
+        if ($routeState -cne "created") {
+            throw "planned route presence is ambiguous; refusing removal"
+        }
+        if ([uint16]$routes[0].RouteMetric -ne [uint16]$Row.route_metric) {
+            throw "owned route metric identity mismatch"
+        }
+        Remove-NetRoute -InputObject $routes[0] -Confirm:$false -ErrorAction Stop
+    }
+}
+
 function Set-Ferrum2OwnedAdapterPlan {
     param(
         [Parameter(Mandatory = $true)][object]$Context,
@@ -618,24 +640,7 @@ function Remove-Ferrum2LedgerResources {
         }
     }
     foreach ($row in @($Ledger.resources.routes)) {
-        $routeState = [string]$row.state
-        if ($routeState -notin @("planned", "created")) {
-            throw "owned route ledger state is invalid"
-        }
-        $routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix ([string]$row.destination_prefix) `
-            -InterfaceIndex ([uint32]$row.interface_index) -ErrorAction SilentlyContinue | Where-Object {
-                [string]$_.NextHop -ceq [string]$row.next_hop
-            })
-        if ($routes.Count -gt 1) { throw "owned route identity is not unique" }
-        if ($routes.Count -eq 1) {
-            if ($routeState -cne "created") {
-                throw "planned route presence is ambiguous; refusing removal"
-            }
-            if ([uint16]$routes[0].RouteMetric -ne [uint16]$row.route_metric) {
-                throw "owned route metric identity mismatch"
-            }
-            Remove-NetRoute -InputObject $routes[0] -Confirm:$false -ErrorAction Stop
-        }
+        Remove-Ferrum2OwnedRoute -Row $row
     }
     foreach ($row in @($Ledger.resources.addresses)) {
         $addressState = [string]$row.state

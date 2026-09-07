@@ -248,10 +248,10 @@ function Initialize-Ferrum2QualificationResetRoute {
     }
     # These two exact /32 entries affect only the unused probe address. Adapter settings,
     # existing routes, DNS and WLAN state are never changed; no probe socket is opened.
-    [void](Add-Ferrum2OwnedRoute -Context $Context `
+    $ownedRoute = Add-Ferrum2OwnedRoute -Context $Context `
         -InterfaceIndex ([uint32]$selected.InterfaceIndex) -DestinationPrefix $prefix `
         -NextHop ([string]$selected.NextHop) -RouteMetric 4094 `
-        -Kind 'qualification-reset-baseline')
+        -Kind 'qualification-reset-baseline'
     $proof = Get-Ferrum2RouteProof -RemoteAddress $address `
         -ExpectedInterfaceIndex ([uint32]$selected.InterfaceIndex) `
         -Purpose 'qualification-reset-baseline'
@@ -265,6 +265,7 @@ function Initialize-Ferrum2QualificationResetRoute {
         endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Parse($address), 9)
         interface_index = [uint32]$selected.InterfaceIndex
         before = $proof
+        owned_route = $ownedRoute
     }
 }
 
@@ -343,6 +344,7 @@ function Invoke-Ferrum2HostQualificationChecks {
         $notificationAddress = $resetRoute.address
         $routeNotification = [Ferrum2QualificationRouteNotification]::new()
         try {
+            Remove-Ferrum2OwnedRoute -Row $resetRoute.owned_route
             [void](Add-Ferrum2OwnedRoute -Context $Context `
                 -InterfaceIndex $resetRoute.interface_index `
                 -DestinationPrefix $resetRoute.prefix -RouteMetric 4093 `
