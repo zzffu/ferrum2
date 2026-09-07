@@ -1,12 +1,12 @@
 use ferrum2_runtime::{PreparedProcessRoot, ProcessCancellation, ProcessFuture, ProcessRoot};
 
-use super::RootSpec;
+use super::TunRootRequest;
 
-pub(super) fn build<E>(spec: RootSpec<E>) -> ProcessRoot<E>
+pub(super) fn build<E>(spec: TunRootRequest<E>) -> ProcessRoot<E>
 where
     E: Copy + Send + 'static,
 {
-    let startup = spec.errors.startup;
+    let startup = spec.startup;
     drop(spec);
     ProcessRoot::new(move || async move { Err::<UnsupportedTargetRoot, _>(startup) })
 }
@@ -37,15 +37,15 @@ mod tests {
     use ferrum2_runtime::{OwnerRegistry, ProcessCause, ProcessSupervisor};
 
     use crate::{
-        Config, SessionCancellation, TcpFlow, UdpCandidate, UdpFiltering, UnderlayPublisher,
-        process_root,
+        Config, SessionCancellation, TcpFlow, TunRootRequest, UdpCandidate, UdpFiltering,
+        UnderlayPublisher, process_root,
     };
 
     #[tokio::test]
     async fn library_test_root_fails_during_preparation() {
         let registry = OwnerRegistry::new();
-        let root = process_root(
-            Config {
+        let root = process_root(TunRootRequest {
+            config: Config {
                 adapter_name: "unsupported".into(),
                 ipv4: None,
                 ipv6: None,
@@ -65,18 +65,22 @@ mod tests {
                 ipv6_dns_address: None,
                 strict_route: false,
             },
-            0,
-            UnderlayPublisher::new(),
-            ferrum2_platform_windows::WindowsNetworkInterfaceCatalog::system(),
-            "startup",
-            "runtime",
-            "cleanup",
-            registry.clone(),
-            |_: TcpFlow, _: _, _: SessionCancellation| Box::pin(async {}),
-            |_: UdpCandidate, _: _, _: SessionCancellation| Box::pin(async {}),
-            |_, _| Box::pin(async { Ok(()) }),
-            |_| {},
-        );
+            initial_network_generation: 0,
+            underlay: UnderlayPublisher::new(),
+            network_catalog: ferrum2_platform_windows::WindowsNetworkInterfaceCatalog::system(),
+            startup: "startup",
+            runtime: "runtime",
+            cleanup: "cleanup",
+            registry: registry.clone(),
+            handle_tcp: std::sync::Arc::new(|_: TcpFlow, _: _, _: SessionCancellation| {
+                Box::pin(async {})
+            }),
+            handle_udp: std::sync::Arc::new(|_: UdpCandidate, _: _, _: SessionCancellation| {
+                Box::pin(async {})
+            }),
+            handle_network_lifecycle: std::sync::Arc::new(|_, _| Box::pin(async { Ok(()) })),
+            events: std::sync::Arc::new(|_| {}),
+        });
         let supervisor = ProcessSupervisor::new(vec![root], Duration::from_secs(1), registry)
             .expect("one unsupported TUN root");
 

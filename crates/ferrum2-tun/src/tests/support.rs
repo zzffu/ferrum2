@@ -17,10 +17,10 @@ pub(super) use crate::reassembly::REASSEMBLY_TIMEOUT_MILLIS;
 pub(super) use crate::tcp::tcp_flow_pair;
 pub(super) use crate::{AdapterErrorDisposition, classify_adapter_error};
 pub(super) use crate::{
-    Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, NetworkResetBridgeOutcome,
-    NetworkResetRequest, OutputFlushOutcome, OutputSendOutcome, OutputSlot, OwnerControl,
-    OwnerExit, OwnerRegistry, OwnerThread, OwnerWake, PacketParser, PacketValidator, ParsedPacket,
-    SessionItem, Stack, TunEvent, TunEventSink, TunNetworkResetReason, TunRejectReason, TunRoot,
+    Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, NativeLifecycleOwner,
+    NetworkResetBridgeOutcome, OutputFlushOutcome, OutputSendOutcome, OutputSlot, OwnerControl,
+    OwnerExit, OwnerRegistry, OwnerWake, PacketParser, PacketValidator, ParsedPacket, SessionItem,
+    Stack, TunEvent, TunEventSink, TunNetworkResetReason, TunRejectReason, TunRoot,
     UdpDatagramEndpoints, UdpFiltering, UdpInjectOutcome, UdpPeerAuthorization,
     UdpResponseDropReason, finish_stack_setup, map_owner_spawn, reconcile_owner_exit,
     reported_owner_exit,

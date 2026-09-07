@@ -18,8 +18,8 @@ use super::session::{ActiveSession, SessionExit, run_active_session};
 use crate::stack::Stack;
 use crate::supervisor::runtime::{NetworkDebounce, RestartBackoff, session_cancellation};
 use crate::{
-    Config, NetworkResetBridgeOutcome, OwnerControl, OwnerExit, OwnerReady, OwnerSessionServices,
-    OwnerWake, TunEvent, TunNetworkLifecycle, TunNetworkResetReason, UdpResponseDropReason,
+    Config, NetworkResetBridgeOutcome, OwnerControl, OwnerExit, OwnerSessionServices, OwnerWake,
+    TunEvent, TunNetworkLifecycle, TunNetworkResetReason, UdpResponseDropReason,
 };
 
 pub(crate) fn owner_main(
@@ -30,7 +30,6 @@ pub(crate) fn owner_main(
     services: OwnerSessionServices,
 ) -> OwnerExit {
     let OwnerSessionServices {
-        ready,
         registry,
         network_catalog,
         events,
@@ -40,10 +39,11 @@ pub(crate) fn owner_main(
         network_lifecycle_output,
         max_udp_associations,
     } = services;
+    let ready = network_lifecycle_output.clone();
     let adapter_config = match build_adapter_config(&config) {
         Ok(adapter) => adapter,
         Err(_) => {
-            let _ = ready.send(OwnerReady::Failed);
+            ready.close();
             return OwnerExit::RuntimeFailed;
         }
     };
@@ -134,7 +134,7 @@ pub(crate) fn owner_main(
                         let _ = underlay.invalidate();
                         attempt.emit_rebuild_failed(&events);
                         if let Some(ready) = ready.take() {
-                            let _ = ready.send(OwnerReady::Failed);
+                            ready.close();
                         }
                         return OwnerExit::CleanupFailed;
                     }
@@ -158,7 +158,7 @@ pub(crate) fn owner_main(
                         }
                     }
                     if let Some(ready) = ready.take() {
-                        let _ = ready.send(OwnerReady::Failed);
+                        ready.close();
                         return OwnerExit::RuntimeFailed;
                     }
                     let delay = backoff.next_delay();
@@ -173,7 +173,7 @@ pub(crate) fn owner_main(
             *work = Some(adapter.work_signal());
         } else {
             if let Some(ready) = ready.take() {
-                let _ = ready.send(OwnerReady::Failed);
+                ready.close();
             }
             return finish_adapter(&current_work, adapter, OwnerExit::RuntimeFailed);
         }
@@ -329,12 +329,12 @@ pub(crate) fn owner_main(
                 let cleanup = adapter.cleanup();
                 if cleanup.is_err() {
                     if let Some(ready) = ready.take() {
-                        let _ = ready.send(OwnerReady::Failed);
+                        ready.close();
                     }
                     return OwnerExit::CleanupFailed;
                 }
                 if let Some(ready) = ready.take() {
-                    let _ = ready.send(OwnerReady::Failed);
+                    ready.close();
                     return OwnerExit::RuntimeFailed;
                 }
                 let delay = backoff.next_delay();
@@ -354,7 +354,7 @@ pub(crate) fn owner_main(
             clear_owner_work(&current_work);
             let cleanup = adapter.cleanup();
             if let Some(ready) = ready.take() {
-                let _ = ready.send(OwnerReady::Failed);
+                ready.close();
             }
             return if cleanup.is_err() {
                 OwnerExit::CleanupFailed
@@ -436,7 +436,7 @@ pub(crate) fn owner_main(
                 if cleanup.is_err() {
                     attempt.emit_rebuild_failed(&events);
                     if let Some(ready) = ready.take() {
-                        let _ = ready.send(OwnerReady::Failed);
+                        ready.close();
                     }
                     return OwnerExit::CleanupFailed;
                 }
@@ -452,7 +452,7 @@ pub(crate) fn owner_main(
                         continue;
                     }
                     if let Some(ready) = ready.take() {
-                        let _ = ready.send(OwnerReady::Failed);
+                        ready.close();
                     }
                     return OwnerExit::RuntimeFailed;
                 }
@@ -509,7 +509,7 @@ pub(crate) fn owner_main(
                 if cleanup.is_err() {
                     attempt.emit_rebuild_failed(&events);
                     if let Some(ready) = ready.take() {
-                        let _ = ready.send(OwnerReady::Failed);
+                        ready.close();
                     }
                     return OwnerExit::CleanupFailed;
                 }
@@ -525,7 +525,7 @@ pub(crate) fn owner_main(
                         continue;
                     }
                     if let Some(ready) = ready.take() {
-                        let _ = ready.send(OwnerReady::Failed);
+                        ready.close();
                     }
                     return OwnerExit::RuntimeFailed;
                 }
@@ -575,7 +575,7 @@ pub(crate) fn owner_main(
             clear_owner_work(&current_work);
             let cleanup = adapter.cleanup();
             if let Some(ready) = ready.take() {
-                let _ = ready.send(OwnerReady::Failed);
+                ready.close();
             }
             return if cleanup.is_err() {
                 OwnerExit::CleanupFailed
@@ -649,23 +649,10 @@ pub(crate) fn owner_main(
             }
         }
         if attempt.is_starting() {
-            let (initialization, initialized) = std::sync::mpsc::sync_channel(1);
-            let sender = ready
-                .take()
-                .expect("first TUN runtime retains its ready sender");
-            if sender
-                .send(OwnerReady::Ready {
-                    work: owner_wake.clone(),
-                    snapshot: Arc::clone(&snapshot),
-                    initialization,
-                })
-                .is_err()
-            {
-                control.stop.store(true, Ordering::Release);
-            }
-            let outcome = initialized
-                .recv()
-                .unwrap_or(NetworkResetBridgeOutcome::Stopped);
+            let outcome = network_lifecycle_output.request(
+                Arc::clone(&snapshot),
+                crate::TunNetworkLifecycle::Initialize,
+            );
             if outcome != NetworkResetBridgeOutcome::Completed {
                 session_cancel_handle.cancel();
                 stack.quiesce(
@@ -680,6 +667,21 @@ pub(crate) fn owner_main(
                 };
                 return finish_adapter(&current_work, adapter, exit);
             }
+        }
+        if attempt.is_starting() {
+            if std::time::Instant::now() >= initial_deadline {
+                session_cancel_handle.cancel();
+                stack.quiesce(
+                    candidate_generation.saturating_add(1),
+                    UdpResponseDropReason::OwnerFatal,
+                );
+                let _ = underlay.invalidate();
+                return finish_adapter(&current_work, adapter, OwnerExit::RuntimeFailed);
+            }
+            ready
+                .take()
+                .expect("first runtime retains readiness")
+                .prepared(owner_wake.clone());
         }
         generation = candidate_generation;
         events.emit(TunEvent::SessionGeneration(generation));

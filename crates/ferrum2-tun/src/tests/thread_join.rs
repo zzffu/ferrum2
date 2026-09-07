@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::OwnerWake;
-use crate::runtime::{OwnerControl, OwnerExit, OwnerThread};
+use crate::runtime::{NativeLifecycleOwner, OwnerControl, OwnerExit};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelling_reap_waits_for_native_cleanup_before_the_owner_returns() {
@@ -42,7 +42,8 @@ async fn assert_cancelled_reap_joins() {
         let _ = cleaned.send(());
         OwnerExit::Stopped
     });
-    let owner = OwnerThread {
+    let owner = NativeLifecycleOwner {
+        link: crate::LifecycleLink::default(),
         control: OwnerControl::new(),
         work: OwnerWake::default(),
         thread: Some(thread),

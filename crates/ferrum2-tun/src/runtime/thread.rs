@@ -1,19 +1,58 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::{OwnerControl, OwnerExit};
+use super::{LifecycleLink, OwnerControl, OwnerExit};
 use crate::OwnerWake;
 
-pub(crate) struct OwnerThread {
+/// One finite native operation, shared by production and hosted lifecycle tests.
+pub(crate) type NativeJob = Box<dyn FnOnce(LifecycleLink, OwnerControl) -> OwnerExit + Send>;
+
+pub(crate) struct NativeLifecycleOwner {
+    pub(crate) link: LifecycleLink,
     pub(crate) control: OwnerControl,
     pub(crate) work: OwnerWake,
     pub(crate) thread: Option<std::thread::JoinHandle<OwnerExit>>,
 }
 
-impl OwnerThread {
-    fn signal(&self) {
+impl NativeLifecycleOwner {
+    pub(crate) fn spawn(
+        control: OwnerControl,
+        job: NativeJob,
+    ) -> std::io::Result<(Self, tokio::sync::oneshot::Receiver<OwnerExit>)> {
+        let link = LifecycleLink::default();
+        let native_link = link.clone();
+        let native_control = control.clone();
+        let (done, completed) = tokio::sync::oneshot::channel();
+        let thread = std::thread::Builder::new()
+            .name("ferrum2-tun-owner".into())
+            .spawn(move || {
+                let exit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    job(native_link.clone(), native_control)
+                }))
+                .unwrap_or(OwnerExit::CleanupFailed);
+                native_link.close();
+                let _ = done.send(exit);
+                exit
+            })?;
+        Ok((
+            Self {
+                link,
+                control,
+                work: OwnerWake::default(),
+                thread: Some(thread),
+            },
+            completed,
+        ))
+    }
+
+    pub(crate) fn signal(&self) {
+        self.control.admitting.store(false, Ordering::Release);
+        self.link.close();
         self.control.stop.store(true, Ordering::Release);
         self.work.signal();
+        if let Some(thread) = &self.thread {
+            thread.thread().unpark();
+        }
     }
 
     pub(crate) async fn reap(mut self) -> OwnerExit {
@@ -25,7 +64,7 @@ impl OwnerThread {
     }
 }
 
-impl Drop for OwnerThread {
+impl Drop for NativeLifecycleOwner {
     fn drop(&mut self) {
         self.signal();
         if let Some(thread) = self.thread.take() {

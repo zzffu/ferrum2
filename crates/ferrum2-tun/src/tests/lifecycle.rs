@@ -16,6 +16,7 @@ fn only_managed_damage_escalates_a_network_change_to_full_rebuild() {
         ferrum2_platform_windows::ManagedStateDamage::Adapter,
         ferrum2_platform_windows::ManagedStateDamage::Session,
         ferrum2_platform_windows::ManagedStateDamage::Address,
+        ferrum2_platform_windows::ManagedStateDamage::Mtu,
         ferrum2_platform_windows::ManagedStateDamage::Route,
         ferrum2_platform_windows::ManagedStateDamage::Dns,
         ferrum2_platform_windows::ManagedStateDamage::StrictRoute,
@@ -70,6 +71,7 @@ fn reset_retries_transient_readback_errors_without_tearing_down_managed_state() 
         ferrum2_platform_windows::ManagedStateDamage::Adapter,
         ferrum2_platform_windows::ManagedStateDamage::Session,
         ferrum2_platform_windows::ManagedStateDamage::Address,
+        ferrum2_platform_windows::ManagedStateDamage::Mtu,
         ferrum2_platform_windows::ManagedStateDamage::Route,
         ferrum2_platform_windows::ManagedStateDamage::Dns,
         ferrum2_platform_windows::ManagedStateDamage::StrictRoute,
@@ -211,7 +213,8 @@ async fn owner_cancel_eof_panic_and_cleanup_conflict_are_reaped_before_join() {
             thread_events.lock().expect("events").push("cleanup");
             exit
         });
-        let guard = OwnerThread {
+        let guard = NativeLifecycleOwner {
+            link: crate::LifecycleLink::default(),
             control: OwnerControl {
                 stop,
                 shutdown: Arc::new(AtomicBool::new(false)),
@@ -231,7 +234,8 @@ async fn owner_cancel_eof_panic_and_cleanup_conflict_are_reaped_before_join() {
 
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
-    let guard = OwnerThread {
+    let guard = NativeLifecycleOwner {
+        link: crate::LifecycleLink::default(),
         control: OwnerControl {
             stop,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -287,7 +291,8 @@ async fn network_lifecycle_bridge_reports_retry_before_completion() {
     let (_flow_sender, flows) = tokio::sync::mpsc::channel(1);
     let (_datagram_sender, datagrams) =
         tokio::sync::mpsc::channel::<SessionItem<crate::UdpCandidate>>(1);
-    let (network_reset_sender, network_resets) = tokio::sync::mpsc::channel(1);
+    let network_reset_sender = crate::LifecycleLink::default();
+    let root_link = network_reset_sender.clone();
     let control = OwnerControl::new();
     let active = Arc::clone(&control.active);
     let flow_count = Arc::clone(&control.flow_count);
@@ -307,7 +312,8 @@ async fn network_lifecycle_bridge_reports_retry_before_completion() {
     let root_registry = registry.clone();
     let root = ProcessRoot::new(move || async move {
         Ok::<_, &'static str>(TunRoot {
-            owner: OwnerThread {
+            owner: NativeLifecycleOwner {
+                link: root_link,
                 control,
                 work: OwnerWake::default(),
                 thread: Some(thread),
@@ -317,7 +323,6 @@ async fn network_lifecycle_bridge_reports_retry_before_completion() {
             cleanup: Some("cleanup"),
             flows,
             datagrams,
-            network_resets,
             flow_count,
             association_count,
             registry: root_registry,
@@ -348,18 +353,16 @@ async fn network_lifecycle_bridge_reports_retry_before_completion() {
         (2, NetworkResetBridgeOutcome::Retry),
         (3, NetworkResetBridgeOutcome::Completed),
     ] {
-        let (completion, completed) = tokio::sync::oneshot::channel();
-        network_reset_sender
-            .send(NetworkResetRequest {
-                snapshot: Arc::new(NetworkSnapshot::new(generation, None, None).unwrap()),
-                lifecycle: crate::TunNetworkLifecycle::ResetNetwork(
-                    TunNetworkResetReason::NetworkChange,
-                ),
-                completion,
-            })
-            .await
-            .unwrap();
-        assert_eq!(completed.await.unwrap(), expected);
+        let link = network_reset_sender.clone();
+        let actual = tokio::task::spawn_blocking(move || {
+            link.request(
+                Arc::new(NetworkSnapshot::new(generation, None, None).unwrap()),
+                crate::TunNetworkLifecycle::ResetNetwork(TunNetworkResetReason::NetworkChange),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(actual, expected);
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
@@ -377,8 +380,7 @@ async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
     let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(2);
     let (_udp, datagram_receiver) =
         tokio::sync::mpsc::channel::<SessionItem<crate::UdpCandidate>>(1);
-    let (_network_reset, network_resets) =
-        tokio::sync::mpsc::channel::<crate::NetworkResetRequest>(1);
+
     let control = OwnerControl::new();
     let active = Arc::clone(&control.active);
     let flow_count = Arc::clone(&control.flow_count);
@@ -398,7 +400,8 @@ async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
     let root_registry = registry.clone();
     let root = ferrum2_runtime::ProcessRoot::new(move || async move {
         Ok::<_, &'static str>(TunRoot {
-            owner: OwnerThread {
+            owner: NativeLifecycleOwner {
+                link: crate::LifecycleLink::default(),
                 control,
                 work: OwnerWake::default(),
                 thread: Some(thread),
@@ -408,7 +411,6 @@ async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
             cleanup: Some("cleanup"),
             flows: flow_receiver,
             datagrams: datagram_receiver,
-            network_resets,
             flow_count,
             association_count,
             registry: root_registry,
@@ -487,8 +489,7 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
         let (flow_sender, flow_receiver) = tokio::sync::mpsc::channel(2);
         let (_datagram_sender, datagram_receiver) =
             tokio::sync::mpsc::channel::<SessionItem<crate::UdpCandidate>>(1);
-        let (_network_reset_sender, network_resets) =
-            tokio::sync::mpsc::channel::<crate::NetworkResetRequest>(1);
+
         let (owner_requests, requested_admissions) = std::sync::mpsc::channel::<FakeOwnerRequest>();
         let control = OwnerControl::new();
         let active = Arc::clone(&control.active);
@@ -530,6 +531,12 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
                 }
             }
 
+            let cleanup_deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while owners.iter().any(|(owner, _)| !owner.is_aborted())
+                && std::time::Instant::now() < cleanup_deadline
+            {
+                std::thread::yield_now();
+            }
             let owned_flows = owners.len();
             saw_aborted_flow.store(
                 owned_flows != 0 && owners.iter().all(|(owner, _)| owner.is_aborted()),
@@ -553,7 +560,8 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
         let root_flow_count = Arc::clone(&flow_count);
         let root = ferrum2_runtime::ProcessRoot::new(move || async move {
             Ok::<_, &'static str>(TunRoot {
-                owner: OwnerThread {
+                owner: NativeLifecycleOwner {
+                    link: crate::LifecycleLink::default(),
                     control,
                     work: OwnerWake::default(),
                     thread: Some(thread),
@@ -563,7 +571,6 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
                 cleanup: Some("cleanup"),
                 flows: flow_receiver,
                 datagrams: datagram_receiver,
-                network_resets,
                 flow_count: root_flow_count,
                 association_count: Arc::new(AtomicUsize::new(0)),
                 registry: root_registry,

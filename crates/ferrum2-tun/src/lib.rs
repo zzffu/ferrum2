@@ -44,7 +44,7 @@ pub use model::{
 pub use network::UnderlayPublisher;
 #[cfg(test)]
 pub(crate) use packet::map_packet_reject;
-pub use process::process_root;
+pub use process::{TunRootRequest, process_root};
 pub use supervisor::SessionCancellation;
 pub use tcp::TcpFlow;
 #[cfg(test)]

@@ -55,8 +55,8 @@ pub(in crate::run) fn process_root(
     let tcp_network_reset = Arc::clone(&network_reset);
     let udp_network_reset = Arc::clone(&network_reset);
     let reset_driver = Arc::clone(&network_reset);
-    ferrum2_tun::process_root(
-        ferrum2_tun::Config {
+    ferrum2_tun::process_root(ferrum2_tun::TunRootRequest {
+        config: ferrum2_tun::Config {
             adapter_name: config.adapter_name,
             ipv4: config
                 .ipv4_address
@@ -93,12 +93,12 @@ pub(in crate::run) fn process_root(
         },
         initial_network_generation,
         underlay,
-        network_interface_catalog,
-        RunError::StartupProtocol,
-        RunError::RuntimeRoot,
-        RunError::ShutdownCleanup,
-        context.registry.clone(),
-        move |flow, cancellation, session_cancellation| {
+        network_catalog: network_interface_catalog,
+        startup: RunError::StartupProtocol,
+        runtime: RunError::RuntimeRoot,
+        cleanup: RunError::ShutdownCleanup,
+        registry: context.registry.clone(),
+        handle_tcp: Arc::new(move |flow, cancellation, session_cancellation| {
             let context = Arc::clone(&handler_context);
             let routing = Arc::clone(&tcp_routing);
             let network_reset = Arc::clone(&tcp_network_reset);
@@ -124,8 +124,8 @@ pub(in crate::run) fn process_root(
                     ) => {}
                 }
             })
-        },
-        move |candidate, cancellation, session_cancellation| {
+        }),
+        handle_udp: Arc::new(move |candidate, cancellation, session_cancellation| {
             let context = Arc::clone(&udp_context);
             let routing = Arc::clone(&routing);
             let network_reset = Arc::clone(&udp_network_reset);
@@ -150,11 +150,11 @@ pub(in crate::run) fn process_root(
                     ) => {}
                 }
             })
-        },
-        move |snapshot, lifecycle| {
+        }),
+        handle_network_lifecycle: Arc::new(move |snapshot, lifecycle| {
             let network_reset = Arc::clone(&reset_driver);
             Box::pin(async move { network_reset.transition(snapshot, lifecycle).await })
-        },
-        move |event| record_tun_event(&metrics, event),
-    )
+        }),
+        events: Arc::new(move |event| record_tun_event(&metrics, event)),
+    })
 }

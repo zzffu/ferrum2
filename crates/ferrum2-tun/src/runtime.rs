@@ -1,16 +1,19 @@
+mod prepare;
 mod thread;
-pub(crate) use thread::OwnerThread;
+#[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
+pub(crate) use prepare::PreparationFailure;
+pub(crate) use thread::NativeLifecycleOwner;
+mod link;
+pub(crate) use link::{LifecycleEvent, LifecycleLink, NetworkResetRequest};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use ferrum2_net::NetworkSnapshot;
 use ferrum2_runtime::{OwnerRegistry, PreparedProcessRoot, ProcessCancellation, ProcessFuture};
 
 use crate::process::{NetworkLifecycleHandler, TcpHandler, UdpHandler};
 use crate::{
-    SessionCancellation, TcpFlow, TunNetworkFullRebuildReason, TunNetworkLifecycle,
-    TunNetworkResetError, UdpCandidate,
+    SessionCancellation, TcpFlow, TunNetworkFullRebuildReason, TunNetworkResetError, UdpCandidate,
 };
 
 // Unsupported roots type-check bridge callbacks but never own a packet loop.
@@ -72,13 +75,12 @@ impl OwnerControl {
 }
 
 pub(crate) struct TunRoot<E> {
-    pub(crate) owner: OwnerThread,
+    pub(crate) owner: NativeLifecycleOwner,
     pub(crate) done: tokio::sync::oneshot::Receiver<OwnerExit>,
     pub(crate) runtime: Option<E>,
     pub(crate) cleanup: Option<E>,
     pub(crate) flows: tokio::sync::mpsc::Receiver<SessionItem<TcpFlow>>,
     pub(crate) datagrams: tokio::sync::mpsc::Receiver<SessionItem<UdpCandidate>>,
-    pub(crate) network_resets: tokio::sync::mpsc::Receiver<NetworkResetRequest>,
     pub(crate) flow_count: Arc<AtomicUsize>,
     pub(crate) association_count: Arc<AtomicUsize>,
     pub(crate) registry: OwnerRegistry,
@@ -90,12 +92,6 @@ pub(crate) struct TunRoot<E> {
 pub(crate) struct SessionItem<T> {
     pub(crate) value: T,
     pub(crate) cancellation: SessionCancellation,
-}
-
-pub(crate) struct NetworkResetRequest {
-    pub(crate) snapshot: Arc<NetworkSnapshot>,
-    pub(crate) lifecycle: TunNetworkLifecycle,
-    pub(crate) completion: tokio::sync::oneshot::Sender<NetworkResetBridgeOutcome>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,12 +122,12 @@ where
             let mut network_resets_open = true;
             let reported = 'required: loop {
                 if cancellation.is_cancelled() {
+                    self.owner.link.close();
                     self.owner.control.shutdown.store(true, Ordering::Release);
                     self.owner.control.admitting.store(false, Ordering::Release);
                     self.owner.work.signal();
                 }
                 if cancellation.is_forced() {
-                    tasks.abort_all();
                     break OwnerExit::Stopped;
                 }
                 if cancellation.is_cancelled()
@@ -191,8 +187,8 @@ where
                             });
                         }
                     }
-                    request = self.network_resets.recv(), if network_resets_open => {
-                        let Some(NetworkResetRequest { snapshot, lifecycle, completion }) = request else {
+                    request = self.owner.link.receive(), if network_resets_open => {
+                        let Some(LifecycleEvent::Request(NetworkResetRequest { snapshot, lifecycle, completion })) = request else {
                             network_resets_open = false;
                             continue;
                         };
@@ -208,7 +204,7 @@ where
                                 Err(TunNetworkResetError) => NetworkResetBridgeOutcome::Retry,
                             },
                         };
-                        let _ = completion.send(outcome);
+                        completion.complete(outcome);
                     }
                     result = tasks.join_next(), if !tasks.is_empty() => {
                         if result.is_some_and(|result| result.is_err()) {
@@ -216,13 +212,15 @@ where
                         }
                     }
                     () = cancellation.cancelled(), if !cancellation.is_cancelled() => {
-                        self.owner.control.shutdown.store(true, Ordering::Release);
+                        self.owner.link.close();
+                    self.owner.control.shutdown.store(true, Ordering::Release);
                         self.owner.control.admitting.store(false, Ordering::Release);
                         self.owner.work.signal();
                     }
                     () = forced.forced(), if cancellation.is_cancelled() => {}
                 }
             };
+            self.owner.signal();
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
             let reaped = self.owner.reap().await;
@@ -268,6 +266,7 @@ pub(crate) fn reconcile_owner_exit(reported: OwnerExit, reaped: OwnerExit) -> Ow
     }
 }
 
+#[cfg(test)]
 pub(crate) fn map_owner_spawn<T, E>(spawned: std::io::Result<T>, startup: E) -> Result<T, E> {
     spawned.map_err(|_| startup)
 }
@@ -290,4 +289,4 @@ pub(crate) fn finish_stack_setup<T, A, C>(
 #[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
 mod live;
 #[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
-pub(crate) use live::{OWNER_WORK_BUDGET, OwnerReady, OwnerSessionServices};
+pub(crate) use live::{OWNER_WORK_BUDGET, OwnerSessionServices};

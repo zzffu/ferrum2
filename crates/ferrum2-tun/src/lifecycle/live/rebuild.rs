@@ -5,8 +5,8 @@ use ferrum2_net::NetworkSnapshot;
 use super::prepare::wait_owner_delay;
 use crate::supervisor::runtime::RestartBackoff;
 use crate::{
-    NetworkResetBridgeOutcome, NetworkResetRequest, OwnerControl, OwnerExit, TunEvent,
-    TunEventSink, TunNetworkFullRebuildReason, TunNetworkLifecycle, TunNetworkResetReason,
+    LifecycleLink, NetworkResetBridgeOutcome, OwnerControl, OwnerExit, TunEvent, TunEventSink,
+    TunNetworkFullRebuildReason, TunNetworkLifecycle, TunNetworkResetReason,
 };
 
 pub(crate) fn adapter_underlay_is_current(adapter: &ferrum2_platform_windows::Adapter) -> bool {
@@ -16,24 +16,11 @@ pub(crate) fn adapter_underlay_is_current(adapter: &ferrum2_platform_windows::Ad
 }
 
 pub(crate) fn request_client_network_lifecycle(
-    output: &tokio::sync::mpsc::Sender<NetworkResetRequest>,
+    output: &LifecycleLink,
     snapshot: Arc<NetworkSnapshot>,
     lifecycle: TunNetworkLifecycle,
 ) -> NetworkResetBridgeOutcome {
-    let (completion, completed) = tokio::sync::oneshot::channel();
-    if output
-        .blocking_send(NetworkResetRequest {
-            snapshot,
-            lifecycle,
-            completion,
-        })
-        .is_err()
-    {
-        return NetworkResetBridgeOutcome::Stopped;
-    }
-    completed
-        .blocking_recv()
-        .unwrap_or(NetworkResetBridgeOutcome::Stopped)
+    output.request(snapshot, lifecycle)
 }
 
 #[derive(Clone, Copy)]
@@ -247,7 +234,7 @@ impl AttemptMode {
 }
 
 pub(crate) fn request_full_rebuild_transition(
-    output: &tokio::sync::mpsc::Sender<NetworkResetRequest>,
+    output: &LifecycleLink,
     snapshot: Arc<NetworkSnapshot>,
     lifecycle: TunNetworkLifecycle,
     control: &OwnerControl,
@@ -266,7 +253,7 @@ pub(crate) fn request_full_rebuild_transition(
 
 pub(crate) fn start_full_rebuild(
     rebuild: Result<PendingFullRebuild, OwnerExit>,
-    output: &tokio::sync::mpsc::Sender<NetworkResetRequest>,
+    output: &LifecycleLink,
     control: &OwnerControl,
     backoff: &mut RestartBackoff,
     events: &TunEventSink,
