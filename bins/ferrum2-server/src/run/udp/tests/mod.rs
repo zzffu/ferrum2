@@ -39,6 +39,7 @@ mod identity;
 mod listener;
 mod response_codec;
 mod run_loop;
+mod work;
 use crate::run::test_support::*;
 
 type CapturedSends = Arc<Mutex<Vec<(SocketAddr, Vec<u8>)>>>;

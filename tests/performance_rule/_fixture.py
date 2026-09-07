@@ -51,7 +51,7 @@ def report(sha256: str, identifiers=IDENTIFIERS, value: int = 10):
         "runner": {"sha256": sha256, "bytes": 1},
         "configuration": {
             "match_sizes": [100],
-            "route_sizes": [1, 32, 64],
+            "route_sizes": [1, 32, 63, 64, 65],
             "dns_rule_sizes": [1],
             "samples": 5,
             "base_iterations_per_sample": 10,

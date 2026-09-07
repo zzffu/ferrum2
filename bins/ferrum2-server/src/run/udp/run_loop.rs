@@ -28,6 +28,7 @@ use super::completion::{observe_completion, observe_shutdown};
 use super::listener::{MAX_UDP_LISTENER_READINESS_DRAIN, ServerUdpListener, ServerUdpRuntime};
 use super::physical::ServerUdpNetworkPolicy;
 use super::route::select_udp_route;
+use super::work::{NewSessionWork, PreparedRequest, QueuedRequest};
 
 impl<L, SF> PreparedUdpServer<L, SF>
 where
@@ -88,6 +89,8 @@ where
         let mut removals = runtime.sessions().subscribe_removals();
         tokio::pin!(shutdown);
         let mut readiness_drain = 0;
+        let mut work = NewSessionWork::new(config.max_sessions, runtime.sessions().buffer_budget());
+        let mut ready = std::collections::VecDeque::new();
 
         let terminal = 'packets: loop {
             while let Some(completion) = runtime.try_next_completion() {
@@ -103,74 +106,112 @@ where
                     _ = tokio::task::yield_now() => {}
                 }
             }
-            wire.clear();
-            let received = if readiness_drain == 0 {
-                tokio::select! {
-                    biased;
-                    _ = &mut shutdown => break Ok(()),
-                    _ = maintenance.tick() => {
-                        let maintenance_guard = tokio::select! {
+            let (pending, peer, wire_len, prepared, deadline, _queued_bytes) =
+                if let Some(PreparedRequest { request, prepared }) = ready.pop_front() {
+                    let QueuedRequest {
+                        pending,
+                        peer,
+                        wire_len,
+                        deadline,
+                        bytes,
+                    } = request;
+                    (pending, peer, wire_len, prepared, deadline, Some(bytes))
+                } else {
+                    wire.clear();
+                    let received = if readiness_drain == 0 {
+                        tokio::select! {
                             biased;
                             _ = &mut shutdown => break Ok(()),
-                            guard = admission.lock() => guard,
-                        };
-                        mappings.prune_protocol(&protocol, clock.monotonic_now());
-                        drop(maintenance_guard);
-                        update_udp_resource_metrics(&metrics, &registry);
-                        continue;
-                    }
-                    completion = runtime.next_completion(), if runtime.has_tasks() => {
-                        if let Some(completion) = completion
-                            && observe_completion(&metrics, &mappings, &completion)
+                            _ = maintenance.tick() => {
+                                let maintenance_guard = tokio::select! {
+                                    biased;
+                                    _ = &mut shutdown => break Ok(()),
+                                    guard = admission.lock() => guard,
+                                };
+                                mappings.prune_protocol(&protocol, clock.monotonic_now());
+                                drop(maintenance_guard);
+                                update_udp_resource_metrics(&metrics, &registry);
+                                continue;
+                            }
+                            completion = runtime.next_completion(), if runtime.has_tasks() => {
+                                if let Some(completion) = completion
+                                    && observe_completion(&metrics, &mappings, &completion)
+                                {
+                                    break Err(RunError::RuntimeRoot);
+                                }
+                                update_udp_resource_metrics(&metrics, &registry);
+                                continue;
+                            }
+                            removed = removals.recv() => {
+                                match removed {
+                                    Ok(handle) => mappings.invalidate_handle(handle),
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        reconcile_udp_generations(&runtime, &mappings);
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                        break Err(RunError::RuntimeRoot);
+                                    }
+                                }
+                                continue;
+                            }
+                            completed = work.next(), if work.has_work() => {
+                                match completed {
+                                    Ok(requests) => ready.extend(requests),
+                                    Err(error) => record_udp_runtime_failure(&metrics, error),
+                                }
+                                continue;
+                            }
+                            received = listener.recv_buf_from(&mut wire) => received,
+                        }
+                    } else {
+                        match listener.try_recv_buf_from(&mut wire) {
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                readiness_drain = 0;
+                                continue;
+                            }
+                            received => received,
+                        }
+                    };
+                    let (wire_len, peer) = match received {
+                        Ok(received)
+                            if received.0 == wire.len()
+                                && received.0 <= MAX_UDP_WIRE_DATAGRAM_BYTES =>
                         {
-                            break Err(RunError::RuntimeRoot);
+                            received
                         }
-                        update_udp_resource_metrics(&metrics, &registry);
-                        continue;
-                    }
-                    removed = removals.recv() => {
-                        match removed {
-                            Ok(handle) => mappings.invalidate_handle(handle),
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                reconcile_udp_generations(&runtime, &mappings);
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                break Err(RunError::RuntimeRoot);
-                            }
+                        Ok(_) | Err(_) => {
+                            record_udp_failure(
+                                &metrics,
+                                Stage::Listen,
+                                Reason::Receive,
+                                Outcome::Failed,
+                            );
+                            break Err(RunError::RuntimeListener);
                         }
-                        continue;
-                    }
-                    received = listener.recv_buf_from(&mut wire) => received,
-                }
-            } else {
-                match listener.try_recv_buf_from(&mut wire) {
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        readiness_drain = 0;
-                        continue;
-                    }
-                    received => received,
-                }
-            };
-            let (wire_len, peer) = match received {
-                Ok(received)
-                    if received.0 == wire.len() && received.0 <= MAX_UDP_WIRE_DATAGRAM_BYTES =>
-                {
-                    received
-                }
-                Ok(_) | Err(_) => {
-                    record_udp_failure(&metrics, Stage::Listen, Reason::Receive, Outcome::Failed);
-                    break Err(RunError::RuntimeListener);
-                }
-            };
-            readiness_drain += 1;
-            let wire = wire.as_ref();
-            let pending = match protocol.prepare_request(clock.as_ref(), wire, &mut scratch) {
-                Ok(pending) => pending,
-                Err(error) => {
-                    record_udp_protocol_failure(&metrics, error);
-                    continue;
-                }
-            };
+                    };
+                    readiness_drain += 1;
+                    let wire = wire.as_ref();
+                    let pending = match protocol.prepare_request(clock.as_ref(), wire, &mut scratch)
+                    {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            record_udp_protocol_failure(&metrics, error);
+                            continue;
+                        }
+                    };
+                    (
+                        pending,
+                        peer,
+                        wire_len,
+                        None,
+                        tokio::time::Instant::now() + connect_timeout,
+                        None,
+                    )
+                };
+            if tokio::time::Instant::now() >= deadline {
+                record_udp_runtime_failure(&metrics, UdpRuntimeError::Resolve);
+                continue;
+            }
             // The shared gate protects only protocol/mapping observations and their
             // synchronous commit. In particular, it is never held while a provisional
             // runtime session opens its socket below.
@@ -216,15 +257,19 @@ where
                         break Err(RunError::RuntimeRoot);
                     }
                 }
-                select_udp_route(
-                    &routing,
-                    inbound,
-                    pending.datagram().target(),
-                    pending.datagram().payload(),
-                    &metrics,
-                    &mut route_scratch,
-                )
-                .map_err(run_error_for_rule_compile)?
+                if let Some((_, _, outbound)) = prepared.as_ref() {
+                    ServerTerminalRoute::Direct(*outbound)
+                } else {
+                    select_udp_route(
+                        &routing,
+                        inbound,
+                        pending.datagram().target(),
+                        pending.datagram().payload(),
+                        &metrics,
+                        &mut route_scratch,
+                    )
+                    .map_err(run_error_for_rule_compile)?
+                }
             };
             if terminal == ServerTerminalRoute::Reject {
                 match commit_rejected_request(
@@ -302,16 +347,67 @@ where
                 }
             }
 
-            drop(admission_guard);
             let ServerTerminalRoute::Direct(outbound) = terminal else {
                 unreachable!("rejected UDP route returned before direct session admission")
             };
-            let mut outbound = outbound;
-            'open_direct: loop {
-                let Some(session_resolver) = direct_resolvers
-                    .get(outbound)
-                    .cloned()
-                    .map(|resolver| resolver.for_inbound(inbound))
+            // Completion re-enters the same authenticated frozen-route/generation
+            // checks as a received packet. Only this gate may publish accepted state.
+            if let Some((provisional, session_resolver, prepared_outbound)) = prepared {
+                if prepared_outbound == outbound {
+                    let committed = commit_new_direct_session(
+                        &mut runtime,
+                        provisional,
+                        pending,
+                        session_resolver,
+                        &protocol,
+                        &mappings,
+                        peer,
+                        &clock,
+                        inbound,
+                        outbound,
+                    );
+                    match committed {
+                        Ok(_) => record_udp_request_accepted(&metrics, wire_len),
+                        Err(NewDirectCommitError::Runtime(error)) => {
+                            record_udp_runtime_failure(&metrics, error);
+                            if matches!(
+                                error,
+                                UdpRuntimeError::ProtocolPanicked
+                                    | UdpRuntimeError::StateUnavailable
+                            ) {
+                                break Err(RunError::RuntimeRoot);
+                            }
+                        }
+                        Err(NewDirectCommitError::Protocol(error)) => {
+                            record_udp_protocol_failure(&metrics, error)
+                        }
+                        Err(NewDirectCommitError::Identity) => {
+                            record_udp_protocol_failure(&metrics, UdpPacketError::Generation);
+                            break Err(RunError::RuntimeRoot);
+                        }
+                    }
+                    continue;
+                }
+                // An identity frozen by another listener governs this packet. The
+                // provisional old route is discarded before preparing the winner.
+                drop(provisional);
+            }
+            drop(admission_guard);
+            let Some(session_resolver) = direct_resolvers
+                .get(outbound)
+                .cloned()
+                .map(|resolver| resolver.for_inbound(inbound))
+            else {
+                record_udp_failure(
+                    &metrics,
+                    Stage::Config,
+                    Reason::ConfigSemantic,
+                    Outcome::Failed,
+                );
+                continue;
+            };
+            let open_context = if let Some(policies) = network_policies.as_ref() {
+                let Some(outbound_policy) = policies.outbound_dial_options.get(outbound).cloned()
                 else {
                     record_udp_failure(
                         &metrics,
@@ -319,225 +415,46 @@ where
                         Reason::ConfigSemantic,
                         Outcome::Failed,
                     );
-                    continue 'packets;
+                    continue;
                 };
-                let selection_target = pending.datagram().target().clone();
-                let initial_candidates = tokio::select! {
-                    biased;
-                    _ = &mut shutdown => break 'packets Ok(()),
-                    selection = resolve_udp_selection_candidates(
-                        &session_resolver,
-                        &selection_target,
-                        connect_timeout,
-                    ) => selection,
-                };
-                let initial_candidates = match initial_candidates {
-                    Ok(candidates) => candidates,
-                    Err(error) => {
-                        record_udp_runtime_failure(&metrics, error);
-                        continue 'packets;
-                    }
-                };
-                let open_context = if let Some(policies) = network_policies.as_ref() {
-                    let Some(outbound_policy) =
-                        policies.outbound_dial_options.get(outbound).cloned()
-                    else {
-                        record_udp_failure(
-                            &metrics,
-                            Stage::Config,
-                            Reason::ConfigSemantic,
-                            Outcome::Failed,
-                        );
-                        continue 'packets;
-                    };
-                    Some(ServerUdpNetworkPolicy {
-                        outbound: outbound_policy,
-                        route: Arc::clone(&policies.route_network),
-                    })
-                } else {
-                    None
-                };
-                let provisional = tokio::select! {
-                    biased;
-                    _ = &mut shutdown => break 'packets Ok(()),
-                    provisional = runtime.reserve_session_with_initial_candidates(
-                        tokio::time::Instant::now(),
-                        pending.datagram().allocated_capacity(),
-                        open_context,
-                        initial_candidates,
-                    ) => provisional,
-                };
-                let provisional = match provisional {
-                    Ok(admission) => admission,
-                    Err(error) => {
-                        record_udp_runtime_failure(&metrics, error);
-                        continue 'packets;
-                    }
-                };
-
-                // A concurrent first packet may have frozen this identity while the
-                // provisional socket was opening. The winner's terminal governs the
-                // losing packet; only an orphaned, different Direct requires reopening.
-                let admission_guard = tokio::select! {
-                    biased;
-                    _ = &mut shutdown => break 'packets Ok(()),
-                    guard = admission.lock() => guard,
-                };
-                let existing = match protocol.existing_capability(&pending) {
-                    Ok(existing) => existing,
-                    Err(error) => {
-                        record_udp_protocol_failure(&metrics, error);
-                        break 'packets Err(RunError::RuntimeRoot);
-                    }
-                };
-                if let Some(capability) = existing {
-                    let Some(identity) = mappings.identity(capability) else {
-                        drop(provisional);
-                        record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
-                        continue 'packets;
-                    };
-                    if identity.inbound != inbound {
-                        drop(provisional);
-                        record_udp_protocol_failure(&metrics, UdpPacketError::Binding);
-                        continue 'packets;
-                    }
-                    match identity.terminal {
-                        ServerTerminalRoute::Reject => {
-                            drop(provisional);
-                            match commit_rejected_request(
-                                &protocol,
-                                &mappings,
-                                pending,
-                                Some(capability),
-                                peer,
-                                clock.monotonic_now(),
-                                inbound,
-                            ) {
-                                Ok(()) => metrics.udp_datagram(
-                                    Role::Server,
-                                    Direction::ClientToTarget,
-                                    Outcome::Rejected,
-                                ),
-                                Err(error) => record_udp_protocol_failure(&metrics, error),
-                            }
-                            continue 'packets;
-                        }
-                        ServerTerminalRoute::Direct(frozen_outbound) => {
-                            if let Some(binding) = mappings.handle(capability) {
-                                match runtime.reserve_datagram(
-                                    binding.handle,
-                                    pending.datagram().allocated_capacity(),
-                                ) {
-                                    Ok(reservation) => {
-                                        drop(provisional);
-                                        let committed = commit_existing_direct_request(
-                                            &protocol,
-                                            &mappings,
-                                            reservation,
-                                            pending,
-                                            capability,
-                                            binding.handle,
-                                            peer,
-                                            &clock,
-                                        );
-                                        match committed {
-                                            Ok(()) => {
-                                                record_udp_request_accepted(&metrics, wire_len)
-                                            }
-                                            Err(UdpCommitError::Runtime(error)) => {
-                                                record_udp_runtime_failure(&metrics, error);
-                                                if matches!(
-                                                    error,
-                                                    UdpRuntimeError::ProtocolPanicked
-                                                        | UdpRuntimeError::StateUnavailable
-                                                ) {
-                                                    break 'packets Err(RunError::RuntimeRoot);
-                                                }
-                                            }
-                                            Err(UdpCommitError::Protocol(error)) => {
-                                                record_udp_protocol_failure(&metrics, error);
-                                            }
-                                        }
-                                        continue 'packets;
-                                    }
-                                    Err(UdpRuntimeError::Cancelled) => {
-                                        mappings.invalidate_handle(binding.handle);
-                                    }
-                                    Err(error) => {
-                                        drop(provisional);
-                                        record_udp_runtime_failure(&metrics, error);
-                                        continue 'packets;
-                                    }
-                                }
-                            }
-                            if frozen_outbound != outbound {
-                                drop(provisional);
-                                drop(admission_guard);
-                                outbound = frozen_outbound;
-                                continue 'open_direct;
-                            }
-                        }
-                    }
-                } else {
-                    match protocol_identity_has_capacity(
-                        &runtime,
-                        &mappings,
-                        &protocol,
-                        &clock,
-                        config.max_sessions,
-                    ) {
-                        Ok(false) => {
-                            drop(provisional);
-                            record_udp_runtime_failure(&metrics, UdpRuntimeError::SessionLimit);
-                            continue 'packets;
-                        }
-                        Ok(true) => {}
-                        Err(error) => {
-                            drop(provisional);
-                            record_udp_protocol_failure(&metrics, error);
-                            break 'packets Err(RunError::RuntimeRoot);
-                        }
-                    }
+                Some(ServerUdpNetworkPolicy {
+                    outbound: outbound_policy,
+                    route: Arc::clone(&policies.route_network),
+                })
+            } else {
+                None
+            };
+            let target = pending.datagram().target().clone();
+            let capacity = pending.datagram().allocated_capacity();
+            let request = match work.account(pending, peer, wire_len, deadline) {
+                Ok(request) => request,
+                Err(error) => {
+                    record_udp_runtime_failure(&metrics, error);
+                    continue;
                 }
-                let committed = commit_new_direct_session(
-                    &mut runtime,
-                    provisional,
-                    pending,
-                    session_resolver,
-                    &protocol,
-                    &mappings,
-                    peer,
-                    &clock,
-                    inbound,
-                    outbound,
-                );
-                match committed {
-                    Ok(_) => {
-                        record_udp_request_accepted(&metrics, wire_len);
-                    }
-                    Err(NewDirectCommitError::Runtime(error)) => {
-                        record_udp_runtime_failure(&metrics, error);
-                        if matches!(
-                            error,
-                            UdpRuntimeError::ProtocolPanicked | UdpRuntimeError::StateUnavailable
-                        ) {
-                            break 'packets Err(RunError::RuntimeRoot);
-                        }
-                    }
-                    Err(NewDirectCommitError::Protocol(error)) => {
-                        record_udp_protocol_failure(&metrics, error)
-                    }
-                    Err(NewDirectCommitError::Identity) => {
-                        record_udp_protocol_failure(&metrics, UdpPacketError::Generation);
-                        break 'packets Err(RunError::RuntimeRoot);
-                    }
-                }
-                drop(admission_guard);
-                update_udp_resource_metrics(&metrics, &registry);
-                continue 'packets;
+            };
+            let selection_resolver = session_resolver.clone();
+            let open = runtime.reserve_session_with_initial_resolution(
+                tokio::time::Instant::now(),
+                capacity,
+                open_context,
+                async move {
+                    resolve_udp_selection_candidates(&selection_resolver, &target, connect_timeout)
+                        .await
+                },
+            );
+            if let Err(error) = work.submit(request, async move {
+                open.await
+                    .map(|provisional| (provisional, session_resolver, outbound))
+            }) {
+                record_udp_runtime_failure(&metrics, error);
             }
         };
 
+        // No detached preparation tasks exist: dropping these owners cancels the
+        // actual work before runtime session shutdown begins.
+        drop(work);
+        drop(ready);
         let report = if terminal.is_err() {
             runtime.shutdown(std::time::Duration::ZERO).await
         } else {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -23,6 +23,11 @@ pub struct PendingUdpRequest {
 }
 
 impl PendingUdpRequest {
+    /// Compares authenticated identities without exposing wire IDs or mutating state.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.owner == other.owner && self.session_id == other.session_id
+    }
+
     /// Borrows the validated datagram for bounded capacity planning only.
     pub const fn datagram(&self) -> &Datagram {
         &self.datagram
@@ -116,9 +121,10 @@ struct ServerSessionLookup {
 
 struct ServerState {
     // Never acquire a per-session protocol lock while holding this map lock.
-    // Removal uses the inverse order and rechecks both indexes before unlinking.
+    // Removal uses the inverse order and rechecks the binding before unlinking.
     sessions: HashMap<UdpSessionId, ServerSessionEntry>,
     capability_sessions: HashMap<ServerResponseCapability, UdpSessionId>,
+    outbound_session_ids: HashSet<UdpSessionId>,
     next_generation: u64,
 }
 
@@ -127,6 +133,7 @@ impl Default for ServerState {
         Self {
             sessions: HashMap::new(),
             capability_sessions: HashMap::new(),
+            outbound_session_ids: HashSet::new(),
             next_generation: 1,
         }
     }
@@ -255,10 +262,7 @@ impl UdpServer {
                         .crypto
                         .generate_distinct_outbound_session(random, &session_id, |candidate| {
                             state.sessions.contains_key(candidate)
-                                || state
-                                    .sessions
-                                    .values()
-                                    .any(|entry| entry.outbound_session_id == *candidate)
+                                || state.outbound_session_ids.contains(candidate)
                         })
                         .map_err(|_| UdpPacketError::Random)?;
                     let outbound_session_id = outbound.session_id().clone();
@@ -279,6 +283,9 @@ impl UdpServer {
                     let previous_capability = state
                         .capability_sessions
                         .insert(capability, session_id.clone());
+                    let outbound_inserted = state
+                        .outbound_session_ids
+                        .insert(outbound_session_id.clone());
                     let previous_session = state.sessions.insert(
                         session_id.clone(),
                         ServerSessionEntry {
@@ -287,9 +294,11 @@ impl UdpServer {
                             protocol,
                         },
                     );
+                    debug_assert!(outbound_inserted);
                     debug_assert!(previous_capability.is_none());
                     debug_assert!(previous_session.is_none());
                     debug_assert_eq!(state.capability_sessions.len(), state.sessions.len());
+                    debug_assert_eq!(state.outbound_session_ids.len(), state.sessions.len());
                     return Ok(AcceptedUdpRequest { capability });
                 }
             };
@@ -385,10 +394,14 @@ impl UdpServer {
         }
 
         let removed_capability = state.capability_sessions.remove(&capability);
-        let removed_session = state.sessions.remove(&binding);
+        let removed_session = state.sessions.remove(&binding).expect("matched session");
+        let outbound_removed = state
+            .outbound_session_ids
+            .remove(&removed_session.outbound_session_id);
         debug_assert!(removed_capability.is_some());
-        debug_assert!(removed_session.is_some());
+        debug_assert!(outbound_removed);
         debug_assert_eq!(state.capability_sessions.len(), state.sessions.len());
+        debug_assert_eq!(state.outbound_session_ids.len(), state.sessions.len());
         session.live = false;
         Ok(true)
     }

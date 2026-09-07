@@ -106,6 +106,7 @@ where
                             unreachable!("validated route program sniffs at most once")
                         }
                     };
+                    let mut complete = None;
                     let collected = collect_sniff_prefix(
                         initial,
                         max_bytes,
@@ -117,16 +118,16 @@ where
                             Pin::new(&mut *stream).poll_read_plain(context, destination)
                         },
                         |bytes| {
-                            if ferrum2_sniff::sniff(
+                            let parsed = ferrum2_sniff::sniff_tcp_prefix(
                                 bytes,
-                                classification_horizon,
-                                Transport::Tcp,
+                                max_bytes,
                                 target.port().get(),
                                 &order,
-                            ) == SniffProgress::NeedMore
-                            {
+                            );
+                            if parsed == SniffProgress::NeedMore {
                                 PrefixDecision::ReadMore
                             } else {
+                                complete = Some(parsed);
                                 PrefixDecision::Complete
                             }
                         },
@@ -135,13 +136,7 @@ where
                     let outcome = collected.outcome();
                     match outcome {
                         SniffPrefixOutcome::Complete => {
-                            progress = ferrum2_sniff::sniff(
-                                collected.as_ref(),
-                                max_bytes,
-                                Transport::Tcp,
-                                target.port().get(),
-                                &order,
-                            );
+                            progress = complete.expect("complete collector inspected prefix");
                         }
                         SniffPrefixOutcome::Timeout
                         | SniffPrefixOutcome::Limit

@@ -470,6 +470,14 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
             "mapping maximum",
             minimums.replace("max_udp_mappings = 1", "max_udp_mappings = 8192"),
         ),
+        (
+            "UDP byte minimum",
+            format!("{minimums}\nudp_buffered_bytes_limit = 1048576"),
+        ),
+        (
+            "UDP byte maximum",
+            format!("{minimums}\nudp_buffered_bytes_limit = 1073741824"),
+        ),
     ];
     for (name, source) in accepted {
         let file = TempConfig::text(&tun_client(&source));
@@ -528,6 +536,16 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
             "mappings high",
             "max_udp_mappings = 8193",
             ConfigField::TunMaxUdpMappings,
+        ),
+        (
+            "UDP bytes low",
+            "udp_buffered_bytes_limit = 1048575",
+            ConfigField::TunUdpBufferedBytesLimit,
+        ),
+        (
+            "UDP bytes high",
+            "udp_buffered_bytes_limit = 1073741825",
+            ConfigField::TunUdpBufferedBytesLimit,
         ),
     ];
     for (name, mutation, field) in mutations {

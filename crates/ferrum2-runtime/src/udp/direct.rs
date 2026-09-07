@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::BytesMut;
 use ferrum2_core::Datagram;
 use ferrum2_net::UdpResolver;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -94,7 +93,7 @@ where
 {
     manager: UdpSessionManager,
     resolver: Arc<R>,
-    socket_factory: F,
+    socket_factory: Arc<F>,
     handler: Arc<H>,
     connect_timeout: Duration,
     registry: OwnerRegistry,
@@ -189,7 +188,7 @@ where
         Self {
             manager,
             resolver: Arc::new(resolver),
-            socket_factory,
+            socket_factory: Arc::new(socket_factory),
             handler: Arc::new(handler),
             connect_timeout,
             registry,
@@ -216,8 +215,7 @@ where
             now,
             first_allocated_capacity,
             open_context,
-            selection_destination,
-            None,
+            std::future::ready(Ok((selection_destination, None))),
         )
         .await
     }
@@ -227,69 +225,88 @@ where
     /// The bounded candidate set is retained through commit and used for the first datagram,
     /// keeping the socket's selected interface and its first transmission on one resolution
     /// snapshot. Later domain datagrams continue to resolve normally.
-    pub async fn reserve_session_with_initial_candidates(
-        &mut self,
+    pub fn reserve_session_with_initial_candidates(
+        &self,
         now: Instant,
         first_allocated_capacity: usize,
         open_context: F::OpenContext,
         initial_candidates: Vec<SocketAddr>,
-    ) -> Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError> {
-        let initial_candidates: Vec<_> = initial_candidates
-            .into_iter()
-            .take(MAX_UDP_RESOLVED_CANDIDATES)
-            .collect();
-        let selection_destination = initial_candidates
-            .first()
-            .copied()
-            .ok_or(UdpRuntimeError::Resolve)?;
-        self.reserve_session_inner(
+    ) -> impl Future<Output = Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError>>
+    + Send
+    + 'static {
+        self.reserve_session_with_initial_resolution(
             now,
             first_allocated_capacity,
             open_context,
-            selection_destination,
-            Some(initial_candidates),
+            std::future::ready(Ok(initial_candidates)),
         )
-        .await
     }
 
-    async fn reserve_session_inner(
-        &mut self,
+    /// Owns provisional capacity and resolver/socket work without borrowing the runtime.
+    /// Dropping this future cancels its work and releases every provisional reservation.
+    pub fn reserve_session_with_initial_resolution(
+        &self,
         now: Instant,
         first_allocated_capacity: usize,
         open_context: F::OpenContext,
-        selection_destination: SocketAddr,
-        initial_candidates: Option<Vec<SocketAddr>>,
-    ) -> Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError> {
-        if !self
-            .tasks
-            .lock()
-            .expect("Direct task owner lock")
-            .accepting()
-        {
-            return Err(UdpRuntimeError::Cancelled);
-        }
-        let session = self.manager.reserve_session(now)?;
-        let owner_slot = Arc::clone(&self.owner_slots)
-            .try_acquire_owned()
-            .map_err(|_| UdpRuntimeError::SessionLimit)?;
-        let first_datagram =
-            session.reserve_datagram(UdpDirection::ToTarget, first_allocated_capacity)?;
-        let socket = self
-            .socket_factory
-            .open(open_context, selection_destination)
-            .await
-            .map_err(|_| UdpRuntimeError::Send)?;
-        let socket_guard = self.registry.track_udp_socket();
-        Ok(DirectUdpSessionAdmission {
-            session,
-            first_datagram,
-            initial_candidates,
-            physical: DirectUdpSocketAdmission {
-                socket,
-                socket_guard,
-                owner_slot,
-            },
+        resolution: impl Future<Output = Result<Vec<SocketAddr>, UdpRuntimeError>> + Send + 'static,
+    ) -> impl Future<Output = Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError>>
+    + Send
+    + 'static {
+        self.reserve_session_inner(now, first_allocated_capacity, open_context, async move {
+            let mut candidates = resolution.await?;
+            candidates.truncate(MAX_UDP_RESOLVED_CANDIDATES);
+            let destination = candidates
+                .first()
+                .copied()
+                .ok_or(UdpRuntimeError::Resolve)?;
+            Ok((destination, Some(candidates)))
         })
+    }
+
+    fn reserve_session_inner(
+        &self,
+        now: Instant,
+        first_allocated_capacity: usize,
+        open_context: F::OpenContext,
+        selection: impl Future<Output = Result<(SocketAddr, Option<Vec<SocketAddr>>), UdpRuntimeError>>
+        + Send
+        + 'static,
+    ) -> impl Future<Output = Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError>>
+    + Send
+    + 'static {
+        let tasks = Arc::clone(&self.tasks);
+        let manager = self.manager.clone();
+        let owner_slots = Arc::clone(&self.owner_slots);
+        let socket_factory = Arc::clone(&self.socket_factory);
+        let registry = self.registry.clone();
+        async move {
+            if !tasks.lock().expect("Direct task owner lock").accepting() {
+                return Err(UdpRuntimeError::Cancelled);
+            }
+            let session = manager.reserve_session(now)?;
+            let owner_slot = owner_slots
+                .try_acquire_owned()
+                .map_err(|_| UdpRuntimeError::SessionLimit)?;
+            let first_datagram =
+                session.reserve_datagram(UdpDirection::ToTarget, first_allocated_capacity)?;
+            let (selection_destination, initial_candidates) = selection.await?;
+            let socket = socket_factory
+                .open(open_context, selection_destination)
+                .await
+                .map_err(|_| UdpRuntimeError::Send)?;
+            let socket_guard = registry.track_udp_socket();
+            Ok(DirectUdpSessionAdmission {
+                session,
+                first_datagram,
+                initial_candidates,
+                physical: DirectUdpSocketAdmission {
+                    socket,
+                    socket_guard,
+                    owner_slot,
+                },
+            })
+        }
     }
 
     /// Commits the first validated datagram and starts exactly one owned task.
@@ -631,15 +648,10 @@ where
             .readable()
             .await
             .map_err(|_| UdpRuntimeError::Receive)?;
-        let reservation = budget
-            .reserve_when_available(MAX_UDP_WIRE_DATAGRAM_BYTES)
-            .await?;
+        let mut lease = budget.receive_buffer().await?;
         let scratch_guard = registry.track_udp_scratch();
-        let mut scratch = BytesMut::with_capacity(MAX_UDP_WIRE_DATAGRAM_BYTES);
-        if scratch.capacity() != reservation.capacity() {
-            return Err(UdpRuntimeError::Bounds);
-        }
-        let (length, source) = match socket.try_recv_buf_from(&mut scratch) {
+        let scratch = lease.buffer_mut();
+        let (length, source) = match socket.try_recv_buf_from(scratch) {
             Ok(received) => received,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => return Err(UdpRuntimeError::Receive),
@@ -649,9 +661,7 @@ where
         }
         drop(scratch_guard);
         let target = ferrum2_core::TargetAddr::ip(source).map_err(|_| UdpRuntimeError::Bounds)?;
-        let datagram = Datagram::new(target, scratch, MAX_UDP_WIRE_DATAGRAM_BYTES)
-            .map_err(|_| UdpRuntimeError::Bounds)?;
-        return reservation.attach(datagram);
+        return lease.into_datagram(target);
     }
 }
 
@@ -774,3 +784,6 @@ where
         Ok(Ok(_)) | Ok(Err(_)) | Err(_) => Err(UdpRuntimeError::Send),
     }
 }
+
+#[cfg(test)]
+mod receive_tests;

@@ -34,6 +34,7 @@ impl UdpSessionManager {
             cutoff: state.next_generation,
             retired: false,
         });
+        self.inner.budget.clear_receive_cache();
         Ok(())
     }
 
@@ -70,6 +71,7 @@ impl UdpSessionManager {
             .as_mut()
             .expect("retained fence")
             .retired = true;
+        self.inner.budget.clear_receive_cache();
         drop(state);
         let count = removed.len();
         for handle in removed {

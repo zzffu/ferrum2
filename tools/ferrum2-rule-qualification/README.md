@@ -19,7 +19,7 @@ cargo run --release -p ferrum2-rule-qualification --locked -- \
 ```
 
 The qualification profile covers generated MatchSets at 100, 1,000, and
-10,000 values; route programs at 1, 32, 64, 1,000, and 10,000 rules; and DNS
+10,000 values; route programs at 1, 32, 63, 64, 65, 1,000, and 10,000 rules; and DNS
 query programs at 1, 64, 65, 100, 1,000, and 10,000 rules. Add `--include-100k` to include the
 explicitly expensive 100,000-value MatchSet scale:
 
@@ -78,6 +78,25 @@ indexed boundary and 1,000/10,000 indexed scales; every row records the actual
 program mode and query candidate visits, and indexed last-hit/miss probes must
 remain sublinear. Response, cache, and continuation rows retain their bounded
 1, 100, and 1,000 scales. All DNS rows report p50, p99, and queries/second.
+
+Route bitmap-shape rows separately exercise sparse and dense domain postings with
+an independent port constraint, first/last/miss selection, and up to eight ordered
+Continue actions. Continuation rows change detected-domain metadata after the first
+action and check both the selected result and exact action count before timing.
+The smoke route matrix includes 63/64/65; qualification adds 1,000/10,000.
+`query_candidate_visits` on these rows reports the final evaluation step, not the
+sum across Continue actions. Allocation samples and full latency distributions use
+the existing measurement owner; these rows do not impose cross-version thresholds.
+
+For a controlled bitmap comparison, build baseline and candidate release runners
+from identical qualification source (including these scenarios), changing only the
+rule implementation. On the same idle host, run each executable with
+`--profile qualification --samples 101 --iterations-per-sample 8192 --workspace-root . --output baseline.json`
+(use `candidate.json` for the second executable), then repeat in reverse order.
+Compare equal `route_program/{sparse_bitmap,dense_bitmap,sparse_continue,dense_continue}/`
+row IDs, including 63/64/65 and 1,000/10,000. Retain raw samples, candidate visits,
+allocations, and environment/runner fingerprints; do not infer CPU cycles from
+wall-clock nanoseconds or throughput gains from source inspection.
 
 Every latency sample, p50, p99, build time, environment fingerprint, git HEAD,
 git tree and dirty-state digest, and runner SHA-256 is retained in JSON. Each

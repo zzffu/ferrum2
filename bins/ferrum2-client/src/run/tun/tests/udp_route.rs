@@ -317,6 +317,10 @@ default = "direct"
         SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager: UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone()),
             live_ids: Arc::clone(&live_ids),
         }),

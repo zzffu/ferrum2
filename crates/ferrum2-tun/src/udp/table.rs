@@ -119,6 +119,7 @@ pub(crate) struct UdpTable {
     session_epoch: Arc<AtomicU64>,
     wake: OwnerWake,
     events: TunEventSink,
+    budget: ferrum2_runtime::UdpBufferBudget,
 }
 
 impl UdpTable {
@@ -178,6 +179,10 @@ impl UdpTable {
                 session_epoch,
                 wake,
                 events: TunEventSink::default(),
+                budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                    64 * 1024 * 1024,
+                    ferrum2_runtime::OwnerRegistry::new(),
+                ),
             },
             candidate_receiver,
         )
@@ -185,6 +190,11 @@ impl UdpTable {
 
     pub(crate) fn set_event_sink(&mut self, events: TunEventSink) {
         self.events = events;
+    }
+
+    pub(crate) fn set_buffer_budget(&mut self, budget: ferrum2_runtime::UdpBufferBudget) {
+        assert_eq!(self.association_count + self.candidate_count, 0);
+        self.budget = budget;
     }
 
     pub(crate) fn admit(
@@ -270,8 +280,15 @@ impl UdpTable {
                 .emit(TunEvent::PacketRejected(TunRejectReason::StaleGeneration));
             return Admission::Dropped;
         };
+        let Ok(payload_owner) = super::BudgetedPayload::new(payload, &self.budget) else {
+            self.free_list.push(slot);
+            self.events.emit(TunEvent::UdpDatagramQueueFull);
+            self.events
+                .emit(TunEvent::PacketRejected(TunRejectReason::UdpQueueFull));
+            return Admission::Dropped;
+        };
         let (sender, receiver) = mpsc::channel(DATAGRAM_QUEUE_PACKETS);
-        let first_payload: Arc<[u8]> = Arc::from(payload);
+        let first_payload = Arc::new(payload_owner);
         let first = UdpDatagram {
             source: endpoints.source,
             target: endpoints.target,
@@ -315,6 +332,7 @@ impl UdpTable {
             lease,
             responses: self.response_sender.clone(),
             response_wake: Arc::clone(&self.response_wake),
+            budget: self.budget.clone(),
             handed_off: false,
         };
         if self.candidates.try_send(candidate).is_err() {
@@ -354,10 +372,16 @@ impl UdpTable {
                 .emit(TunEvent::PacketRejected(TunRejectReason::StaleGeneration));
             return Some(Admission::Dropped);
         };
+        let Ok(payload_owner) = super::BudgetedPayload::new(payload, &self.budget) else {
+            self.events.emit(TunEvent::UdpDatagramQueueFull);
+            self.events
+                .emit(TunEvent::PacketRejected(TunRejectReason::UdpQueueFull));
+            return Some(Admission::Dropped);
+        };
         let datagram = UdpDatagram {
             source: endpoints.source,
             target: endpoints.target,
-            payload: Arc::from(payload),
+            payload: Arc::new(payload_owner),
         };
         let mut refresh_deadline = None;
         let admission = match entry {

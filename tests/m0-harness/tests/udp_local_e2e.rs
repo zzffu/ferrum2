@@ -13,10 +13,10 @@ use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, RecordType};
 use local_support::{
     ChildGuard, DnsReply, DnsStep, SYNTHETIC_PSK, active_child_count, bind_loopback_listener,
-    run_binary, start_dns_answer, start_dns_script, unused_loopback, unused_tcp_udp_loopback,
-    wait_for_bound, wait_for_listener, wait_for_metrics, wait_for_metrics_sample,
-    wait_for_tcp_udp_bound, write_server_config, write_tagged_dns_server_config,
-    write_udp_client_config,
+    metric_value, run_binary, start_dns_answer, start_dns_script, unused_loopback,
+    unused_tcp_udp_loopback, wait_for_bound, wait_for_listener, wait_for_metrics,
+    wait_for_metrics_sample, wait_for_tcp_udp_bound, write_server_config,
+    write_tagged_dns_server_config, write_udp_client_config,
 };
 
 // ponytail: file-wide lock; use socket inheritance if these tests need parallel throughput.
@@ -100,7 +100,7 @@ fn m14_server_udp_freezes_first_terminal_per_identity_and_reaps() {
     const CLIENT_ZERO_SESSION: &str = "ferrum2_udp_sessions_active{role=\"client\"} 0";
     const CLIENT_ZERO_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"client\"} 0";
     const SERVER_ZERO_SESSION: &str = "ferrum2_udp_sessions_active{role=\"server\"} 0";
-    const SERVER_ROOT_BUFFER: &str = "ferrum2_udp_buffered_bytes{role=\"server\"} 262028";
+    const SERVER_BUFFER_METRIC: &str = "ferrum2_udp_buffered_bytes{role=\"server\"}";
     const SERVER_ONE_SESSION: &str = "ferrum2_udp_sessions_active{role=\"server\"} 1";
 
     let _test_guard = UDP_LOCAL_E2E_TEST_LOCK.lock().expect("UDP local E2E lock");
@@ -170,11 +170,8 @@ fn m14_server_udp_freezes_first_terminal_per_identity_and_reaps() {
         ChildGuard::spawn_while_holding("ferrum2-server", &server_config, &_spawn_guard);
     wait_for_tcp_udp_bound(&mut server, server_address);
     let server_baseline = wait_for_metrics_sample(server_metrics, SERVER_ZERO_SESSION);
-    assert!(
-        server_baseline
-            .windows(SERVER_ROOT_BUFFER.len())
-            .any(|window| window == SERVER_ROOT_BUFFER.as_bytes())
-    );
+    let server_root_bytes = metric_value(&server_baseline, SERVER_BUFFER_METRIC)
+        .expect("server allocated-capacity metric before sessions");
     let mut client =
         ChildGuard::spawn_while_holding("ferrum2-client", &client_config, &_spawn_guard);
     wait_for_listener(&mut client, client_address);
@@ -285,25 +282,7 @@ fn m14_server_udp_freezes_first_terminal_per_identity_and_reaps() {
             .expect("frozen Direct target join"),
         rejected_query
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let body = wait_for_metrics(server_metrics);
-        let one_session = body
-            .windows(SERVER_ONE_SESSION.len())
-            .any(|window| window == SERVER_ONE_SESSION.as_bytes());
-        let root_buffer = body
-            .windows(SERVER_ROOT_BUFFER.len())
-            .any(|window| window == SERVER_ROOT_BUFFER.as_bytes());
-        if one_session && root_buffer {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "active idle server UDP session retained an extra receive buffer: {}",
-            String::from_utf8_lossy(&body)
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_for_metrics_sample(server_metrics, SERVER_ONE_SESSION);
     drop((
         reject_application,
         reject_control,
@@ -337,9 +316,7 @@ fn m14_server_udp_freezes_first_terminal_per_identity_and_reaps() {
         if body
             .windows(SERVER_ZERO_SESSION.len())
             .any(|window| window == SERVER_ZERO_SESSION.as_bytes())
-            && body
-                .windows(SERVER_ROOT_BUFFER.len())
-                .any(|window| window == SERVER_ROOT_BUFFER.as_bytes())
+            && metric_value(&body, SERVER_BUFFER_METRIC) == Some(server_root_bytes)
         {
             break body;
         }

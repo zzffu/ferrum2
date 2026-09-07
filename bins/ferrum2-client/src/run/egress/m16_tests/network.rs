@@ -193,6 +193,10 @@ async fn physical_connector_receives_selected_policy_and_first_concrete_target()
         SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager: UdpSessionManager::new(UdpRuntimeLimits::default(), OwnerRegistry::new()),
             live_ids: Arc::new(Mutex::new(HashSet::new())),
         }),

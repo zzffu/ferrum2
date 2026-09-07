@@ -629,6 +629,12 @@ where
             let (max_sessions, max_buffered_bytes, idle_timeout) =
                 udp_limits.expect("enabled UDP requires validated limits");
             Some(ClientUdpContext {
+                tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                    tun_config
+                        .as_ref()
+                        .map_or(0, |tun| tun.udp_buffered_bytes_limit),
+                    registry.clone(),
+                ),
                 manager: UdpSessionManager::new(
                     UdpRuntimeLimits::new(max_sessions, max_buffered_bytes, idle_timeout)
                         .map_err(|_| RunError::StartupProtocol)?,

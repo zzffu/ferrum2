@@ -598,7 +598,7 @@ fn fixed_two_hop_udp_chain_uses_distinct_credentials_and_reaps() {
 }
 
 #[test]
-fn request_budget_rejection_releases_first_route_before_another_source_is_admitted() {
+fn byte_budget_rejection_releases_first_route_before_another_source_is_admitted() {
     let directory = tempfile::tempdir().expect("budget source-pin directory");
     let client_address = unused_loopback();
     let metrics = unused_loopback();
@@ -612,7 +612,7 @@ fn request_budget_rejection_releases_first_route_before_another_source_is_admitt
     let first_address = first_target.local_addr().unwrap();
     let later_address = later_target.local_addr().unwrap();
     let first_echo = echo_datagrams(first_target, 1);
-    let later_echo = echo_datagrams(later_target, 5);
+    let later_echo = echo_datagrams(later_target, 1);
     let config = directory.path().join("budget-source-pin.toml");
     std::fs::write(&config, format!(
         "schema_version = 2\n\
@@ -621,7 +621,7 @@ fn request_budget_rejection_releases_first_route_before_another_source_is_admitt
          [[outbounds]]\ntag = \"direct\"\ntype = \"direct\"\n\
          [route]\nfinal = \"direct\"\n\
          [[route.rules]]\nnetwork = \"udp\"\nport = {}\naction = \"route\"\noutbound = \"proxy\"\n\
-         [udp]\nmax_sessions = 16\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n\
+         [udp]\nmax_sessions = 256\nmax_buffered_bytes = 1048576\nidle_timeout_ms = 60000\n\
          [metrics]\nlisten = \"{metrics}\"\n", first_address.port(),
     )).unwrap();
     let mut client = ChildGuard::spawn("ferrum2-client", &config);
@@ -631,37 +631,54 @@ fn request_budget_rejection_releases_first_route_before_another_source_is_admitt
     let later_wire = target_wire(later_address);
     let mut warmups = Vec::new();
     let mut encrypted = [0; 2048];
-    // Three proxy paths and four direct paths retain 851591 fixed bytes. A new
-    // proxy path still fits, leaving 464 bytes for its first request reservation.
-    for _ in 0..3 {
+    // Fill the byte domain through real admissions, without pinning a private
+    // per-association buffer layout. Stay below the configured session limit.
+    let mut rejected = None;
+    for accepted in 0..128 {
         let (control, application, relay) = udp_associate(client_address, false);
         application
-            .send_to(&socks_datagram_for_target(&first_wire, b"warm"), relay)
+            .send_to(
+                &socks_datagram_for_target(&first_wire, &vec![0; 1024]),
+                relay,
+            )
             .unwrap();
+        let accepted_sample = format!(
+            "ferrum2_udp_datagrams_total{{role=\"client\",direction=\"client_to_target\",outcome=\"accepted\"}} {}",
+            accepted + 1,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let was_rejected = loop {
+            let samples = String::from_utf8(wait_for_metrics(metrics)).expect("metrics UTF-8");
+            if samples.contains(
+                "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"rejected\"} 1",
+            ) {
+                break true;
+            }
+            if samples.contains(&accepted_sample) {
+                break false;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "UDP admission outcome timeout"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        if was_rejected {
+            rejected = Some((control, application, relay));
+            break;
+        }
         proxy
             .recv_from(&mut encrypted)
             .expect("accepted proxy warmup");
         warmups.push((control, application));
     }
-    for _ in 0..4 {
-        let (control, application, relay) = udp_associate(client_address, false);
-        round_trip(&application, relay, &later_wire, &later_wire, b"warm");
-        warmups.push((control, application));
-    }
-    const BASELINE: &str = "ferrum2_udp_buffered_bytes{role=\"client\"} 851591";
-    wait_for_metrics_sample(metrics, BASELINE);
-    let (control, rejected_source, relay) = udp_associate(client_address, false);
-    rejected_source
-        .send_to(
-            &socks_datagram_for_target(&first_wire, &vec![0; 1024]),
-            relay,
-        )
-        .unwrap();
-    wait_for_metrics_sample(
-        metrics,
-        "ferrum2_udp_datagrams_total{role=\"client\",direction=\"client_to_target\",outcome=\"rejected\"} 1",
-    );
-    wait_for_metrics_sample(metrics, BASELINE);
+    let (control, rejected_source, relay) =
+        rejected.expect("byte budget rejects before configured session capacity");
+    // Release pressure, not the rejected association. A different source must
+    // still be able to win its first valid route and source-port admission.
+    drop(warmups);
+    wait_for_metrics_sample(metrics, "ferrum2_udp_sessions_active{role=\"client\"} 0");
+    wait_for_metrics_sample(metrics, "ferrum2_udp_buffered_bytes{role=\"client\"} 0");
     assert_no_datagram(&proxy);
     let winner = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     winner
@@ -684,7 +701,7 @@ fn request_budget_rejection_releases_first_route_before_another_source_is_admitt
     assert_no_datagram(&proxy);
     first_echo.join().unwrap();
     later_echo.join().unwrap();
-    drop((control, warmups));
+    drop(control);
     wait_for_metrics_sample(metrics, "ferrum2_udp_sessions_active{role=\"client\"} 0");
     wait_for_metrics_sample(metrics, "ferrum2_udp_buffered_bytes{role=\"client\"} 0");
     client.terminate_and_reap(Duration::from_secs(5));

@@ -70,7 +70,8 @@ impl<L> AffineConnectionExecutor<L>
 where
     L: AffineAcceptListener,
 {
-    /// Creates an executor using the process's available logical parallelism.
+    /// Creates an executor with at most one shard per admitted connection,
+    /// capped by the process's available logical parallelism.
     pub fn new(
         listener: L,
         max_connections: usize,
@@ -79,6 +80,8 @@ where
     ) -> Result<Self, SupervisorConfigError> {
         let shard_count = std::thread::available_parallelism()
             .unwrap_or_else(|_| NonZeroUsize::new(1).expect("one is non-zero"));
+        let shard_count = NonZeroUsize::new(shard_count.get().min(max_connections))
+            .ok_or(SupervisorConfigError::ZeroConnectionLimit)?;
         Self::with_shard_count(
             listener,
             max_connections,

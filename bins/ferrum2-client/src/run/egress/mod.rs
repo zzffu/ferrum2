@@ -24,5 +24,3 @@ pub(super) use udp::{
     IdSequenceRandom, UdpIoFaultPlan, UdpIoOperation, composed_udp_request_limit,
     composed_udp_response_limit,
 };
-#[cfg(test)]
-pub(in crate::run) const MAX_UDP_PLAN_HOPS: usize = udp::MAX_UDP_PLAN_HOPS;

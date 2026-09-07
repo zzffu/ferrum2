@@ -10,6 +10,7 @@ mod owner;
 mod process;
 mod relay;
 mod reset;
+mod retained;
 mod sniff;
 mod supervisor;
 mod udp;
@@ -55,6 +56,9 @@ pub use reset::{
     NetworkResetStatus, NetworkRuntimeCancellation, NetworkRuntimeOwner,
     NetworkRuntimeOwnerCancellation, NetworkRuntimeOwnerKind, NetworkRuntimeOwnerRegistrationError,
     NetworkRuntimeResourceAdmissionError,
+};
+pub use retained::{
+    RetainedMonitor, RetainedMonitorError, RetainedMonitorOwner, RetainedMonitorWait,
 };
 pub use sniff::{PrefixDecision, SniffPrefix, SniffPrefixOutcome, collect_sniff_prefix};
 pub use supervisor::{

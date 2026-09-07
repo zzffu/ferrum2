@@ -260,6 +260,27 @@ impl Datagram {
         })
     }
 
+    /// Constructs a datagram from immutable bytes that retain their backing owner.
+    ///
+    /// The caller must supply the full backing allocation capacity, not merely
+    /// the visible slice length, and retain any capacity lease through the bytes'
+    /// owner. This constructor neither allocates nor transfers a separate lease.
+    pub fn from_owned_bytes(
+        target: TargetAddr,
+        payload: Bytes,
+        allocated_capacity: usize,
+        max_payload_bytes: usize,
+    ) -> Result<Self, DatagramError> {
+        if payload.len() > max_payload_bytes || payload.len() > allocated_capacity {
+            return Err(DatagramError::Bounds);
+        }
+        Ok(Self {
+            target,
+            payload,
+            allocated_capacity,
+        })
+    }
+
     /// Returns the normalized target without exposing it through formatting.
     pub fn target(&self) -> &TargetAddr {
         &self.target

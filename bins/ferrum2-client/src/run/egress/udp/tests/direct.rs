@@ -225,6 +225,10 @@ async fn direct_tcp_and_udp_injection_share_configured_resolver_without_fallback
         ferrum2_crypto::SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager: UdpSessionManager::new(UdpRuntimeLimits::default(), registry),
             live_ids: Arc::new(Mutex::new(HashSet::new())),
         }),

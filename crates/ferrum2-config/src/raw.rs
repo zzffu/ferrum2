@@ -87,6 +87,8 @@ pub(super) struct RawTun {
     pub(super) max_tcp_flows: u64,
     #[serde(default = "default_tun_max_udp_mappings")]
     pub(super) max_udp_mappings: u64,
+    #[serde(default = "default_tun_udp_buffered_bytes_limit")]
+    pub(super) udp_buffered_bytes_limit: u64,
     #[serde(default = "default_tun_udp_filtering")]
     pub(super) udp_filtering: String,
 }
@@ -534,6 +536,10 @@ const fn default_tun_max_tcp_flows() -> u64 {
 
 const fn default_tun_max_udp_mappings() -> u64 {
     DEFAULT_TUN_MAX_UDP_MAPPINGS
+}
+
+const fn default_tun_udp_buffered_bytes_limit() -> u64 {
+    64 * 1024 * 1024
 }
 
 fn default_tun_udp_filtering() -> String {

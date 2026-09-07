@@ -34,6 +34,7 @@ pub(crate) fn owner_main(
 ) -> OwnerExit {
     let OwnerSessionServices {
         registry,
+        udp_buffer_budget,
         runtime,
         network_catalog,
         events,
@@ -354,6 +355,7 @@ pub(crate) fn owner_main(
                 continue;
             }
         };
+        stack.set_udp_buffer_budget(udp_buffer_budget.clone());
         stack.set_event_sink(events.clone());
         if attempt.is_starting() && std::time::Instant::now() >= initial_deadline {
             session_cancel_handle.cancel();

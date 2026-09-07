@@ -89,12 +89,28 @@ egress and never invoke the router again.
 Capacity remains drop-new. A new source association is dropped when `max_udp_mappings` is full;
 Ferrum2 does not evict an active association.
 
-The shared `[udp].max_buffered_bytes` limit continues to meter ordinary SOCKS, DNS, and RuleSet UDP
-request/response buffers. Managed-TUN association buffers are intentionally outside that byte
-budget: both Direct and Shadowsocks TUN requests and responses use fixed-capacity unmetered
-reservations, so an exhausted shared budget does not reject them with `buffer_limit` and does not
-change its `reserved_bytes`. This is not an unbounded queue contract. TUN association count,
-packet queues, payload length, session capacity, timeouts, and generation checks still apply.
+The shared `[udp].max_buffered_bytes` limit continues to meter ordinary SOCKS, DNS, and RuleSet UDP.
+TUN uses the independent `[tun].udp_buffered_bytes_limit`: default 67,108,864 bytes (64 MiB),
+accepted range 1,048,576 through 1,073,741,824 bytes. Admission reserves capacity before
+allocating fixed egress buffers, queued application payloads, or materialized responses. Shared
+first-packet owners are charged once; retained and deferred datagrams keep their charge until
+dropped, including across reset. Exhausting either byte domain does not consume the other's bytes.
+Association count, packet queues, payload length, shared session capacity, timeouts, and generation
+checks still apply. TUN queue byte exhaustion follows the existing drop-new queue-full outcome.
+
+The accounted UDP envelope is ordinary `udp.max_buffered_bytes` plus
+`tun.udp_buffered_bytes_limit`; the owner registry exposes each domain independently as
+`udp_buffered_bytes` and `tun_udp_buffered_bytes`. Proxy fixed capacity is 131,014 bytes for one hop
+and 196,521 bytes for two through eight hops; Direct fixed capacity is 65,507 bytes. These fixed
+capacities are included in their domain's ceiling, not added to it. This is not a process RSS cap:
+allocator metadata, socket/kernel buffers, TUN rings, fragment reassembly, TCP and other owners
+remain separately bounded. No throughput or RSS reduction is implied by this capacity accounting.
+The client metrics endpoint samples the independent domain as
+`ferrum2_tun_udp_buffered_bytes{role="client"}`; shutdown diagnostics include
+`tun_udp_buffered_bytes` in the zero-residue owner comparison.
+The default byte ceiling can therefore stop admission before the mapping-count
+limit: ignoring all payloads, 64 MiB holds at most 512 one-hop Proxy fixed-buffer
+sets or 341 multi-hop sets. Queued and retained payloads reduce those ceilings.
 
 For example, the rule below affects a socket only when `198.51.100.10:3478` is
 that socket's first ordinary target. This is a routing excerpt; the `proxy` outbound also needs its
@@ -283,8 +299,9 @@ route, outbound, or adapter identity is exposed as a label.
   fail before a partially validated configuration can be produced; there is no automatic migration.
 - Replace legacy composite matchers with the flat schema-v2 matcher fields documented in the
   breaking migration guide.
-- Remove the deleted aggregate TUN UDP memory field. It has no replacement or deprecated no-op;
-  the breaking migration guide names the rejected legacy spelling explicitly.
+- The removed legacy `tun.max_udp_buffered_bytes` spelling remains rejected; the new
+  `tun.udp_buffered_bytes_limit` is an exact independent UDP capacity budget, not an estimated
+  aggregate process-memory budget.
 - Existing dual-stack address fields and IPv4 synthetic DNS remain valid.
 - `strict_route` is new and defaults to `false`. Its requested value is retained, but it is
   effective only with `auto_route = true`; requesting it without automatic routing requires a
@@ -294,9 +311,8 @@ route, outbound, or adapter identity is exposed as a label.
   fallback.
 - `udp_filtering` now defaults to `endpoint_independent` when omitted. Set it to
   `address_dependent` explicitly to retain source-address filtering.
-- Ferrum2 no longer estimates or rejects aggregate TUN-owned memory. Flow, association, queue,
-  fragment, timeout, and protocol-length bounds still apply; extreme combinations can therefore be
-  limited by the operating system's available memory. This does not remove the shared runtime UDP
-  byte budget for ordinary SOCKS, DNS, or RuleSet traffic.
+- Ferrum2 does not estimate aggregate TUN-owned or process memory. The independent TUN UDP
+  byte ceiling covers the owned UDP payload and egress-buffer domain described above; flow,
+  association, fragment, timeout, and protocol-length bounds remain mandatory.
 - There are intentionally no `route_guard`, `on_network_change`, `dns_mode`, or `udp_mapping`
   settings.

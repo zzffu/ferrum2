@@ -9,6 +9,7 @@ mod route;
 mod run_loop;
 #[cfg(test)]
 mod tests;
+mod work;
 
 pub(in crate::run) use admission::{
     ServerUdpShared, prepare_udp_server_with_network, udp_runtime_limits,

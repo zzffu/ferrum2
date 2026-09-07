@@ -47,6 +47,8 @@ pub struct TunConfig {
     pub ready_timeout: Duration,
     pub max_tcp_flows: usize,
     pub max_udp_mappings: usize,
+    /// Independent capacity ceiling for TUN UDP egress buffers and datagrams.
+    pub udp_buffered_bytes_limit: usize,
     pub udp_filtering: UdpFiltering,
 }
 

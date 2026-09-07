@@ -27,6 +27,43 @@ mod udp_support;
 use udp_support::*;
 
 #[test]
+fn independent_tun_budget_exhaustion_and_retained_reset_owners_stay_isolated() {
+    let registry = OwnerRegistry::new();
+    let baseline = registry.snapshot();
+    let manager = UdpSessionManager::new(limits(2), registry.clone());
+    let tun = ferrum2_runtime::UdpBufferBudget::new_tun(7, registry.clone());
+    let now = Instant::now();
+    let session = manager.reserve_session(now).expect("shared session slot");
+    let pending = session
+        .reserve_datagram_in_budget(UdpDirection::ToTarget, 7, &tun)
+        .expect("independent bytes");
+    let (handle, retained) = session
+        .commit_immediate(pending, ip_datagram(b"request"), now)
+        .expect("retained response");
+    assert!(matches!(
+        manager.reserve_datagram_in_budget(handle, UdpDirection::ToClient, 1, &tun),
+        Err(UdpRuntimeError::BufferLimit)
+    ));
+    let ordinary = manager
+        .reserve_datagram(handle, UdpDirection::ToClient, 1)
+        .expect("TUN exhaustion does not exhaust ordinary bytes");
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 1);
+    assert_eq!(registry.snapshot().tun_udp_buffered_bytes, 7);
+    drop(ordinary);
+    manager.cancel_all();
+    assert_eq!(manager.session_count(), 0);
+    assert_eq!(
+        tun.reserved_bytes(),
+        7,
+        "reset cannot release a retained allocation"
+    );
+    assert_eq!(retained.datagram().payload(), b"request");
+    drop(retained);
+    assert_eq!(tun.reserved_bytes(), 0);
+    assert_eq!(registry.snapshot(), baseline);
+}
+
+#[test]
 fn immediate_commit_preserves_budget_and_skips_queue_ownership() {
     let registry = OwnerRegistry::new();
     let manager = UdpSessionManager::new(limits(1), registry.clone());

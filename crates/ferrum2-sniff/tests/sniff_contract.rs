@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ferrum2_sniff::{Metadata, Progress, Protocol, Transport, sniff};
+use ferrum2_sniff::{Metadata, Progress, Protocol, Transport, sniff, sniff_tcp_prefix};
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query},
     rr::{DNSClass, Name, RecordType},
@@ -45,6 +45,68 @@ fn client_hello(
         client.write_tls(&mut wire).expect("test ClientHello");
     }
     wire
+}
+
+#[test]
+fn collected_final_results_equal_strict_parse_without_finalizing_partial_prefixes() {
+    let dns = dns_query("collection.test");
+    let mut framed_dns = (dns.len() as u16).to_be_bytes().to_vec();
+    framed_dns.extend_from_slice(&dns);
+    let inputs = [
+        framed_dns,
+        client_hello(&TLS12, true, None),
+        client_hello(&TLS13, true, Some(32)),
+        b"GET / HTTP/1.1\r\nHost: collection.test\r\n\r\n".to_vec(),
+        vec![0, 3, 0xff, 0xff],
+        vec![0xff, 0xff, 0xff],
+    ];
+    for input in inputs {
+        for order in [
+            vec![Protocol::Dns, Protocol::Tls, Protocol::Http],
+            vec![Protocol::Http, Protocol::Tls, Protocol::Dns],
+            vec![Protocol::Tls],
+        ] {
+            for port in [53, 443] {
+                for len in 0..=input.len() {
+                    let bytes = &input[..len];
+                    for limit in [len, input.len(), input.len() + 1] {
+                        let collected = sniff_tcp_prefix(bytes, limit, port, &order);
+                        let horizon = sniff(bytes, limit + 1, Transport::Tcp, port, &order);
+                        if horizon == Progress::NeedMore {
+                            assert_eq!(collected, Progress::NeedMore);
+                        } else {
+                            assert_eq!(
+                                collected,
+                                sniff(bytes, limit, Transport::Tcp, port, &order),
+                                "port={port}, len={len}, limit={limit}, order={order:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn collection_keeps_dns_horizon_arbitration_and_strict_final_frame_limit() {
+    let bytes = [0, 3, 0xff, 0xff];
+    assert_eq!(
+        sniff_tcp_prefix(&bytes, 4, 53, &[Protocol::Dns]),
+        Progress::NeedMore
+    );
+    assert_eq!(
+        sniff_tcp_prefix(&bytes, 4, 443, &[Protocol::Dns]),
+        Progress::Invalid
+    );
+    assert_eq!(
+        sniff_tcp_prefix(&bytes[..2], 4, 443, &[Protocol::Dns]),
+        Progress::Invalid
+    );
+    assert_eq!(
+        sniff_tcp_prefix(&bytes, 3, 443, &[Protocol::Dns]),
+        Progress::Invalid
+    );
 }
 
 fn with_ech_client_hello_outer(mut wire: Vec<u8>) -> Vec<u8> {

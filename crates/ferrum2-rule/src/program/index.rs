@@ -15,6 +15,8 @@ use super::{OrderedRouteProgram, OrderedRouteRule};
 
 pub(super) struct ConstraintIndex<P> {
     masks: [Box<[u64]>; FIELD_KIND_COUNT],
+    active_fields: [FieldKind; FIELD_KIND_COUNT],
+    active_field_count: usize,
     inbound: SparseValueIndex<usize>,
     network: SparseValueIndex<Network>,
     protocol: SparseValueIndex<P>,
@@ -57,11 +59,8 @@ impl<P: Ord, A> OrderedRouteProgram<P, A> {
 
         let constraints = self.compiled.index().expect("indexed constraints");
         scratch.fill_candidates(self.compiled.len(), cursor);
-        for kind in FieldKind::ALL {
+        for &kind in &constraints.active_fields[..constraints.active_field_count] {
             let mask = &constraints.masks[kind.index()];
-            if mask.iter().all(|word| *word == 0) {
-                continue;
-            }
             scratch.matched.fill(0);
             constraints.visit_matches(
                 kind,
@@ -167,8 +166,20 @@ pub(super) fn build_constraints<P: Clone + Ord, A>(
             }
         }
     }
+    // Masks are immutable after compilation. Determine their nonempty fields
+    // once, not by rescanning every bitmap on every continuation.
+    let mut active_fields = FieldKind::ALL;
+    let mut active_field_count = 0;
+    for kind in FieldKind::ALL {
+        if masks[kind.index()].iter().any(|word| *word != 0) {
+            active_fields[active_field_count] = kind;
+            active_field_count += 1;
+        }
+    }
     Ok(ConstraintIndex {
         masks: masks.map(Vec::into_boxed_slice),
+        active_fields,
+        active_field_count,
         inbound: inbound.build()?,
         network: network.build()?,
         protocol: protocol.build()?,

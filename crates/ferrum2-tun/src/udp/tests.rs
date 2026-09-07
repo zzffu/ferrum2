@@ -47,6 +47,70 @@ async fn commit(table: &mut UdpTable, candidate: UdpCandidate, now_millis: i64) 
 }
 
 #[tokio::test]
+async fn udp_byte_budget_charges_shared_candidates_and_retained_datagrams_until_drop() {
+    let registry = ferrum2_runtime::OwnerRegistry::new();
+    let budget = ferrum2_runtime::UdpBufferBudget::new_tun(6, registry.clone());
+    let (mut table, mut candidates, _) = table(2, 60_000, UdpFiltering::EndpointIndependent, 7);
+    table.set_buffer_budget(budget.clone());
+    assert_eq!(
+        table.admit(endpoints(10000, "192.0.2.1:53"), b"queued", 128, 0, true),
+        Admission::Provisional
+    );
+    let candidate = candidates.try_recv().unwrap();
+    assert_eq!(
+        budget.reserved_bytes(),
+        6,
+        "candidate and first queue entry share one payload"
+    );
+    assert_eq!(
+        table.admit(endpoints(10001, "192.0.2.1:53"), b"x", 128, 0, true),
+        Admission::Dropped
+    );
+    assert_eq!(
+        table.free_slots_for_test(),
+        1,
+        "byte rejection rolls back count admission"
+    );
+    let mut association = commit(&mut table, candidate, 0).await;
+    let retained = association.receive().await.unwrap();
+    table.invalidate_session(8, UdpResponseDropReason::SessionReset);
+    drop(association);
+    assert_eq!(budget.reserved_bytes(), 6);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+    assert_eq!(retained.payload(), b"queued");
+    drop(retained);
+    assert_eq!(registry.snapshot().tun_udp_buffered_bytes, 0);
+}
+
+#[tokio::test]
+async fn deferred_udp_response_retains_independent_byte_charge_until_reset() {
+    let registry = ferrum2_runtime::OwnerRegistry::new();
+    let budget = ferrum2_runtime::UdpBufferBudget::new_tun(6, registry.clone());
+    let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::EndpointIndependent, 7);
+    table.set_buffer_budget(budget.clone());
+    table.admit(endpoints(10000, "192.0.2.1:53"), b"x", 128, 0, true);
+    let mut association = commit(&mut table, candidates.try_recv().unwrap(), 0).await;
+    drop(association.receive().await.unwrap());
+    let sink = association.response_sink();
+    assert_eq!(
+        sink.send(v4("192.0.2.1:53"), b"queued"),
+        UdpResponseSendOutcome::Queued
+    );
+    assert_eq!(
+        sink.send(v4("192.0.2.1:53"), b"x"),
+        UdpResponseSendOutcome::QueueFull
+    );
+    assert_eq!(
+        table.process_one_response(1, |_, _| InjectOutcome::Backpressured),
+        ResponseProcessOutcome::Deferred
+    );
+    assert_eq!(budget.reserved_bytes(), 6);
+    table.invalidate_session(8, UdpResponseDropReason::SessionReset);
+    assert_eq!(budget.reserved_bytes(), 0);
+    assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
+}
+
+#[tokio::test]
 async fn session_fence_rejects_buffered_receive_and_peer_commit_before_retirement() {
     let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::AddressDependent, 7);
     assert_ne!(

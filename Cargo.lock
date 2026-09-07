@@ -677,6 +677,7 @@ dependencies = [
  "ferrum2-runtime",
  "ferrum2-shadowsocks",
  "ferrum2-sniff",
+ "futures-util",
  "hickory-proto",
  "socket2",
  "tokio",

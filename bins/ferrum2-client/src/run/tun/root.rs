@@ -102,6 +102,13 @@ pub(in crate::run) fn process_root(
         runtime: RunError::RuntimeRoot,
         cleanup: RunError::ShutdownCleanup,
         registry: context.registry.clone(),
+        udp_buffer_budget: context
+            .egress
+            .udp
+            .as_ref()
+            .expect("TUN preparation always creates its UDP context")
+            .tun_budget
+            .clone(),
         handle_tcp: Arc::new(move |flow, cancellation, session_cancellation| {
             let context = Arc::clone(&handler_context);
             let routing = Arc::clone(&tcp_routing);

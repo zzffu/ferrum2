@@ -37,6 +37,10 @@ async fn missing_exact_direct_resolver_fails_closed_for_tcp_and_udp() {
         SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager: UdpSessionManager::new(UdpRuntimeLimits::default(), OwnerRegistry::new()),
             live_ids: Arc::new(Mutex::new(HashSet::new())),
         }),
@@ -124,6 +128,10 @@ async fn application_dns_ingress_is_isolated_for_concurrent_tcp_and_udp() {
         SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager: UdpSessionManager::new(UdpRuntimeLimits::default(), registry),
             live_ids: Arc::new(Mutex::new(HashSet::new())),
         }),
@@ -357,6 +365,10 @@ async fn m16_direct_pre_socket_and_m16_redaction_classify_without_side_effects()
         FixedRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager: UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone()),
             live_ids: Arc::new(Mutex::new(HashSet::new())),
         }),
@@ -459,6 +471,10 @@ async fn m16_direct_pre_socket_and_m16_redaction_classify_without_side_effects()
         ferrum2_crypto::SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager: UdpSessionManager::new(UdpRuntimeLimits::default(), packet_registry.clone()),
             live_ids: Arc::clone(&packet_live_ids),
         }),

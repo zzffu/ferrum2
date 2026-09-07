@@ -457,7 +457,10 @@ def _validate_measurement(row: dict[str, Any], report: dict[str, Any]) -> tuple[
             raise ControlError("runner scenario metadata is invalid")
     sources = {
         "match_set": {"ordinary_inline", "synthetic_ruleset", "synthetic_srs", "binary_srs"},
-        "route_program": {"ordinary_only", "ruleset_only", "mixed", "mixed_observed"},
+        "route_program": {
+            "ordinary_only", "ruleset_only", "mixed", "mixed_observed",
+            "sparse_bitmap", "dense_bitmap", "sparse_continue", "dense_continue",
+        },
         "dns_policy": {"ordinary_inline", "ruleset", "cache"},
     }
     if row["source"] not in sources[row["suite"]]:

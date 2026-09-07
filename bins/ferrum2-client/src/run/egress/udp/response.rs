@@ -2,10 +2,7 @@ use std::io;
 
 use ferrum2_core::{TargetAddr, TargetHostRef};
 use ferrum2_crypto::Clock;
-use ferrum2_runtime::{
-    AccountedDatagram, UdpCommitError, UdpDirection, UdpRuntimeError, UdpSessionHandle,
-    UdpSessionManager,
-};
+use ferrum2_runtime::{AccountedDatagram, UdpCommitError, UdpRuntimeError};
 use ferrum2_shadowsocks::{
     BorrowedPendingUdpResponse, UdpClientSession, UdpPacketError, UdpResponseCommit,
 };
@@ -14,7 +11,7 @@ use tokio::time::Instant;
 
 use crate::run::egress::context::ClientOutboundContext;
 
-use super::lease::UdpAccounting;
+use super::lease::UdpAssociationLease;
 use super::proxy::ClientUdpPlan;
 use super::request::composed_udp_plan_limit;
 
@@ -32,16 +29,13 @@ pub(super) fn dns_response_target_matches(expected: &TargetAddr, actual: &Target
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn commit_final_udp_response(
     pending: BorrowedPendingUdpResponse<'_>,
     plan: &ClientUdpPlan,
     hops: &[usize],
     outbounds: &[ClientOutboundContext],
-    mut commits: Vec<UdpResponseCommit>,
-    manager: &UdpSessionManager,
-    handle: UdpSessionHandle,
-    accounting: UdpAccounting,
+    commits: Option<Vec<UdpResponseCommit>>,
+    lease: &UdpAssociationLease,
     clock: &(impl Clock + ?Sized),
 ) -> Result<AccountedDatagram, UdpPlanResponseError> {
     let socks_len = 3_usize
@@ -58,27 +52,12 @@ pub(super) fn commit_final_udp_response(
     {
         return Err(UdpPlanResponseError::Packet(UdpPacketError::Bounds));
     }
-    let reservation = match accounting {
-        UdpAccounting::Metered => {
-            manager.reserve_datagram(handle, UdpDirection::ToClient, pending.allocated_capacity())
-        }
-        UdpAccounting::TunUnmetered => manager.reserve_unmetered_datagram(
-            handle,
-            UdpDirection::ToClient,
-            pending.allocated_capacity(),
-        ),
-    }
-    .map_err(UdpPlanResponseError::Runtime)?;
+    let reservation = lease
+        .reserve_response(pending.allocated_capacity())
+        .map_err(UdpPlanResponseError::Runtime)?;
     let (datagram, commit) = pending.materialize().into_parts();
-    commits.push(commit);
-    let result = if plan.legs.len() == 1 && commits.len() == 1 {
-        let commit = commits.pop().expect("single response commit was checked");
-        reservation.commit_immediate_with(datagram, Instant::now(), || {
-            plan.legs[0]
-                .protocol
-                .commit_response(commit, clock.monotonic_now())
-        })
-    } else {
+    let result = if let Some(mut commits) = commits {
+        commits.push(commit);
         let sessions = plan
             .legs
             .iter()
@@ -86,6 +65,12 @@ pub(super) fn commit_final_udp_response(
             .collect::<Vec<_>>();
         reservation.commit_immediate_with(datagram, Instant::now(), || {
             UdpClientSession::commit_responses(&sessions, commits, clock.monotonic_now())
+        })
+    } else {
+        reservation.commit_immediate_with(datagram, Instant::now(), || {
+            plan.legs[0]
+                .protocol
+                .commit_response(commit, clock.monotonic_now())
         })
     };
     result.map_err(|error| match error {

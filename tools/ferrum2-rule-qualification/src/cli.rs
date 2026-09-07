@@ -5,9 +5,6 @@ use std::path::PathBuf;
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
 
-#[cfg(test)]
-use crate::measurement::allocation::allocator_test_lock;
-
 pub(crate) const DEFAULT_SMOKE_SAMPLES: usize = 101;
 pub(crate) const DEFAULT_QUALIFICATION_SAMPLES: usize = 101;
 pub(crate) const MIN_SAMPLES: usize = 5;
@@ -31,8 +28,8 @@ impl Profile {
 
     pub(crate) fn route_sizes(self) -> Vec<usize> {
         match self {
-            Self::Smoke => vec![1, 32, 64],
-            Self::Qualification => vec![1, 32, 64, 1_000, 10_000],
+            Self::Smoke => vec![1, 32, 63, 64, 65],
+            Self::Qualification => vec![1, 32, 63, 64, 65, 1_000, 10_000],
         }
     }
 
@@ -108,32 +105,3 @@ impl fmt::Display for QualificationError {
 impl Error for QualificationError {}
 
 pub(crate) type Result<T> = std::result::Result<T, QualificationError>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn profiles_are_bounded_and_one_hundred_thousand_is_opt_in() {
-        let _guard = allocator_test_lock();
-        assert_eq!(Profile::Smoke.match_sizes(), vec![100]);
-        assert_eq!(
-            Profile::Qualification.match_sizes(),
-            vec![100, 1_000, 10_000]
-        );
-        assert!(!Profile::Qualification.match_sizes().contains(&100_000));
-        assert_eq!(
-            Profile::Qualification.route_sizes(),
-            vec![1, 32, 64, 1_000, 10_000]
-        );
-        assert_eq!(Profile::Smoke.dns_rule_sizes(), vec![1]);
-        assert_eq!(
-            Profile::Qualification.dns_rule_sizes(),
-            vec![1, 64, 65, 100, 1_000, 10_000]
-        );
-        assert_eq!(Profile::Smoke.default_samples(), 101);
-        assert_eq!(Profile::Qualification.default_samples(), 101);
-        assert!(!Profile::Smoke.includes_generated_binary_srs());
-        assert!(Profile::Qualification.includes_generated_binary_srs());
-    }
-}

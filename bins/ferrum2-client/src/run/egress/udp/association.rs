@@ -24,6 +24,7 @@ use tokio::time::Instant;
 
 pub(in crate::run) struct ClientUdpContext {
     pub(in crate::run) manager: UdpSessionManager,
+    pub(in crate::run) tun_budget: ferrum2_runtime::UdpBufferBudget,
     pub(in crate::run) live_ids: Arc<Mutex<HashSet<UdpSessionId>>>,
 }
 impl ClientUdpContext {

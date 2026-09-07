@@ -12,12 +12,12 @@ class RunnerRequestTests(unittest.TestCase):
         smoke = parse_runner_request([])
         self.assertEqual(smoke.profile, "smoke")
         self.assertEqual(smoke.configuration, {
-            "match_sizes": [100], "route_sizes": [1, 32, 64], "dns_rule_sizes": [1],
+            "match_sizes": [100], "route_sizes": [1, 32, 63, 64, 65], "dns_rule_sizes": [1],
             "samples": 101, "base_iterations_per_sample": 8192, "includes_100k": False,
         })
         full = parse_runner_request(["--profile=qualification", "--samples", "1001", "--iterations-per-sample=10", "--include-100k", "--workspace-root", ".", "--output=result.json"])
         self.assertEqual(full.configuration, {
-            "match_sizes": [100, 1000, 10000, 100000], "route_sizes": [1, 32, 64, 1000, 10000],
+            "match_sizes": [100, 1000, 10000, 100000], "route_sizes": [1, 32, 63, 64, 65, 1000, 10000],
             "dns_rule_sizes": [1, 64, 65, 100, 1000, 10000], "samples": 1001,
             "base_iterations_per_sample": 10, "includes_100k": True,
         })

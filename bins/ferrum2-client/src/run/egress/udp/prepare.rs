@@ -1,7 +1,7 @@
 use super::association::{ClientUdpAssociation, UdpPath};
 use super::direct::{DirectSocketState, DirectUdpFamily, DirectUdpResponsePolicy};
 use super::direct_association::DirectAssociation;
-use super::lease::{UdpAccounting, UdpAssociationLease};
+use super::lease::UdpAssociationLease;
 use super::proxy::{ProxyAssociation, ProxyResources};
 use crate::run::egress::context::{ClientOutboundContext, ClientRequestOrigin, SelectedEgress};
 use crate::run::egress::engine::ClientEgressEngine;
@@ -50,21 +50,29 @@ where
         .manager
         .reserve_session(Instant::now())
         .map_err(|_| ())?;
-    let accounting = UdpAccounting::from(origin);
-    let budget = udp.manager.buffer_budget();
+    let budget = match origin {
+        ClientRequestOrigin::Tun => udp.tun_budget.clone(),
+        ClientRequestOrigin::Socks | ClientRequestOrigin::Dns | ClientRequestOrigin::RuleSet => {
+            udp.manager.buffer_budget()
+        }
+    };
     let fixed_buffer_count = match selected {
         SelectedEgress::Direct { .. } => 1,
-        SelectedEgress::Shadowsocks { .. } => 3,
+        SelectedEgress::Shadowsocks { .. } => {
+            if plan.as_ref().ok_or(())?.hops().len() == 1 {
+                2
+            } else {
+                3
+            }
+        }
     };
     let mut fixed_capacity = Vec::with_capacity(fixed_buffer_count);
-    if accounting == UdpAccounting::Metered {
-        for _ in 0..fixed_buffer_count {
-            let capacity = match selected {
-                SelectedEgress::Direct { .. } => MAX_UDP_WIRE_DATAGRAM_BYTES,
-                SelectedEgress::Shadowsocks { .. } => MAX_UDP_WIRE_LEN,
-            };
-            fixed_capacity.push(budget.reserve(capacity).map_err(|_| ())?);
-        }
+    for _ in 0..fixed_buffer_count {
+        let capacity = match selected {
+            SelectedEgress::Direct { .. } => MAX_UDP_WIRE_DATAGRAM_BYTES,
+            SelectedEgress::Shadowsocks { .. } => MAX_UDP_WIRE_LEN,
+        };
+        fixed_capacity.push(budget.reserve(capacity).map_err(|_| ())?);
     }
     let path = match selected {
         SelectedEgress::Shadowsocks {
@@ -89,7 +97,11 @@ where
                 ProxyResources {
                     plan: plan.ok_or(())?,
                     socket,
-                    inner_wire: vec![0_u8; MAX_UDP_WIRE_LEN],
+                    inner_wire: if fixed_buffer_count == 3 {
+                        vec![0_u8; MAX_UDP_WIRE_LEN]
+                    } else {
+                        Vec::new()
+                    },
                     upstream_wire: BytesMut::with_capacity(MAX_UDP_WIRE_LEN),
                     scratch: UdpPacketScratch::new(),
                 },
@@ -138,7 +150,7 @@ where
         lease: UdpAssociationLease::new(
             udp.manager.clone(),
             pending_session,
-            accounting,
+            budget,
             fixed_capacity,
         ),
         path,

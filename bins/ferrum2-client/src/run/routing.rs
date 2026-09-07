@@ -204,7 +204,7 @@ impl ClientRouting {
                 RouteProgramAction::Continue(RouteAction::Sniff(sniffers)) if !sniffed => {
                     sniffed = true;
                     let order = sniff_order(sniffers);
-                    let horizon = program.sniff.max_bytes + 1;
+                    let mut complete = None;
                     let collected = collect_sniff_prefix(
                         &[][..],
                         program.sniff.max_bytes,
@@ -223,16 +223,16 @@ impl ClientRouting {
                             }
                         },
                         |bytes| {
-                            if ferrum2_sniff::sniff(
+                            let progress = ferrum2_sniff::sniff_tcp_prefix(
                                 bytes,
-                                horizon,
-                                Transport::Tcp,
+                                program.sniff.max_bytes,
                                 target.port().get(),
                                 &order,
-                            ) == SniffProgress::NeedMore
-                            {
+                            );
+                            if progress == SniffProgress::NeedMore {
                                 PrefixDecision::ReadMore
                             } else {
+                                complete = Some(progress);
                                 PrefixDecision::Complete
                             }
                         },
@@ -240,13 +240,9 @@ impl ClientRouting {
                     .await;
                     let outcome = collected.outcome();
                     let progress = match outcome {
-                        SniffPrefixOutcome::Complete => ferrum2_sniff::sniff(
-                            collected.as_ref(),
-                            program.sniff.max_bytes,
-                            Transport::Tcp,
-                            target.port().get(),
-                            &order,
-                        ),
+                        SniffPrefixOutcome::Complete => {
+                            complete.expect("complete collector inspected prefix")
+                        }
                         SniffPrefixOutcome::Timeout
                         | SniffPrefixOutcome::Limit
                         | SniffPrefixOutcome::Unavailable => SniffProgress::NoMatch,

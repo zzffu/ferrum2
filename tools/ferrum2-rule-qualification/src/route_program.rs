@@ -226,6 +226,128 @@ pub(crate) fn run_route_programs(
                 "route evaluation scratch grew on the measured path",
             ));
         }
+        run_bitmap_shapes(count, samples, iterations, measurements)?;
+    }
+    Ok(())
+}
+
+/// Keep density and repeated continuation separate from source-parity rows.
+fn run_bitmap_shapes(
+    count: usize,
+    samples: usize,
+    iterations: u64,
+    measurements: &mut Vec<Measurement>,
+) -> Result<()> {
+    for (source, dense, continues) in [
+        ("sparse_bitmap", false, 0),
+        ("dense_bitmap", true, 0),
+        ("sparse_continue", false, count.saturating_sub(1).min(8)),
+        ("dense_continue", true, count.saturating_sub(1).min(8)),
+    ] {
+        let region = allocation_region();
+        let started = Instant::now();
+        let mut rules = Vec::with_capacity(count);
+        for index in 0..count {
+            let (matcher, action) = if index < continues {
+                (
+                    RouteMatcher::<()>::unconditional(),
+                    RouteRuleAction::Continue(index),
+                )
+            } else {
+                let name = if dense {
+                    "dense.bench.invalid".to_owned()
+                } else {
+                    format!("shape-{index}.bench.invalid")
+                };
+                let domain = DomainName::new(&name)
+                    .map_err(|_| QualificationError::new("bitmap fixture domain is invalid"))?;
+                let matcher = RouteMatcher::try_new(vec![
+                    RouteMatchField::Domain(vec![domain]),
+                    RouteMatchField::Port(vec![
+                        std::num::NonZeroU16::new(1 + index as u16).ok_or_else(|| {
+                            QualificationError::new("bitmap fixture port is invalid")
+                        })?,
+                    ]),
+                ])
+                .map_err(|_| QualificationError::new("bitmap matcher build failed"))?;
+                (matcher, RouteRuleAction::Terminal(index))
+            };
+            rules.push(OrderedRouteRule::new(matcher, action));
+        }
+        let program = OrderedRouteProgram::try_new(rules, usize::MAX)
+            .map_err(|_| QualificationError::new("bitmap program build failed"))?;
+        let build = finish_build(started, &region)?;
+        let mut scratch = program
+            .evaluation_scratch()
+            .map_err(|_| QualificationError::new("bitmap scratch allocation failed"))?;
+        for (case, position) in [
+            ("first", Some(continues)),
+            ("last", Some(count - 1)),
+            ("miss", None),
+        ] {
+            let index = position.unwrap_or(count);
+            let name = if dense {
+                "dense.bench.invalid".to_owned()
+            } else {
+                format!("shape-{index}.bench.invalid")
+            };
+            let detected = DomainName::new(&name)
+                .map_err(|_| QualificationError::new("bitmap detected domain is invalid"))?;
+            let target = TargetAddr::domain(
+                if continues == 0 {
+                    &name
+                } else {
+                    "before-sniff.invalid"
+                },
+                1 + index as u16,
+            )
+            .map_err(|_| QualificationError::new("bitmap target is invalid"))?;
+            let mut operation = || {
+                let mut evaluation =
+                    program.evaluate_with_scratch(0, Network::Tcp, &target, &mut scratch);
+                let mut steps = 0;
+                loop {
+                    let metadata = RouteMetadata::new(None, (steps != 0).then_some(&detected));
+                    match evaluation.next(metadata) {
+                        Some(RouteProgramAction::Continue(_)) => steps += 1,
+                        Some(
+                            RouteProgramAction::Terminal(value) | RouteProgramAction::Final(value),
+                        ) => {
+                            return (*value, steps);
+                        }
+                        None => return (usize::MAX - 1, steps),
+                    }
+                }
+            };
+            if operation() != (position.unwrap_or(usize::MAX), continues) {
+                return Err(QualificationError::new(
+                    "bitmap continuation contract failed",
+                ));
+            }
+            let result = benchmark(
+                || {
+                    let (selected, steps) = operation();
+                    (selected as u64).wrapping_add(steps as u64)
+                },
+                samples,
+                iterations,
+            );
+            let mut row = measurement(
+                format!("route_program/{source}/{count}/{case}"),
+                "route_program",
+                source,
+                case,
+                count,
+                None,
+                Some(program.mode()),
+                iterations,
+                build,
+                Some(count),
+                result,
+            );
+            row.query_candidate_visits = Some(scratch.candidate_visits());
+            measurements.push(row);
+        }
     }
     Ok(())
 }

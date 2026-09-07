@@ -84,29 +84,19 @@ impl PendingUdpSession {
             direction,
             allocated_capacity,
             false,
-            true,
         )
     }
 
-    /// Reserves the first datagram without charging the global UDP byte budget.
-    ///
-    /// This is only for callers whose datagrams remain structurally bounded by
-    /// independent packet, queue, and owner-count limits. Bounds, queue depth,
-    /// session generation, cancellation, and reserve-then-commit checks remain
-    /// identical to [`Self::reserve_datagram`].
-    pub fn reserve_unmetered_datagram(
+    /// Reserves the first datagram against an independent byte domain.
+    /// Session, queue, generation and commit checks remain shared.
+    pub fn reserve_datagram_in_budget(
         &self,
         direction: UdpDirection,
         allocated_capacity: usize,
+        budget: &super::reservation::UdpBufferBudget,
     ) -> Result<PendingUdpDatagram, UdpRuntimeError> {
-        reserve_datagram(
-            &self.manager,
-            self.handle,
-            direction,
-            allocated_capacity,
-            false,
-            false,
-        )
+        let reservation = budget.reserve(allocated_capacity)?;
+        reserve_datagram_with_reservation(&self.manager, self.handle, direction, false, reservation)
     }
     /// Activates this generation after a borrowed first datagram was encoded.
     ///
@@ -492,13 +482,18 @@ pub(super) fn reserve_datagram(
     direction: UdpDirection,
     allocated_capacity: usize,
     require_committed: bool,
-    meter_buffer: bool,
 ) -> Result<PendingUdpDatagram, UdpRuntimeError> {
-    let reservation = if meter_buffer {
-        manager.budget.reserve(allocated_capacity)?
-    } else {
-        UdpBufferReservation::unmetered(allocated_capacity)?
-    };
+    let reservation = manager.budget.reserve(allocated_capacity)?;
+    reserve_datagram_with_reservation(manager, handle, direction, require_committed, reservation)
+}
+
+pub(super) fn reserve_datagram_with_reservation(
+    manager: &Arc<UdpSessionManagerInner>,
+    handle: UdpSessionHandle,
+    direction: UdpDirection,
+    require_committed: bool,
+    reservation: UdpBufferReservation,
+) -> Result<PendingUdpDatagram, UdpRuntimeError> {
     let mut state = lock_state(manager);
     if state.shutting_down {
         return Err(UdpRuntimeError::Cancelled);

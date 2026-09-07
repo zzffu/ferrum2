@@ -283,6 +283,21 @@ async fn udp_ipv4_ipv6_candidates_commit_and_inject_through_the_real_stack() {
             Arc::new(Mutex::new(Default::default())),
         )
         .expect("UDP stack");
+        let budget = ferrum2_runtime::UdpBufferBudget::new_tun(4, OwnerRegistry::new());
+        stack.set_udp_buffer_budget(budget.clone());
+        let pressure = budget.reserve(1).expect("occupy independent byte domain");
+        assert!(!stack.enqueue_at(&packet, true, 0));
+        assert!(matches!(
+            candidates.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        // The rejected datagram emits a local ICMP error; drain it as the owner
+        // would before accepting a later target response.
+        assert_eq!(
+            stack.flush_output(|_| OutputSendOutcome::Sent),
+            OutputFlushOutcome::Sent
+        );
+        drop(pressure);
         assert!(stack.enqueue_at(&packet, true, 0));
         assert_eq!(
             stack.live_udp_associations(),
@@ -325,6 +340,9 @@ async fn udp_ipv4_ipv6_candidates_commit_and_inject_through_the_real_stack() {
         assert_eq!(reverse.source(), expected_target);
         assert_eq!(reverse.target(), expected_source);
         assert_eq!(payload, response);
+        drop(mapping);
+        drop(stack);
+        assert_eq!(budget.reserved_bytes(), 0);
     }
 }
 

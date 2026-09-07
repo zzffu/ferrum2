@@ -233,6 +233,10 @@ impl BootstrapBlueprint {
                 self.runtime.connect_timeout,
             ));
         let udp = ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager: UdpSessionManager::new(UdpRuntimeLimits::default(), OwnerRegistry::new()),
             live_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         };

@@ -38,7 +38,7 @@ pub(super) const CLIENT_SHUTDOWN_REPORT_FIELDS: [&str; 17] = [
     "shutdown_grace_ns",
     "termination_cause",
 ];
-pub(super) const OWNER_COUNTER_FIELDS: [&str; 27] = [
+pub(super) const OWNER_COUNTER_FIELDS: [&str; 28] = [
     "active_supervisor_children",
     "active_tun_handler_tasks",
     "active_tun_tcp_flows",
@@ -59,6 +59,7 @@ pub(super) const OWNER_COUNTER_FIELDS: [&str; 27] = [
     "process_root_rollbacks",
     "process_supervisors",
     "sniff_buffered_bytes",
+    "tun_udp_buffered_bytes",
     "udp_buffered_bytes",
     "udp_forced_shutdowns",
     "udp_queued_datagrams",
@@ -67,7 +68,7 @@ pub(super) const OWNER_COUNTER_FIELDS: [&str; 27] = [
     "udp_sockets",
     "udp_tasks",
 ];
-pub(super) const ACTIVE_OWNER_COUNTER_FIELDS: [&str; 22] = [
+pub(super) const ACTIVE_OWNER_COUNTER_FIELDS: [&str; 23] = [
     "active_supervisor_children",
     "active_tun_handler_tasks",
     "active_tun_tcp_flows",
@@ -84,6 +85,7 @@ pub(super) const ACTIVE_OWNER_COUNTER_FIELDS: [&str; 22] = [
     "prepared_process_roots",
     "process_supervisors",
     "sniff_buffered_bytes",
+    "tun_udp_buffered_bytes",
     "udp_buffered_bytes",
     "udp_queued_datagrams",
     "udp_scratch_buffers",

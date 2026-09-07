@@ -92,6 +92,18 @@ impl ServerDnsResolver {
         )
     }
 
+    #[cfg(test)]
+    pub(super) fn with_test_backend(
+        backend: Arc<dyn ferrum2_dns::ApplicationResolveBackend>,
+    ) -> Self {
+        Self::for_direct_inner(
+            backend,
+            DirectDomainResolver::System,
+            Arc::new(OnceLock::new()),
+            None,
+        )
+    }
+
     pub(super) fn for_direct_observed(
         system: ferrum2_dns::SystemResolver,
         mode: DirectDomainResolver,

@@ -46,6 +46,8 @@ pub struct TunRootRequest<E> {
     pub runtime: E,
     pub cleanup: E,
     pub registry: OwnerRegistry,
+    /// Independent TUN UDP byte domain shared with the egress handlers.
+    pub udp_buffer_budget: ferrum2_runtime::UdpBufferBudget,
     pub handle_tcp: TcpHandler,
     pub handle_udp: UdpHandler,
     pub handle_network_lifecycle: NetworkLifecycleHandler,

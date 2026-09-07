@@ -92,12 +92,16 @@ fn render_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String 
             "# HELP ferrum2_tun_tcp_flow_owners_active TCP flow owners retained by the client runtime.\n",
             "# TYPE ferrum2_tun_tcp_flow_owners_active gauge\n",
             "ferrum2_tun_tcp_flow_owners_active{{role=\"client\"}} {}\n",
+            "# HELP ferrum2_tun_udp_buffered_bytes Reserved user-space bytes in the independent TUN UDP domain.\n",
+            "# TYPE ferrum2_tun_udp_buffered_bytes gauge\n",
+            "ferrum2_tun_udp_buffered_bytes{{role=\"client\"}} {}\n",
             "# EOF\n",
         ),
         snapshot.active_process_roots,
         snapshot.process_forced_roots,
         snapshot.active_tun_handler_tasks,
         snapshot.active_tun_tcp_flows,
+        snapshot.tun_udp_buffered_bytes,
     )
     .expect("writing owner metrics to a String cannot fail");
     output

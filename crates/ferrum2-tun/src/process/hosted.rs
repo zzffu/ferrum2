@@ -71,6 +71,7 @@ mod tests {
             runtime: "runtime",
             cleanup: "cleanup",
             registry: registry.clone(),
+            udp_buffer_budget: ferrum2_runtime::UdpBufferBudget::new_tun(1 << 20, registry.clone()),
             handle_tcp: std::sync::Arc::new(|_: TcpFlow, _: _, _: SessionCancellation| {
                 Box::pin(async {})
             }),

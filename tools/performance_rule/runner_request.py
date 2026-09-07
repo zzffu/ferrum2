@@ -65,7 +65,7 @@ def parse_runner_request(arguments: list[str]) -> RunnerRequest:
         match_sizes.append(100_000)
     return RunnerRequest(profile, {
         "match_sizes": match_sizes,
-        "route_sizes": [1, 32, 64] if profile == "smoke" else [1, 32, 64, 1_000, 10_000],
+        "route_sizes": [1, 32, 63, 64, 65] if profile == "smoke" else [1, 32, 63, 64, 65, 1_000, 10_000],
         "dns_rule_sizes": [1] if profile == "smoke" else [1, 64, 65, 100, 1_000, 10_000],
         "samples": integer("--samples", 101, 5, 1_001),
         "base_iterations_per_sample": integer("--iterations-per-sample", 8_192, 1, 10_000_000),

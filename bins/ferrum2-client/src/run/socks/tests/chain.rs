@@ -308,5 +308,7 @@ async fn udp_chain_invalid_inner_state_and_shutdown_are_atomic() {
         true,
     )
     .await;
-    eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers().await;
+    for hops in [1, 2, 4, 8] {
+        udp_chain_rejects_before_admission_and_uses_fixed_buffers(hops).await;
+    }
 }

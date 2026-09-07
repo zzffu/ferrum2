@@ -140,7 +140,7 @@ pub(crate) enum InjectOutcome {
 pub struct UdpDatagram {
     source: SocketAddr,
     target: SocketAddr,
-    payload: Arc<[u8]>,
+    payload: Arc<BudgetedPayload>,
 }
 
 impl UdpDatagram {
@@ -156,6 +156,29 @@ impl UdpDatagram {
 
     pub fn payload(&self) -> &[u8] {
         &self.payload
+    }
+}
+
+struct BudgetedPayload {
+    bytes: Box<[u8]>,
+    _reservation: ferrum2_runtime::UdpBufferReservation,
+}
+
+impl BudgetedPayload {
+    fn new(payload: &[u8], budget: &ferrum2_runtime::UdpBufferBudget) -> Result<Self, ()> {
+        let reservation = budget.reserve(payload.len()).map_err(|_| ())?;
+        Ok(Self {
+            bytes: payload.into(),
+            _reservation: reservation,
+        })
+    }
+}
+
+impl std::ops::Deref for BudgetedPayload {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -507,7 +530,7 @@ struct OwnerResponse {
     lease: Arc<AssociationLease>,
     association_source: SocketAddr,
     response_source: SocketAddr,
-    payload: Vec<u8>,
+    payload: BudgetedPayload,
 }
 
 struct ResponseWake {
@@ -560,6 +583,7 @@ pub struct UdpResponseSink {
     lease: Arc<AssociationLease>,
     responses: mpsc::Sender<OwnerResponse>,
     response_wake: Arc<ResponseWake>,
+    budget: ferrum2_runtime::UdpBufferBudget,
 }
 
 impl UdpResponseSink {
@@ -614,11 +638,20 @@ impl UdpResponseSink {
             }
             Ok(true) => {}
         }
+        let Ok(payload) = BudgetedPayload::new(payload, &self.budget) else {
+            self.lease.events.emit(TunEvent::UdpResponseQueueFull);
+            emit_response_drop(
+                &self.lease.events,
+                UdpResponseDropReason::QueueFull,
+                TunRejectReason::UdpQueueFull,
+            );
+            return UdpResponseSendOutcome::QueueFull;
+        };
         let response = OwnerResponse {
             lease: Arc::clone(&self.lease),
             association_source: self.source,
             response_source: source,
-            payload: payload.to_vec(),
+            payload,
         };
         match self.responses.try_send(response) {
             Ok(()) => {
@@ -650,12 +683,13 @@ impl UdpResponseSink {
 pub struct UdpCandidate {
     source: SocketAddr,
     first_target: SocketAddr,
-    first_payload: Arc<[u8]>,
+    first_payload: Arc<BudgetedPayload>,
     packet_payload_bound: usize,
     receiver: Option<mpsc::Receiver<UdpDatagram>>,
     lease: Arc<AssociationLease>,
     responses: mpsc::Sender<OwnerResponse>,
     response_wake: Arc<ResponseWake>,
+    budget: ferrum2_runtime::UdpBufferBudget,
     handed_off: bool,
 }
 
@@ -705,6 +739,7 @@ impl UdpCandidate {
                 lease: Arc::clone(&self.lease),
                 responses: self.responses.clone(),
                 response_wake: Arc::clone(&self.response_wake),
+                budget: self.budget.clone(),
             },
             peer_policy: UdpPeerPolicyHandle {
                 inner: Arc::clone(&self.lease),

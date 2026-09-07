@@ -26,6 +26,10 @@ async fn direct_tun_udp_defers_adf_port_filtering_and_has_no_outstanding_send_ga
         ferrum2_crypto::SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager,
             live_ids: Arc::new(Mutex::new(HashSet::new())),
         }),
@@ -162,6 +166,10 @@ async fn one_proxy_tun_udp_association_serves_multiple_targets_without_global_bu
         ferrum2_crypto::SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager,
             live_ids: Arc::new(Mutex::new(HashSet::new())),
         }),
@@ -305,6 +313,10 @@ async fn ordinary_udp_fixed_request_and_response_buffers_remain_globally_metered
         ferrum2_crypto::SystemRandom,
         (Duration::from_secs(1), Duration::from_secs(1)),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager,
             live_ids: Arc::new(Mutex::new(HashSet::new())),
         }),
@@ -415,6 +427,10 @@ async fn direct_udp_socks_uses_raw_datagrams_and_no_sip022_state() {
             std::time::Duration::from_secs(1),
         ),
         Some(ClientUdpContext {
+            tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+                64 * 1024 * 1024,
+                ferrum2_runtime::OwnerRegistry::new(),
+            ),
             manager,
             live_ids: Arc::clone(&live_ids),
         }),

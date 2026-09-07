@@ -35,8 +35,8 @@ Within `run/tun`, keep process-root composition, managed network lifecycle/reset
 mapping, TUN TCP policy, and UDP route/DNS/association policy in their named owners. Do not copy or
 shadow `ferrum2-tun` packet parsing, peer table, or data-plane state. Synthetic DNS is evaluated for
 each destination before ordinary association freezing; the first ordinary datagram freezes terminal,
-outbound, interface policy, route generation, and network generation. Unmetered TUN UDP buffers may
-bypass only the shared byte budget, never session, queue, payload, generation, or cleanup bounds.
+outbound, interface policy, route generation, and network generation. TUN UDP buffers charge their
+independent byte domain, never the shared ordinary UDP domain; all other admission bounds remain.
 
 ## Testing and Local Commands
 
@@ -64,8 +64,8 @@ generation for every later target on that local source. Synthetic DNS matching r
 datagram or TCP destination, supports either configured address family, and runs before an ordinary
 UDP association is frozen.
 
-Managed-TUN UDP associations use `reserve_unmetered_datagram` for request and response buffers,
-regardless of Direct or Shadowsocks egress. “Unmetered” means only that these buffers do not charge
-or fail against the shared runtime UDP byte budget; association/session capacity, packet-queue
-depth, payload length, timeout, and generation checks remain mandatory. SOCKS, DNS, and RuleSet UDP
-must continue using metered reservations and must retain their existing `BufferLimit` behavior.
+Managed-TUN UDP associations use `reserve_datagram_in_budget` with their shared independent TUN
+budget for request and response buffers, regardless of Direct or Shadowsocks egress. Reserve
+before allocation and retain byte leases through queued/materialized payload lifetime and reset.
+Association/session capacity, packet-queue depth, payload length, timeout, and generation checks
+remain mandatory. SOCKS, DNS, and RuleSet UDP retain ordinary metered `BufferLimit` behavior.

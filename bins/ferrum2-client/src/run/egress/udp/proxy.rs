@@ -191,27 +191,22 @@ impl ProxyAssociation {
                 UdpPacketError::StateUnavailable,
             ));
         };
-        let manager = &lease.manager;
-        let handle = lease.handle().map_err(UdpPlanResponseError::Runtime)?;
-        let accounting = lease.accounting;
         let outer = plan.legs[0]
             .protocol
             .prepare_response_borrowed(&egress.clock, &upstream_wire[..wire_len], scratch)
             .map_err(UdpPlanResponseError::Packet)?;
-        let mut commits = Vec::with_capacity(hops.len());
         if hops.len() == 1 {
             return commit_final_udp_response(
                 outer,
                 plan,
                 hops,
                 outbounds,
-                commits,
-                manager,
-                handle,
-                accounting,
+                None,
+                lease,
                 &egress.clock,
             );
         }
+        let mut commits = Vec::with_capacity(hops.len());
         let expected = TargetAddr::ip(
             outbounds
                 .get(hops[1])
@@ -251,10 +246,8 @@ impl ProxyAssociation {
                     plan,
                     hops,
                     outbounds,
-                    commits,
-                    manager,
-                    handle,
-                    accounting,
+                    Some(commits),
+                    lease,
                     &egress.clock,
                 );
             }

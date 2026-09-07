@@ -13,6 +13,15 @@ use ferrum2_shadowsocks::{
 
 use common::{FakeClock, FillRandom, udp_provider};
 
+struct FixedSessionRandom(u8);
+
+impl SecureRandom for FixedSessionRandom {
+    fn fill(&self, destination: &mut [u8]) -> Result<(), RandomError> {
+        destination.fill(self.0);
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct BlockingRandomState {
     entered: bool,
@@ -96,7 +105,7 @@ fn request_wire(
 fn accept(
     server: &UdpServer,
     clock: &FakeClock,
-    random: &FillRandom,
+    random: &(impl SecureRandom + ?Sized),
     wire: &[u8],
     peer: SocketAddr,
     now_millis: u64,
@@ -514,6 +523,140 @@ fn capability_index_survives_middle_removal_and_generation_replacement() {
             &mut scratch,
         ),
         Err(UdpPacketError::Generation)
+    );
+}
+
+#[test]
+fn outbound_id_collisions_fail_atomically_and_expired_ids_can_be_reused() {
+    let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let server = UdpServer::new(&keys).expect("server");
+    let peer = "127.0.0.1:49152".parse().expect("peer");
+    let first_random = FillRandom::new(0x10);
+    let second_random = FillRandom::new(0x40);
+    let mut first = UdpClientSession::new(&keys, &first_random, |_| false).expect("first");
+    let mut second = UdpClientSession::new(&keys, &second_random, |_| false).expect("second");
+    let first_wire = request_wire(&mut first, &clock, &first_random, b"first");
+    let second_wire = request_wire(&mut second, &clock, &second_random, b"second");
+    let old = accept(
+        &server,
+        &clock,
+        &FixedSessionRandom(0x80),
+        &first_wire,
+        peer,
+        0,
+    );
+    let mut scratch = UdpPacketScratch::new();
+
+    // Reject the live inbound namespace, live outbound namespace, and this
+    // request's own identity without consuming its replay acceptance.
+    for collision in [0x10, 0x80, 0x40] {
+        let pending = server
+            .prepare_request(&clock, &second_wire, &mut scratch)
+            .unwrap();
+        let (_, commit) = pending.into_parts();
+        assert_eq!(
+            server
+                .commit_request(commit, peer, instant(1), &FixedSessionRandom(collision))
+                .unwrap_err(),
+            UdpPacketError::Random
+        );
+        assert_eq!(server.session_count(), Ok(1));
+        assert_eq!(
+            server
+                .session_snapshot(old)
+                .unwrap()
+                .unwrap()
+                .highest_packet_id(),
+            Some(0)
+        );
+    }
+
+    assert_eq!(server.remove_session(old, instant(59_999)), Ok(false));
+    assert_eq!(server.remove_session(old, instant(60_000)), Ok(true));
+    let replacement = accept(
+        &server,
+        &clock,
+        &FixedSessionRandom(0x80),
+        &second_wire,
+        peer,
+        60_000,
+    );
+    assert_ne!(replacement, old);
+    assert_eq!(server.session_snapshot(old), Ok(None));
+    let response = response_wire(
+        &server,
+        replacement,
+        &clock,
+        &FillRandom::new(0xa0),
+        b"reused outbound identity",
+    );
+    assert_eq!(
+        accept_response(&second, &clock, &response, &mut scratch, 60_000)
+            .unwrap()
+            .into_parts(),
+        datagram(b"reused outbound identity").into_parts()
+    );
+    let pending = server
+        .prepare_request(&clock, &second_wire, &mut scratch)
+        .unwrap();
+    let (_, commit) = pending.into_parts();
+    assert_eq!(
+        server
+            .commit_request(commit, peer, instant(60_001), &FixedSessionRandom(0x90))
+            .unwrap_err(),
+        UdpPacketError::Duplicate
+    );
+}
+
+#[test]
+fn replacing_protocol_owner_releases_ids_but_rejects_old_capabilities() {
+    let keys = udp_provider(MethodProfile::Blake3Aes128Gcm2022);
+    let clock = FakeClock::new(1_700_000_000, 0);
+    let peer = "127.0.0.1:49152".parse().expect("peer");
+    let random = FillRandom::new(0x10);
+    let mut client = UdpClientSession::new(&keys, &random, |_| false).expect("client");
+    let request = request_wire(&mut client, &clock, &random, b"request");
+    let server = UdpServer::new(&keys).expect("server");
+    let old = accept(
+        &server,
+        &clock,
+        &FixedSessionRandom(0x80),
+        &request,
+        peer,
+        0,
+    );
+    drop(server);
+    let server = UdpServer::new(&keys).expect("replacement server");
+    let replacement = accept(
+        &server,
+        &clock,
+        &FixedSessionRandom(0x80),
+        &request,
+        peer,
+        0,
+    );
+    assert_ne!(old, replacement);
+    let mut scratch = UdpPacketScratch::new();
+    let mut output = vec![0; 65_507];
+    assert_eq!(
+        server.encode_response(
+            old,
+            &clock,
+            &random,
+            &datagram(b"stale"),
+            0,
+            &mut output,
+            &mut scratch,
+        ),
+        Err(UdpPacketError::Generation)
+    );
+    let response = response_wire(&server, replacement, &clock, &random, b"new owner");
+    assert_eq!(
+        accept_response(&client, &clock, &response, &mut scratch, 0)
+            .unwrap()
+            .into_parts(),
+        datagram(b"new owner").into_parts()
     );
 }
 

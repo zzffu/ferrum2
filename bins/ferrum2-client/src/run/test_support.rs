@@ -729,6 +729,10 @@ pub(in crate::run) fn udp_test_context_for_psk(
     let runtime = config.runtime;
     let outbounds = prepare_client_outbounds(config.outbounds).expect("test outbounds");
     let udp = ClientUdpContext {
+        tun_budget: ferrum2_runtime::UdpBufferBudget::new_tun(
+            64 * 1024 * 1024,
+            ferrum2_runtime::OwnerRegistry::new(),
+        ),
         manager: UdpSessionManager::new(
             UdpRuntimeLimits::new(udp.max_sessions, udp.max_buffered_bytes, udp.idle_timeout)
                 .expect("UDP limits"),

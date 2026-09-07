@@ -13,7 +13,7 @@ use super::admission::SocksUdpEndpoint;
 use super::association::run_udp_association;
 use super::relay::relay_udp_association;
 use crate::run::egress::{
-    ClientUdpAssociation, IdSequenceRandom, MAX_UDP_PLAN_HOPS, UdpIoFaultPlan, UdpIoOperation,
+    ClientUdpAssociation, IdSequenceRandom, UdpIoFaultPlan, UdpIoOperation,
     composed_udp_plan_limit, composed_udp_request_limit, composed_udp_response_limit,
 };
 use crate::run::routing::ClientTerminalRoute;
@@ -267,11 +267,11 @@ async fn wait_for_metric(metrics: &Metrics, needle: &str) {
     }
 }
 
-async fn eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers() {
+async fn udp_chain_rejects_before_admission_and_uses_fixed_buffers(hop_count: usize) {
     let registry = OwnerRegistry::new();
     let baseline = registry.snapshot();
     let mut upstreams = Vec::new();
-    for _ in 0..MAX_UDP_PLAN_HOPS {
+    for _ in 0..hop_count {
         upstreams.push(
             UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
                 .await
@@ -287,7 +287,7 @@ async fn eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers() {
             },
         )
         .collect::<Vec<_>>();
-    let methods = (0..MAX_UDP_PLAN_HOPS)
+    let methods = (0..hop_count)
         .map(|hop| MethodProfile::ALL[hop % MethodProfile::ALL.len()])
         .collect::<Vec<_>>();
     let outbounds = prepare_client_outbounds(
@@ -315,7 +315,7 @@ async fn eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers() {
             server,
         ));
     }
-    let hop_tags = (0..MAX_UDP_PLAN_HOPS)
+    let hop_tags = (0..hop_count)
         .map(|hop| format!("\"o{hop}\""))
         .collect::<Vec<_>>()
         .join(", ");
@@ -349,7 +349,7 @@ async fn eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers() {
     else {
         panic!("eight-hop route terminal")
     };
-    let hops = (0..MAX_UDP_PLAN_HOPS).collect::<Vec<_>>();
+    let hops = (0..hop_count).collect::<Vec<_>>();
     let (path, mut context) = udp_test_context_for_psk(
         registry.clone(),
         servers[0],
@@ -458,14 +458,14 @@ async fn eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers() {
     let clock = SystemClock::new();
     let random = SystemRandom;
     let mut nested = wire[..wire_len].to_vec();
-    for layer in 0..MAX_UDP_PLAN_HOPS {
+    for layer in 0..hop_count {
         let server = UdpServer::new(&routing.outbounds[layer].shadowsocks().unwrap().keys)
             .expect("hop server");
         let mut scratch = UdpPacketScratch::new();
         let pending = server
             .prepare_request(&clock, &nested, &mut scratch)
             .expect("hop credential");
-        let expected = if layer + 1 == MAX_UDP_PLAN_HOPS {
+        let expected = if layer + 1 == hop_count {
             target.clone()
         } else {
             TargetAddr::ipv4(servers[layer + 1]).expect("next hop")
@@ -507,9 +507,13 @@ async fn eight_hop_udp_chain_rejects_before_admission_and_uses_fixed_buffers() {
             .lock()
             .expect("live IDs")
             .len(),
-        MAX_UDP_PLAN_HOPS
+        hop_count
     );
     assert_eq!(registry.snapshot().udp_queued_datagrams, 0);
+    assert_eq!(
+        registry.snapshot().udp_buffered_bytes,
+        if hop_count == 1 { 2 } else { 3 } * MAX_UDP_WIRE_LEN,
+    );
 
     drop(peer);
     finish_udp_relay(running).await;

@@ -274,7 +274,7 @@ async fn composed_udp_boundaries_are_real_and_sequential_for_every_method_and_ta
             );
             assert_eq!(
                 client_state.udp_buffered_bytes,
-                3 * MAX_UDP_WIRE_LEN,
+                2 * MAX_UDP_WIRE_LEN,
                 "allocation: {label}"
             );
 

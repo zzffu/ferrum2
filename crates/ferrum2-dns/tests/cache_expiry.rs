@@ -109,3 +109,35 @@ fn repeated_refreshes_keep_fifo_capacity_and_lookup_does_not_refresh_order() {
     );
     assert_eq!(cache.entry_count(now), Ok(2));
 }
+
+#[test]
+fn batch_expiry_preserves_live_fifo_and_entry_count_drains_every_due_key() {
+    let cache = DnsCache::try_new(NonZeroUsize::new(129).unwrap()).unwrap();
+    let now = Instant::now();
+    cache
+        .insert_negative(key(0), Duration::from_secs(60), now)
+        .unwrap();
+    for index in 1..129 {
+        cache
+            .insert_negative(key(index), Duration::from_secs(1), now)
+            .unwrap();
+    }
+    let later = now + Duration::from_secs(1);
+    cache
+        .insert_negative(key(129), Duration::from_secs(60), later)
+        .unwrap();
+    // The oldest live key survives even when the full cache expires behind it.
+    assert_eq!(
+        cache.get(&key(0), later),
+        Ok(Some(DnsCacheAnswer::Negative))
+    );
+    assert_eq!(cache.entry_count(later), Ok(2));
+    for index in 1..129 {
+        assert_eq!(cache.get(&key(index), later), Ok(None));
+    }
+    assert_eq!(
+        cache.get(&key(129), later),
+        Ok(Some(DnsCacheAnswer::Negative))
+    );
+    assert_eq!(cache.entry_count(later + Duration::from_secs(60)), Ok(0));
+}

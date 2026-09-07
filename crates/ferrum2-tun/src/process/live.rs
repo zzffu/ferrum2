@@ -34,6 +34,7 @@ where
         runtime,
         cleanup,
         registry,
+        udp_buffer_budget,
         handle_tcp,
         handle_udp,
         handle_network_lifecycle,
@@ -63,6 +64,7 @@ where
                 deadline,
                 OwnerSessionServices {
                     registry: owner_registry,
+                    udp_buffer_budget,
                     runtime: runtime_handle,
                     network_catalog,
                     events,

@@ -6,7 +6,7 @@ Treat resource ownership as part of every API contract. Preserve permit-before-a
 
 UDP changes must retain the reserve-then-commit protocol seam: provisional sessions, queue slots, sockets, and allocated byte capacity roll back on drop; generation-bound handles reject stale work; protocol commit, activity refresh, and enqueue remain serialized. Do not expose or format injected resolver, socket, handler, or I/O error values through closed runtime errors.
 
-`reserve_unmetered_datagram` bypasses only the shared UDP byte counter and `BufferLimit`; it must still enforce packet-queue depth, payload length, session capacity, handle validity, and generation checks. Restrict it to callers such as managed TUN that maintain independent structural packet/queue bounds. Ordinary SOCKS, DNS, and RuleSet UDP remains metered, and dropping either reservation kind must preserve exact queue/session ownership and leave `reserved_bytes` unchanged or restored as appropriate.
+`reserve_datagram_in_budget` charges an independent bounded UDP byte domain while retaining the manager's packet-queue depth, payload length, session capacity, handle validity, and generation checks. Managed TUN shares one independent budget across fixed egress buffers and queued/materialized datagrams; ordinary SOCKS, DNS, and RuleSet UDP remains charged to the ordinary manager budget. No unmetered reservation API is permitted. Dropping reservations must release their exact domain charge and queue/session ownership, while retained payload owners keep their charge until the last allocation owner drops.
 
 Use these focused gates:
 

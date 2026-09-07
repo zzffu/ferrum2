@@ -1,6 +1,6 @@
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ferrum2_core::Datagram;
 use tokio::sync::Notify;
@@ -9,15 +9,30 @@ use crate::OwnerRegistry;
 
 use super::{MAX_UDP_WIRE_DATAGRAM_BYTES, UdpRuntimeError};
 
+mod receive_pool;
+
+use receive_pool::{ReceiveBuffer, ReceiveCache};
+
+#[derive(Clone, Copy, Debug)]
+enum BufferDomain {
+    Ordinary,
+    Tun,
+}
+
 #[derive(Debug)]
 pub(super) struct BufferBudgetInner {
     limit: usize,
     reserved: AtomicUsize,
     released: Notify,
     registry: OwnerRegistry,
+    domain: BufferDomain,
+    receive_cache: Mutex<ReceiveCache>,
 }
 
 /// Cloneable global allocated-capacity budget.
+///
+/// Direct receive buffers share one reclaimable idle allocation per budget.
+/// Its full physical capacity remains charged until reuse or eviction.
 #[derive(Clone, Debug)]
 pub struct UdpBufferBudget {
     inner: Arc<BufferBudgetInner>,
@@ -25,12 +40,23 @@ pub struct UdpBufferBudget {
 
 impl UdpBufferBudget {
     pub(super) fn new(limit: usize, registry: OwnerRegistry) -> Self {
+        Self::with_domain(limit, registry, BufferDomain::Ordinary)
+    }
+
+    /// Creates an independently bounded managed-TUN allocated-capacity domain.
+    pub fn new_tun(limit: usize, registry: OwnerRegistry) -> Self {
+        Self::with_domain(limit, registry, BufferDomain::Tun)
+    }
+
+    fn with_domain(limit: usize, registry: OwnerRegistry, domain: BufferDomain) -> Self {
         Self {
             inner: Arc::new(BufferBudgetInner {
                 limit,
                 reserved: AtomicUsize::new(0),
                 released: Notify::new(),
                 registry,
+                domain,
+                receive_cache: Mutex::new(ReceiveCache::default()),
             }),
         }
     }
@@ -44,26 +70,29 @@ impl UdpBufferBudget {
     }
 
     /// Reserves exact allocated capacity before accepted protocol state advances.
+    /// Reclaims idle receive storage before reporting exhausted capacity.
     pub fn reserve(&self, capacity: usize) -> Result<UdpBufferReservation, UdpRuntimeError> {
         if capacity > MAX_UDP_WIRE_DATAGRAM_BYTES {
             return Err(UdpRuntimeError::Bounds);
         }
         let mut current = self.inner.reserved.load(Ordering::Relaxed);
         loop {
-            let Some(next) = current.checked_add(capacity) else {
-                return Err(UdpRuntimeError::BufferLimit);
-            };
-            if next > self.inner.limit {
+            let next = current.checked_add(capacity);
+            if next.is_none_or(|next| next > self.inner.limit) {
+                if self.inner.evict_receive_buffer() {
+                    current = self.inner.reserved.load(Ordering::Relaxed);
+                    continue;
+                }
                 return Err(UdpRuntimeError::BufferLimit);
             }
             match self.inner.reserved.compare_exchange_weak(
                 current,
-                next,
+                next.expect("bounded UDP reservation"),
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    self.inner.registry.add_udp_buffered_bytes(capacity);
+                    self.inner.add_bytes(capacity);
                     return Ok(UdpBufferReservation {
                         charge: UdpBufferCharge::Metered(Arc::clone(&self.inner)),
                         capacity,
@@ -73,35 +102,13 @@ impl UdpBufferBudget {
             }
         }
     }
-
-    pub(super) async fn reserve_when_available(
-        &self,
-        capacity: usize,
-    ) -> Result<UdpBufferReservation, UdpRuntimeError> {
-        loop {
-            let notified = self.inner.released.notified();
-            tokio::pin!(notified);
-            match self.reserve(capacity) {
-                Ok(reservation) => return Ok(reservation),
-                Err(UdpRuntimeError::BufferLimit) => {
-                    notified.as_mut().enable();
-                    match self.reserve(capacity) {
-                        Ok(reservation) => return Ok(reservation),
-                        Err(UdpRuntimeError::BufferLimit) => notified.as_mut().await,
-                        Err(error) => return Err(error),
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
 }
 
 /// Ownership token for one exact allocated buffer capacity.
 ///
-/// Ordinary tokens carry the global UDP byte-budget charge. Runtime session
-/// APIs may also create an unmetered token for a structurally bounded caller;
-/// both kinds retain the same exact-capacity validation at commit time.
+/// Tokens carry either the ordinary or an independent UDP byte-domain charge,
+/// or retain an already charged receive-buffer payload owner. All allocations
+/// remain charged and exact-capacity validation applies at commit time.
 pub struct UdpBufferReservation {
     charge: UdpBufferCharge,
     capacity: usize,
@@ -109,20 +116,11 @@ pub struct UdpBufferReservation {
 
 enum UdpBufferCharge {
     Metered(Arc<BufferBudgetInner>),
-    Unmetered,
+    PayloadOwned(Arc<ReceiveBuffer>),
+    Released,
 }
 
 impl UdpBufferReservation {
-    pub(super) fn unmetered(capacity: usize) -> Result<Self, UdpRuntimeError> {
-        if capacity > MAX_UDP_WIRE_DATAGRAM_BYTES {
-            return Err(UdpRuntimeError::Bounds);
-        }
-        Ok(Self {
-            charge: UdpBufferCharge::Unmetered,
-            capacity,
-        })
-    }
-
     /// Returns the exact allocated capacity owned by this token.
     pub const fn capacity(&self) -> usize {
         self.capacity
@@ -152,17 +150,35 @@ impl fmt::Debug for UdpBufferReservation {
 
 impl Drop for UdpBufferReservation {
     fn drop(&mut self) {
-        let UdpBufferCharge::Metered(inner) = &self.charge else {
-            return;
-        };
-        let previous = inner.reserved.fetch_sub(self.capacity, Ordering::Relaxed);
-        debug_assert!(
-            previous >= self.capacity,
-            "UDP buffer reservation underflow"
-        );
-        inner.registry.remove_udp_buffered_bytes(self.capacity);
-        if self.capacity != 0 {
-            inner.released.notify_waiters();
+        match &self.charge {
+            UdpBufferCharge::Metered(inner) => inner.release_bytes(self.capacity),
+            UdpBufferCharge::PayloadOwned(owner) => {
+                // The shared owner keeps both allocation and charge live, even
+                // when only a retained Bytes slice or this token survives.
+                let _ = owner;
+            }
+            UdpBufferCharge::Released => {}
+        }
+    }
+}
+
+impl BufferBudgetInner {
+    fn add_bytes(&self, capacity: usize) {
+        match self.domain {
+            BufferDomain::Ordinary => self.registry.add_udp_buffered_bytes(capacity),
+            BufferDomain::Tun => self.registry.add_tun_udp_buffered_bytes(capacity),
+        }
+    }
+
+    fn release_bytes(&self, capacity: usize) {
+        let previous = self.reserved.fetch_sub(capacity, Ordering::Relaxed);
+        debug_assert!(previous >= capacity, "UDP buffer reservation underflow");
+        match self.domain {
+            BufferDomain::Ordinary => self.registry.remove_udp_buffered_bytes(capacity),
+            BufferDomain::Tun => self.registry.remove_tun_udp_buffered_bytes(capacity),
+        }
+        if capacity != 0 {
+            self.released.notify_waiters();
         }
     }
 }
@@ -187,6 +203,8 @@ impl AccountedDatagram {
     /// Separates the datagram from its exact capacity owner for a caller that
     /// recycles the backing allocation into another already-owned buffer.
     /// The reservation must remain alive until that transfer is complete.
+    /// Direct receive payloads additionally retain the charge through every
+    /// cloned or sliced `Bytes`, so dropping the token cannot release live storage.
     pub fn into_parts(self) -> (Datagram, UdpBufferReservation) {
         (self.datagram, self.reservation)
     }
@@ -243,13 +261,14 @@ mod tests {
     }
 
     #[test]
-    fn unmetered_datagrams_bypass_only_the_global_byte_budget() {
+    fn independent_datagrams_preserve_shared_queue_and_generation_bounds() {
         let limit = MIN_UDP_MAX_BUFFERED_BYTES;
         let manager = UdpSessionManager::new(
             UdpRuntimeLimits::new(2, limit, MIN_UDP_IDLE_TIMEOUT).expect("test limits"),
             OwnerRegistry::new(),
         );
         let budget = manager.buffer_budget();
+        let tun = UdpBufferBudget::new_tun(limit, OwnerRegistry::new());
         let held = exhaust_budget(&budget, limit);
         assert_eq!(budget.reserved_bytes(), limit);
 
@@ -264,19 +283,20 @@ mod tests {
         );
         assert_eq!(
             session
-                .reserve_unmetered_datagram(
+                .reserve_datagram_in_budget(
                     UdpDirection::ToTarget,
                     MAX_UDP_WIRE_DATAGRAM_BYTES + 1,
+                    &tun,
                 )
-                .expect_err("unmetered datagrams retain the packet bound"),
+                .expect_err("independent datagrams retain the packet bound"),
             UdpRuntimeError::Bounds
         );
         let first = session
-            .reserve_unmetered_datagram(UdpDirection::ToTarget, 8)
-            .expect("unmetered first datagram");
+            .reserve_datagram_in_budget(UdpDirection::ToTarget, 8, &tun)
+            .expect("independent first datagram");
         let (handle, first) = session
             .commit_immediate(first, test_datagram(8), Instant::now())
-            .expect("activate unmetered session");
+            .expect("activate independent session");
         assert_eq!(budget.reserved_bytes(), limit);
         drop(first);
         assert_eq!(budget.reserved_bytes(), limit);
@@ -284,14 +304,14 @@ mod tests {
         let pending = (0..UDP_SESSION_QUEUE_DEPTH)
             .map(|_| {
                 manager
-                    .reserve_unmetered_datagram(handle, UdpDirection::ToClient, 8)
+                    .reserve_datagram_in_budget(handle, UdpDirection::ToClient, 8, &tun)
                     .expect("bounded pending slot")
             })
             .collect::<Vec<_>>();
         assert_eq!(
             manager
-                .reserve_unmetered_datagram(handle, UdpDirection::ToClient, 8)
-                .expect_err("unmetered datagrams retain queue depth"),
+                .reserve_datagram_in_budget(handle, UdpDirection::ToClient, 8, &tun)
+                .expect_err("independent datagrams retain queue depth"),
             UdpRuntimeError::QueueFull
         );
         assert_eq!(budget.reserved_bytes(), limit);
@@ -300,12 +320,13 @@ mod tests {
         assert!(manager.remove(handle));
         assert_eq!(
             manager
-                .reserve_unmetered_datagram(handle, UdpDirection::ToClient, 8)
-                .expect_err("unmetered datagrams retain generation checks"),
+                .reserve_datagram_in_budget(handle, UdpDirection::ToClient, 8, &tun)
+                .expect_err("independent datagrams retain generation checks"),
             UdpRuntimeError::Cancelled
         );
         drop(held);
         assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(tun.reserved_bytes(), 0);
     }
 
     #[test]
@@ -318,6 +339,7 @@ mod tests {
             registry.clone(),
         );
         let budget = manager.buffer_budget();
+        let tun = UdpBufferBudget::new_tun(7, registry.clone());
         let started = Instant::now();
         let first_activity = started + Duration::from_secs(1);
         let session = manager
@@ -346,7 +368,7 @@ mod tests {
         assert_eq!(budget.reserved_bytes(), UDP_SESSION_QUEUE_DEPTH);
         assert_eq!(
             manager
-                .reserve_unmetered_datagram(handle, UdpDirection::ToTarget, 7)
+                .reserve_datagram_in_budget(handle, UdpDirection::ToTarget, 7, &tun)
                 .expect_err("activity admission retains queue depth"),
             UdpRuntimeError::QueueFull
         );
@@ -358,15 +380,17 @@ mod tests {
             .commit_activity(second_activity)
             .expect("commit metered activity");
         assert_eq!(budget.reserved_bytes(), UDP_SESSION_QUEUE_DEPTH - 1);
-        let unmetered = manager
-            .reserve_unmetered_datagram(handle, UdpDirection::ToTarget, 7)
+        let independent = manager
+            .reserve_datagram_in_budget(handle, UdpDirection::ToTarget, 7, &tun)
             .expect("released queue slot");
         assert_eq!(budget.reserved_bytes(), UDP_SESSION_QUEUE_DEPTH - 1);
+        assert_eq!(tun.reserved_bytes(), 7);
         let final_activity = second_activity + Duration::from_secs(1);
-        unmetered
+        independent
             .commit_activity(final_activity)
-            .expect("commit unmetered activity");
+            .expect("commit independent activity");
         assert_eq!(budget.reserved_bytes(), UDP_SESSION_QUEUE_DEPTH - 1);
+        assert_eq!(tun.reserved_bytes(), 0);
         drop(pending);
         assert_eq!(budget.reserved_bytes(), 0);
         assert!(
@@ -440,9 +464,7 @@ mod tests {
         let cancelled_started = Arc::clone(&started);
         let cancelled = tokio::spawn(async move {
             cancelled_started.notify_one();
-            cancelled_budget
-                .reserve_when_available(MAX_UDP_WIRE_DATAGRAM_BYTES)
-                .await
+            cancelled_budget.receive_buffer().await
         });
         started.notified().await;
         tokio::task::yield_now().await;
@@ -460,9 +482,7 @@ mod tests {
         let waiting_started = Arc::clone(&started);
         let waiting = tokio::spawn(async move {
             waiting_started.notify_one();
-            waiting_budget
-                .reserve_when_available(MAX_UDP_WIRE_DATAGRAM_BYTES)
-                .await
+            waiting_budget.receive_buffer().await
         });
         started.notified().await;
         tokio::task::yield_now().await;
@@ -476,6 +496,7 @@ mod tests {
             .expect("capacity reservation");
         drop(acquired);
         drop(held);
+        budget.clear_receive_cache();
         assert_eq!(budget.reserved_bytes(), 0);
         assert_eq!(registry.snapshot().udp_buffered_bytes, 0);
     }

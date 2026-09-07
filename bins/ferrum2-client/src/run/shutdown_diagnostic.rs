@@ -142,6 +142,7 @@ macro_rules! owner_counters {
             udp_tasks,
             udp_queued_datagrams,
             udp_buffered_bytes,
+            tun_udp_buffered_bytes,
             udp_scratch_buffers,
             udp_forced_shutdowns,
             sniff_buffered_bytes,

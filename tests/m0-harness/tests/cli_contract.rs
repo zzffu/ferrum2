@@ -27,7 +27,7 @@ const REPORT_FIELDS: [&str; 17] = [
     "shutdown_grace_ns",
     "termination_cause",
 ];
-const OWNER_COUNTER_FIELDS: [&str; 27] = [
+const OWNER_COUNTER_FIELDS: [&str; 28] = [
     "active_supervisor_children",
     "active_tun_handler_tasks",
     "active_tun_tcp_flows",
@@ -48,6 +48,7 @@ const OWNER_COUNTER_FIELDS: [&str; 27] = [
     "process_root_rollbacks",
     "process_supervisors",
     "sniff_buffered_bytes",
+    "tun_udp_buffered_bytes",
     "udp_buffered_bytes",
     "udp_forced_shutdowns",
     "udp_queued_datagrams",

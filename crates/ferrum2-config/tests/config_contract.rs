@@ -1,5 +1,4 @@
 mod config_contract {
-    mod compatibility;
     mod dns;
     mod graph;
     mod m16;

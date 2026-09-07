@@ -12,6 +12,8 @@ ring_capacity = 8388608
 ready_timeout_ms = 10000
 max_tcp_flows = 256
 max_udp_mappings = 1024
+# Independent exact UDP buffer/payload domain; does not charge ordinary UDP.
+udp_buffered_bytes_limit = 67108864
 udp_filtering = "endpoint_independent"
 auto_route = true
 # Strict route defaults to false. With auto_route, strict_route, and auto_dns
@@ -75,8 +77,8 @@ final = "resolver"
 enabled = true
 max_sessions = 4096
 # This shared byte budget still meters ordinary SOCKS/DNS/RuleSet UDP. Managed
-# TUN Direct/Shadowsocks EIM associations do not charge it; their single frozen
-# route, packet queue, payload, timeout, and generation bounds remain.
+# TUN Direct/Shadowsocks EIM associations charge tun.udp_buffered_bytes_limit;
+# route, packet queue, payload, timeout, and generation bounds also remain.
 max_buffered_bytes = 16777216
 idle_timeout_ms = 300000
 

@@ -42,6 +42,8 @@ pub struct OwnerSnapshot {
     pub udp_queued_datagrams: usize,
     /// Allocated-capacity bytes held by UDP runtime owners.
     pub udp_buffered_bytes: usize,
+    /// Allocated-capacity bytes held in the independent TUN UDP budget.
+    pub tun_udp_buffered_bytes: usize,
     /// UDP receive scratch buffers currently owned by session tasks.
     pub udp_scratch_buffers: usize,
     /// UDP session tasks terminated after their graceful deadline.
@@ -81,6 +83,7 @@ struct OwnerCounters {
     udp_tasks: AtomicUsize,
     udp_queued_datagrams: AtomicUsize,
     udp_buffered_bytes: AtomicUsize,
+    tun_udp_buffered_bytes: AtomicUsize,
     udp_scratch_buffers: AtomicUsize,
     udp_forced_shutdowns: AtomicUsize,
     sniff_buffered_bytes: AtomicUsize,
@@ -132,6 +135,7 @@ impl OwnerRegistry {
             udp_tasks: self.counters.udp_tasks.load(Ordering::Relaxed),
             udp_queued_datagrams: self.counters.udp_queued_datagrams.load(Ordering::Relaxed),
             udp_buffered_bytes: self.counters.udp_buffered_bytes.load(Ordering::Relaxed),
+            tun_udp_buffered_bytes: self.counters.tun_udp_buffered_bytes.load(Ordering::Relaxed),
             udp_scratch_buffers: self.counters.udp_scratch_buffers.load(Ordering::Relaxed),
             udp_forced_shutdowns: self.counters.udp_forced_shutdowns.load(Ordering::Relaxed),
             sniff_buffered_bytes: self.counters.sniff_buffered_bytes.load(Ordering::Relaxed),
@@ -266,6 +270,20 @@ impl OwnerRegistry {
             .udp_buffered_bytes
             .fetch_sub(bytes, Ordering::Relaxed);
         debug_assert!(previous >= bytes, "UDP byte owner counter underflow");
+    }
+
+    pub(crate) fn add_tun_udp_buffered_bytes(&self, bytes: usize) {
+        self.counters
+            .tun_udp_buffered_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub(crate) fn remove_tun_udp_buffered_bytes(&self, bytes: usize) {
+        let previous = self
+            .counters
+            .tun_udp_buffered_bytes
+            .fetch_sub(bytes, Ordering::Relaxed);
+        debug_assert!(previous >= bytes, "TUN UDP byte owner counter underflow");
     }
 
     pub(crate) fn record_udp_forced_shutdowns(&self, count: usize) {
@@ -412,6 +430,7 @@ impl OwnerSnapshot {
             && self.udp_tasks == other.udp_tasks
             && self.udp_queued_datagrams == other.udp_queued_datagrams
             && self.udp_buffered_bytes == other.udp_buffered_bytes
+            && self.tun_udp_buffered_bytes == other.tun_udp_buffered_bytes
             && self.udp_scratch_buffers == other.udp_scratch_buffers
             && self.sniff_buffered_bytes == other.sniff_buffered_bytes
             && self.network_reset_hooks == other.network_reset_hooks

@@ -127,6 +127,10 @@ impl Stack {
         self.events = events;
     }
 
+    pub(crate) fn set_udp_buffer_budget(&mut self, budget: ferrum2_runtime::UdpBufferBudget) {
+        self.udp.set_buffer_budget(budget);
+    }
+
     pub(crate) fn enqueue_at(&mut self, packet: &[u8], admitting: bool, now_millis: i64) -> bool {
         let parsed = match self.device.validator.parse_ingress(packet) {
             Ok(ParsedPacket::Complete(parsed)) => {

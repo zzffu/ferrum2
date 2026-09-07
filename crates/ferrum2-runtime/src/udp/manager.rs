@@ -195,35 +195,25 @@ impl UdpSessionManager {
         direction: UdpDirection,
         allocated_capacity: usize,
     ) -> Result<PendingUdpDatagram, UdpRuntimeError> {
-        reserve_datagram(
-            &self.inner,
-            handle,
-            direction,
-            allocated_capacity,
-            true,
-            true,
-        )
+        reserve_datagram(&self.inner, handle, direction, allocated_capacity, true)
     }
 
-    /// Reserves one queue slot without charging the global UDP byte budget.
-    ///
-    /// This is only for callers whose datagrams remain structurally bounded by
-    /// independent packet, queue, and owner-count limits. Bounds, queue depth,
-    /// session generation, cancellation, and reserve-then-commit checks remain
-    /// identical to [`Self::reserve_datagram`].
-    pub fn reserve_unmetered_datagram(
+    /// Reserves a datagram against an independent byte domain while retaining
+    /// this manager's session, queue, generation and commit admission.
+    pub fn reserve_datagram_in_budget(
         &self,
         handle: UdpSessionHandle,
         direction: UdpDirection,
         allocated_capacity: usize,
+        budget: &UdpBufferBudget,
     ) -> Result<PendingUdpDatagram, UdpRuntimeError> {
-        reserve_datagram(
+        let reservation = budget.reserve(allocated_capacity)?;
+        super::session::reserve_datagram_with_reservation(
             &self.inner,
             handle,
             direction,
-            allocated_capacity,
             true,
-            false,
+            reservation,
         )
     }
 
@@ -235,6 +225,9 @@ impl UdpSessionManager {
         } else {
             None
         };
+        if state.entries.is_empty() {
+            self.inner.budget.clear_receive_cache();
+        }
         drop(state);
         if let Some(handle) = removed {
             publish_removal(&self.inner, handle);
@@ -253,6 +246,7 @@ impl UdpSessionManager {
             .into_iter()
             .filter_map(|slot| remove_entry(&mut state, slot))
             .collect();
+        self.inner.budget.clear_receive_cache();
         drop(state);
         for handle in removed {
             publish_removal(&self.inner, handle);
@@ -263,6 +257,7 @@ impl UdpSessionManager {
     pub fn signal_all(&self) {
         let mut state = lock_state(&self.inner);
         state.shutting_down = true;
+        self.inner.budget.clear_receive_cache();
         for entry in state.entries.values() {
             entry.cancellation.send_replace(true);
             entry.notify.notify_waiters();
@@ -458,6 +453,7 @@ pub(super) fn lock_state(manager: &UdpSessionManagerInner) -> MutexGuard<'_, Ses
                     },
                 );
             }
+            manager.budget.clear_receive_cache();
             state
         }
     }
@@ -472,6 +468,9 @@ pub(super) fn retire_exact(
         && let Some(removed) = remove_entry(state, handle.slot)
     {
         publish_removal(manager, removed);
+        if state.entries.is_empty() {
+            manager.budget.clear_receive_cache();
+        }
     }
 }
 

@@ -97,6 +97,9 @@ pub(super) fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
     if !(1..=8_192).contains(&raw.max_udp_mappings) {
         return Err(ConfigError::semantic(ConfigField::TunMaxUdpMappings));
     }
+    if !(1_048_576..=1_073_741_824).contains(&raw.udp_buffered_bytes_limit) {
+        return Err(ConfigError::semantic(ConfigField::TunUdpBufferedBytesLimit));
+    }
     let udp_filtering = match raw.udp_filtering.as_str() {
         "address_dependent" => UdpFiltering::AddressDependent,
         "endpoint_independent" => UdpFiltering::EndpointIndependent,
@@ -122,6 +125,7 @@ pub(super) fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
             ready_timeout: Duration::from_millis(raw.ready_timeout_ms),
             max_tcp_flows: raw.max_tcp_flows as usize,
             max_udp_mappings: raw.max_udp_mappings as usize,
+            udp_buffered_bytes_limit: raw.udp_buffered_bytes_limit as usize,
             udp_filtering,
         },
     })

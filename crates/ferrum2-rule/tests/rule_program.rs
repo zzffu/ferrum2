@@ -16,6 +16,41 @@ fn target() -> TargetAddr {
 }
 
 #[test]
+fn indexed_continue_recomputes_active_fields_after_metadata_changes() {
+    let mut rules = vec![OrderedRouteRule::new(
+        RouteMatcher::unconditional(),
+        RouteRuleAction::Continue("sniff"),
+    )];
+    for index in 0..64 {
+        rules.push(OrderedRouteRule::new(
+            RouteMatcher::try_new(vec![
+                RouteMatchField::Domain(vec![domain(&format!("host-{index}.example"))]),
+                RouteMatchField::Protocol(vec!["tls"]),
+            ])
+            .unwrap(),
+            RouteRuleAction::Terminal("matched"),
+        ));
+    }
+    let program = OrderedRouteProgram::try_new(rules, "final").unwrap();
+    let target = TargetAddr::domain("original.example", 443).unwrap();
+    let detected = domain("host-63.example");
+    let mut scratch = program.evaluation_scratch().unwrap();
+    for (protocol, expected) in [(Some("tls"), "matched"), (None, "final")] {
+        let mut evaluation = program.evaluate_with_scratch(0, Network::Tcp, &target, &mut scratch);
+        assert_eq!(
+            evaluation.next(RouteMetadata::new(None, None)),
+            Some(RouteProgramAction::Continue(&"sniff")),
+        );
+        let action = evaluation.next(RouteMetadata::new(protocol, Some(&detected)));
+        if protocol.is_some() {
+            assert_eq!(action, Some(RouteProgramAction::Terminal(&expected)));
+        } else {
+            assert_eq!(action, Some(RouteProgramAction::Final(&expected)));
+        }
+    }
+}
+
+#[test]
 fn match_set_uses_one_canonical_algorithm_for_all_categories() {
     let mut builder = MatchSetBuilder::new();
     builder

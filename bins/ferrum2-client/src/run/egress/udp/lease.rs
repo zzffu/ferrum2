@@ -1,26 +1,9 @@
-use crate::run::egress::context::ClientRequestOrigin;
 use ferrum2_core::Datagram;
 use ferrum2_runtime::{
-    AccountedDatagram, PendingUdpDatagram, PendingUdpSession, UdpBufferReservation, UdpDirection,
-    UdpRuntimeError, UdpSessionHandle, UdpSessionManager,
+    AccountedDatagram, PendingUdpDatagram, PendingUdpSession, UdpBufferBudget,
+    UdpBufferReservation, UdpDirection, UdpRuntimeError, UdpSessionHandle, UdpSessionManager,
 };
 use tokio::time::Instant;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum UdpAccounting {
-    Metered,
-    TunUnmetered,
-}
-impl From<ClientRequestOrigin> for UdpAccounting {
-    fn from(origin: ClientRequestOrigin) -> Self {
-        match origin {
-            ClientRequestOrigin::Tun => Self::TunUnmetered,
-            ClientRequestOrigin::Socks
-            | ClientRequestOrigin::Dns
-            | ClientRequestOrigin::RuleSet => Self::Metered,
-        }
-    }
-}
 
 enum SessionLease {
     Pending(PendingUdpSession),
@@ -30,20 +13,20 @@ enum SessionLease {
 pub(super) struct UdpAssociationLease {
     pub(super) manager: UdpSessionManager,
     session: SessionLease,
-    pub(super) accounting: UdpAccounting,
+    budget: UdpBufferBudget,
     _fixed_capacity: Vec<UdpBufferReservation>,
 }
 impl UdpAssociationLease {
     pub(super) fn new(
         manager: UdpSessionManager,
         session: PendingUdpSession,
-        accounting: UdpAccounting,
+        budget: UdpBufferBudget,
         fixed_capacity: Vec<UdpBufferReservation>,
     ) -> Self {
         Self {
             manager,
             session: SessionLease::Pending(session),
-            accounting,
+            budget,
             _fixed_capacity: fixed_capacity,
         }
     }
@@ -58,20 +41,17 @@ impl UdpAssociationLease {
         &self,
         capacity: usize,
     ) -> Result<PendingUdpDatagram, UdpRuntimeError> {
-        match (&self.session, self.accounting) {
-            (SessionLease::Pending(session), UdpAccounting::Metered) => {
-                session.reserve_datagram(UdpDirection::ToTarget, capacity)
+        match &self.session {
+            SessionLease::Pending(session) => {
+                session.reserve_datagram_in_budget(UdpDirection::ToTarget, capacity, &self.budget)
             }
-            (SessionLease::Pending(session), UdpAccounting::TunUnmetered) => {
-                session.reserve_unmetered_datagram(UdpDirection::ToTarget, capacity)
-            }
-            (SessionLease::Active(handle), UdpAccounting::Metered) => self
-                .manager
-                .reserve_datagram(*handle, UdpDirection::ToTarget, capacity),
-            (SessionLease::Active(handle), UdpAccounting::TunUnmetered) => self
-                .manager
-                .reserve_unmetered_datagram(*handle, UdpDirection::ToTarget, capacity),
-            (SessionLease::Closed, _) => Err(UdpRuntimeError::Cancelled),
+            SessionLease::Active(handle) => self.manager.reserve_datagram_in_budget(
+                *handle,
+                UdpDirection::ToTarget,
+                capacity,
+                &self.budget,
+            ),
+            SessionLease::Closed => Err(UdpRuntimeError::Cancelled),
         }
     }
     pub(super) fn reserve_response(
@@ -81,16 +61,12 @@ impl UdpAssociationLease {
         let SessionLease::Active(handle) = self.session else {
             return Err(UdpRuntimeError::Cancelled);
         };
-        match self.accounting {
-            UdpAccounting::Metered => {
-                self.manager
-                    .reserve_datagram(handle, UdpDirection::ToClient, capacity)
-            }
-            UdpAccounting::TunUnmetered => {
-                self.manager
-                    .reserve_unmetered_datagram(handle, UdpDirection::ToClient, capacity)
-            }
-        }
+        self.manager.reserve_datagram_in_budget(
+            handle,
+            UdpDirection::ToClient,
+            capacity,
+            &self.budget,
+        )
     }
     pub(super) fn commit_activity(
         &mut self,

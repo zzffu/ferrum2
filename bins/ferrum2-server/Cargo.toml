@@ -24,6 +24,7 @@ ferrum2-ruleset.workspace = true
 ferrum2-shadowsocks = { workspace = true, features = ["tokio"] }
 ferrum2-sniff.workspace = true
 ferrum2-platform-windows = { workspace = true, features = ["live-backend"] }
+futures-util.workspace = true
 clap.workspace = true
 socket2.workspace = true
 tokio.workspace = true

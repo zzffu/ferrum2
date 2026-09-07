@@ -162,6 +162,7 @@ fn network_fence_rejects_capabilities_without_retiring_storage_or_signalling_can
     let registry = OwnerRegistry::new();
     let baseline = registry.snapshot();
     let manager = UdpSessionManager::new(limits(3), registry.clone());
+    let tun = ferrum2_runtime::UdpBufferBudget::new_tun(1, registry.clone());
     let now = Instant::now();
     let first = committed_session(&manager, now, b"first");
     let provisional = manager.reserve_session(now).unwrap();
@@ -188,7 +189,7 @@ fn network_fence_rejects_capabilities_without_retiring_storage_or_signalling_can
     ));
     assert_eq!(
         manager
-            .reserve_unmetered_datagram(first, UdpDirection::ToTarget, 1)
+            .reserve_datagram_in_budget(first, UdpDirection::ToTarget, 1, &tun)
             .unwrap_err(),
         UdpRuntimeError::Cancelled
     );

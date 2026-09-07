@@ -1,4 +1,3 @@
-use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
@@ -6,6 +5,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use ferrum2_core::{CanonicalDomain, DomainName};
+
+mod state;
+
+use state::DnsCacheState;
 
 /// Stable numeric identity of one validated DNS server.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -206,66 +209,10 @@ impl fmt::Debug for DnsCacheAnswer {
     }
 }
 
-#[derive(Clone)]
-struct DnsCacheEntry {
-    answer: DnsCacheAnswer,
-    expires_at: Instant,
-}
-
-struct DnsCacheState {
-    capacity: usize,
-    entries: HashMap<DnsCacheKey, DnsCacheEntry>,
-    insertion_order: VecDeque<DnsCacheKey>,
-    // No live entry expires before this instant. Removal may leave an earlier
-    // bound, causing one harmless extra scan when that deadline is reached.
-    expiry_lower_bound: Option<Instant>,
-    observer: Option<Arc<dyn DnsCacheObserver>>,
-}
-
-impl DnsCacheState {
-    fn remove(&mut self, key: &DnsCacheKey) {
-        if self.entries.remove(key).is_none() {
-            return;
-        }
-        if let Some(index) = self
-            .insertion_order
-            .iter()
-            .position(|candidate| candidate == key)
-        {
-            self.insertion_order.remove(index);
-        }
-    }
-
-    fn purge_expired(&mut self, now: Instant) {
-        if self.expiry_lower_bound.is_none_or(|expiry| expiry > now) {
-            return;
-        }
-        let mut next_expiry: Option<Instant> = None;
-        self.entries.retain(|_, entry| {
-            if entry.expires_at <= now {
-                return false;
-            }
-            next_expiry = Some(
-                next_expiry.map_or(entry.expires_at, |previous| previous.min(entry.expires_at)),
-            );
-            true
-        });
-        let entries = &self.entries;
-        self.insertion_order.retain(|key| entries.contains_key(key));
-        self.expiry_lower_bound = next_expiry;
-    }
-
-    fn evict_until_available(&mut self) {
-        while self.entries.len() >= self.capacity {
-            let Some(oldest) = self.insertion_order.pop_front() else {
-                break;
-            };
-            self.entries.remove(&oldest);
-        }
-    }
-}
-
 /// Cloneable, bounded cache shared by TCP, UDP, and fixed-endpoint consumers.
+///
+/// Writes refresh FIFO position; reads do not. Stable entry slots and an indexed
+/// expiry heap bound retained bookkeeping to the configured key capacity.
 #[derive(Clone)]
 pub struct DnsCache {
     state: Arc<Mutex<DnsCacheState>>,
@@ -295,23 +242,8 @@ where
 impl DnsCache {
     /// Allocates storage for at most `capacity` server/name/type/generation keys.
     pub fn try_new(capacity: NonZeroUsize) -> Result<Self, DnsCacheError> {
-        let capacity = capacity.get();
-        let mut entries = HashMap::new();
-        entries
-            .try_reserve(capacity)
-            .map_err(|_| DnsCacheError::Allocation)?;
-        let mut insertion_order = VecDeque::new();
-        insertion_order
-            .try_reserve(capacity)
-            .map_err(|_| DnsCacheError::Allocation)?;
         Ok(Self {
-            state: Arc::new(Mutex::new(DnsCacheState {
-                capacity,
-                entries,
-                insertion_order,
-                expiry_lower_bound: None,
-                observer: None,
-            })),
+            state: Arc::new(Mutex::new(DnsCacheState::try_new(capacity.get())?)),
         })
     }
 
@@ -337,17 +269,7 @@ impl DnsCache {
     ) -> Result<Option<DnsCacheAnswer>, DnsCacheError> {
         let (answer, observer) = {
             let mut state = self.lock()?;
-            let expired = state
-                .entries
-                .get(key)
-                .is_some_and(|entry| entry.expires_at <= now);
-            if expired {
-                state.remove(key);
-            }
-            (
-                state.entries.get(key).map(|entry| entry.answer.clone()),
-                state.observer.as_ref().map(Arc::clone),
-            )
+            (state.get(key, now), state.observer.as_ref().map(Arc::clone))
         };
         if let Some(observer) = observer {
             observer.record(
@@ -389,8 +311,7 @@ impl DnsCache {
     /// Returns the number of live keys after lazily purging expired entries.
     pub fn entry_count(&self, now: Instant) -> Result<usize, DnsCacheError> {
         let mut state = self.lock()?;
-        state.purge_expired(now);
-        Ok(state.entries.len())
+        Ok(state.entry_count(now))
     }
 
     fn insert(
@@ -402,21 +323,7 @@ impl DnsCache {
     ) -> Result<(), DnsCacheError> {
         let expires_at = now.checked_add(ttl).ok_or(DnsCacheError::TtlOverflow)?;
         let mut state = self.lock()?;
-        state.purge_expired(now);
-        state.remove(&key);
-        if ttl.is_zero() {
-            return Ok(());
-        }
-        state.evict_until_available();
-        state.expiry_lower_bound = Some(
-            state
-                .expiry_lower_bound
-                .map_or(expires_at, |previous| previous.min(expires_at)),
-        );
-        state.insertion_order.push_back(key.clone());
-        state
-            .entries
-            .insert(key, DnsCacheEntry { answer, expires_at });
+        state.insert(key, answer, expires_at, now);
         Ok(())
     }
 

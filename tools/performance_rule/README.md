@@ -25,8 +25,8 @@ are checked against the Rust producer:
 
 | Profile | MatchSet | Route | DNS |
 | --- | --- | --- | --- |
-| smoke | 100 | 1, 32, 64 | 1 |
-| qualification | 100, 1000, 10000 | 1, 32, 64, 1000, 10000 | 1, 64, 65, 100, 1000, 10000 |
+| smoke | 100 | 1, 32, 63, 64, 65 | 1 |
+| qualification | 100, 1000, 10000 | 1, 32, 63, 64, 65, 1000, 10000 | 1, 64, 65, 100, 1000, 10000 |
 
 `--include-100k` appends 100000 to MatchSet scales. Workspace and optional runner
 output paths remain bound by the exact argument vector used for calibration.

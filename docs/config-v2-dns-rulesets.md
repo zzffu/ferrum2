@@ -177,6 +177,13 @@ policy proxy does not allocate or retain an application cache. UDP
 associations retain only the last successful candidate index, never an address
 TTL cache.
 
+The cache is FIFO, not LRU: replacing an entry moves it to the newest position;
+reading it does not. Fixed-capacity entry slots and an indexed expiry heap keep
+one deadline per retained entry, without stale deadline accumulation or full-map
+expiry scans. Insertion reclaims at most one expired entry before admission.
+The diagnostic `entry_count` operation drains every due deadline for an exact
+live count, so it can still perform batch work when many TTLs expire together.
+
 ## Observability
 
 Server process failures retain the required root role and, for an inbound endpoint,

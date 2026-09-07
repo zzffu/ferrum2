@@ -89,6 +89,43 @@ pub fn sniff(
     }
 }
 
+/// Classifies a bounded TCP collection prefix without finalizing partial input.
+///
+/// `NeedMore` includes an incomplete prefix exactly at `max_bytes`, allowing the
+/// collector to report its byte limit rather than a malformed protocol. Every
+/// other result is final and matches `sniff` at the strict byte limit, so callers
+/// can retain it instead of parsing the completed prefix again.
+pub fn sniff_tcp_prefix(
+    bytes: &[u8],
+    max_bytes: usize,
+    destination_port: u16,
+    order: &[Protocol],
+) -> Progress {
+    if bytes.len() > max_bytes {
+        return Progress::Invalid;
+    }
+    let progress = sniff(
+        bytes,
+        max_bytes.saturating_add(1),
+        Transport::Tcp,
+        destination_port,
+        order,
+    );
+    // Only DNS validates a declared frame length against the limit. The extra
+    // horizon byte can admit an incomplete non-53 DNS frame as NoMatch instead
+    // of Invalid. No complete match or higher-priority partial is changed.
+    if progress == Progress::NoMatch
+        && order.contains(&Protocol::Dns)
+        && bytes.get(..2).is_some_and(|length| {
+            usize::from(u16::from_be_bytes([length[0], length[1]])) > max_bytes.saturating_sub(2)
+        })
+    {
+        Progress::Invalid
+    } else {
+        progress
+    }
+}
+
 fn sniff_dns(
     bytes: &[u8],
     max_bytes: usize,

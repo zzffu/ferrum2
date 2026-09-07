@@ -28,9 +28,11 @@ host = "example.com"
 port = 443
 ```
 
-Delete `max_udp_buffered_bytes` from `[tun]`. It has no replacement, alias, warning-only mode, or
-deprecated no-op. TUN UDP remains bounded by association count, packet queues, fragment limits,
-protocol datagram length, deadlines, and idle expiry rather than an aggregate estimated byte budget.
+Delete `max_udp_buffered_bytes` from `[tun]`; that legacy spelling remains rejected with no alias
+or deprecated no-op. The new `udp_buffered_bytes_limit` bounds exact owned UDP payload and egress
+buffer capacity independently of ordinary UDP (default 64 MiB, range 1 MiB–1 GiB). Association
+count, packet queues, fragment limits, protocol length, deadlines, and idle expiry remain bounded.
+This does not introduce an aggregate process-memory estimate or RSS cap.
 
 ## UDP behavior change
 
