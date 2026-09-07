@@ -141,7 +141,7 @@ async fn initial_candidates_select_socket_and_send_first_domain_datagram_without
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
 
     assert!(runtime.remove_session(handle));
-    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await, 0);
+    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await.forced(), 0);
     wait_for_zero_udp_owners(&registry).await;
 }
 
@@ -155,7 +155,7 @@ async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
     let (empty_socket, _) = socket_fixture(Duration::ZERO, []);
     let mut first = shared_runtime(manager.clone(), &registry, first_socket);
     let mut second = shared_runtime(manager.clone(), &registry, second_socket);
-    let empty = shared_runtime(manager, &registry, empty_socket);
+    let mut empty = shared_runtime(manager, &registry, empty_socket);
 
     let admission = first
         .reserve_session(Instant::now(), 7, (), selection_destination())
@@ -176,6 +176,14 @@ async fn shared_manager_couples_session_byte_and_direct_owner_capacity() {
         UdpRuntimeError::SessionLimit,
         "removed generation cannot outlive the inseparable direct-owner bound"
     );
+    assert!(matches!(
+        first
+            .next_completion()
+            .await
+            .expect("joined terminal")
+            .terminal(),
+        ferrum2_runtime::DirectUdpTerminal::Cancelled
+    ));
     wait_for_zero_udp_owners(&registry).await;
     drop(
         second
@@ -231,6 +239,14 @@ async fn domain_resolution_and_candidate_sends_share_one_absolute_deadline() {
     tokio::time::advance(Duration::from_secs(3)).await;
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(matches!(
+        runtime
+            .next_completion()
+            .await
+            .expect("joined terminal")
+            .terminal(),
+        ferrum2_runtime::DirectUdpTerminal::SendFailed
+    ));
     wait_for_zero_udp_owners(&registry).await;
 
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
@@ -297,6 +313,14 @@ async fn association_resolves_every_datagram_reuses_hint_and_never_falls_back() 
         .expect("failure capacity")
         .commit(domain_datagram(b"failure"), Instant::now())
         .expect("commit resolver failure datagram");
+    assert!(matches!(
+        runtime
+            .next_completion()
+            .await
+            .expect("joined terminal")
+            .terminal(),
+        ferrum2_runtime::DirectUdpTerminal::ResolveFailed
+    ));
     wait_for_zero_udp_owners(&registry).await;
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 3);
     assert_eq!(
@@ -332,6 +356,21 @@ async fn resolver_consumes_zero_one_sixteen_and_at_most_sixteen_candidates() {
         runtime
             .commit_session(admission, domain_datagram(b"request"), Instant::now())
             .expect("commit session");
+        let completion = runtime
+            .next_completion()
+            .await
+            .expect("joined candidate outcome");
+        if candidate_count == 0 {
+            assert!(matches!(
+                completion.terminal(),
+                ferrum2_runtime::DirectUdpTerminal::ResolveFailed
+            ));
+        } else {
+            assert!(matches!(
+                completion.terminal(),
+                ferrum2_runtime::DirectUdpTerminal::SendFailed
+            ));
+        }
         wait_for_zero_udp_owners(&registry).await;
         assert_eq!(sends.lock().expect("send lock").len(), expected_sends);
         runtime.shutdown(Duration::ZERO).await;
@@ -360,6 +399,14 @@ async fn direct_session_idle_expiry_reaps_socket_task_queue_scratch_and_bytes() 
     assert_eq!(sends.lock().expect("send lock").len(), 1);
 
     tokio::time::advance(MIN_UDP_IDLE_TIMEOUT).await;
+    assert!(matches!(
+        runtime
+            .next_completion()
+            .await
+            .expect("joined terminal")
+            .terminal(),
+        ferrum2_runtime::DirectUdpTerminal::Idle
+    ));
     wait_for_zero_udp_owners(&registry).await;
     runtime.shutdown(Duration::ZERO).await;
 }
@@ -397,6 +444,14 @@ async fn expired_replacement_churn_never_exceeds_the_direct_owner_limit() {
         let retiring = registry.snapshot();
         assert!(retiring.udp_sockets <= 1);
         assert!(retiring.udp_tasks <= 1);
+        assert!(matches!(
+            runtime
+                .next_completion()
+                .await
+                .expect("joined terminal")
+                .terminal(),
+            ferrum2_runtime::DirectUdpTerminal::Cancelled
+        ));
         wait_for_zero_udp_owners(&registry).await;
 
         let replacement = runtime
@@ -450,7 +505,7 @@ async fn direct_response_awaits_handler_without_creating_a_queue_owner() {
     assert_eq!(handling.udp_buffered_bytes, MAX_UDP_WIRE_DATAGRAM_BYTES);
     assert_eq!(handling.udp_scratch_buffers, 0);
 
-    assert_eq!(runtime.shutdown(Duration::ZERO).await, 1);
+    assert_eq!(runtime.shutdown(Duration::ZERO).await.forced(), 1);
     wait_for_zero_udp_owners(&registry).await;
 }
 
@@ -502,6 +557,14 @@ async fn direct_response_preserves_to_client_queue_backpressure() {
         .push_back((b"reply".to_vec(), SocketAddr::from(([127, 0, 0, 1], 9000))));
     response_ready.notify_one();
 
+    assert!(matches!(
+        runtime
+            .next_completion()
+            .await
+            .expect("joined terminal")
+            .terminal(),
+        ferrum2_runtime::DirectUdpTerminal::RuntimeFailed(UdpRuntimeError::QueueFull)
+    ));
     wait_for_zero_udp_owners(&registry).await;
     assert!(handled.lock().expect("handler lock").is_empty());
     runtime.shutdown(Duration::ZERO).await;
@@ -545,6 +608,14 @@ async fn successful_direct_response_refreshes_activity_after_handler_completion(
     assert_eq!(runtime.sessions().session_count(), 1);
 
     tokio::time::advance(Duration::from_secs(30)).await;
+    assert!(matches!(
+        runtime
+            .next_completion()
+            .await
+            .expect("joined terminal")
+            .terminal(),
+        ferrum2_runtime::DirectUdpTerminal::Idle
+    ));
     wait_for_zero_udp_owners(&registry).await;
     runtime.shutdown(Duration::ZERO).await;
 }
@@ -594,13 +665,14 @@ async fn handler_failure_does_not_refresh_activity_before_final_generation_reche
         .reserve_session(Instant::now())
         .expect("uncommitted handler response must not refresh activity");
     release.notify_one();
-    for _ in 0..200 {
-        let snapshot = registry.snapshot();
-        if snapshot.udp_sockets == 0 && snapshot.udp_tasks == 0 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    let completion = runtime
+        .next_completion()
+        .await
+        .expect("joined handler failure");
+    assert!(matches!(
+        completion.terminal(),
+        ferrum2_runtime::DirectUdpTerminal::HandlerFailed(())
+    ));
     assert_eq!(registry.snapshot().udp_sockets, 0);
     assert_eq!(registry.snapshot().udp_tasks, 0);
     drop(replacement);

@@ -1,4 +1,5 @@
 mod direct;
+mod direct_owner;
 mod limits;
 mod manager;
 mod reservation;
@@ -6,6 +7,10 @@ mod session;
 mod socket;
 
 pub use direct::{DirectUdpPacketHandler, DirectUdpRuntime, DirectUdpSessionAdmission};
+pub use direct_owner::{
+    DirectUdpCleanup, DirectUdpCompletion, DirectUdpShutdownReport, DirectUdpTerminal,
+    DirectUdpTerminalCounts,
+};
 use limits::UDP_CANDIDATE_HINT_ENTRIES;
 pub use limits::{
     DEFAULT_UDP_IDLE_TIMEOUT, DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS,

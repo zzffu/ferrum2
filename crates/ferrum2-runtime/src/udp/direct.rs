@@ -4,20 +4,21 @@ use std::fmt;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::BytesMut;
 use ferrum2_core::Datagram;
 use ferrum2_net::UdpResolver;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::owner::OwnerGuard;
 use crate::{OwnerRegistry, ProcessCancellation};
 
-use super::manager::UdpRuntimeOwner;
+use super::direct_owner::{
+    self, DirectTaskFailure, DirectTaskOwner, DirectTaskRecord, SharedDirectTasks, ShutdownControl,
+};
 use super::socket::{DirectUdpSocket, DirectUdpSocketFactory, SystemDirectUdpSocketFactory};
 use super::{
     AccountedDatagram, MAX_UDP_RESOLVED_CANDIDATES, MAX_UDP_WIRE_DATAGRAM_BYTES,
@@ -25,11 +26,13 @@ use super::{
     UdpCommitError, UdpDirection, UdpRuntimeError, UdpRuntimeLimits, UdpSessionHandle,
     UdpSessionManager,
 };
+use super::{DirectUdpCleanup, DirectUdpCompletion, DirectUdpShutdownReport};
 
 /// Protocol-neutral callback for one bounded target response.
 pub trait DirectUdpPacketHandler: Send + Sync + 'static {
-    /// Closed handler error; its value is never formatted by the runtime.
-    type Error: Send;
+    /// Closed, source-free handler error retained until the parent observes the
+    /// joined completion. Its value is never formatted by the runtime.
+    type Error: Send + 'static;
 
     /// Consumes one generation-bound, allocated-capacity-accounted response.
     fn handle_target_response(
@@ -44,6 +47,12 @@ pub struct DirectUdpSessionAdmission<S> {
     session: PendingUdpSession,
     first_datagram: PendingUdpDatagram,
     initial_candidates: Option<Vec<SocketAddr>>,
+    physical: DirectUdpSocketAdmission<S>,
+}
+
+// Field order guarantees physical closure before accounting/capacity release,
+// including rejection before the task future has been constructed.
+struct DirectUdpSocketAdmission<S> {
     socket: S,
     socket_guard: OwnerGuard,
     owner_slot: OwnedSemaphorePermit,
@@ -64,9 +73,7 @@ struct DirectUdpSessionRoot<S> {
 struct DirectOwnerLifetime {
     manager: UdpSessionManager,
     session: UdpSessionHandle,
-    task_guard: Option<OwnerGuard>,
     socket_guard: Option<OwnerGuard>,
-    owner_slot: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for DirectOwnerLifetime {
@@ -75,8 +82,6 @@ impl Drop for DirectOwnerLifetime {
         // handler panics. Publish removal before making owner capacity reusable.
         self.manager.remove(self.session);
         drop(self.socket_guard.take());
-        drop(self.task_guard.take());
-        drop(self.owner_slot.take());
     }
 }
 
@@ -93,9 +98,9 @@ where
     handler: Arc<H>,
     connect_timeout: Duration,
     registry: OwnerRegistry,
-    tasks: JoinSet<()>,
+    tasks: SharedDirectTasks<H::Error>,
+    cleanup_taken: bool,
     owner_slots: Arc<Semaphore>,
-    _runtime_owner: UdpRuntimeOwner,
 }
 
 impl<R, H> DirectUdpRuntime<R, SystemDirectUdpSocketFactory, H>
@@ -177,7 +182,10 @@ where
         registry: OwnerRegistry,
     ) -> Self {
         let owner_slots = manager.owner_slots();
-        let runtime_owner = manager.runtime_owner();
+        let tasks = Arc::new(Mutex::new(DirectTaskOwner::new(
+            manager.clone(),
+            registry.clone(),
+        )));
         Self {
             manager,
             resolver: Arc::new(resolver),
@@ -185,9 +193,9 @@ where
             handler: Arc::new(handler),
             connect_timeout,
             registry,
-            tasks: JoinSet::new(),
+            tasks,
+            cleanup_taken: false,
             owner_slots,
-            _runtime_owner: runtime_owner,
         }
     }
 
@@ -252,7 +260,14 @@ where
         selection_destination: SocketAddr,
         initial_candidates: Option<Vec<SocketAddr>>,
     ) -> Result<DirectUdpSessionAdmission<F::Socket>, UdpRuntimeError> {
-        while self.tasks.try_join_next().is_some() {}
+        if !self
+            .tasks
+            .lock()
+            .expect("Direct task owner lock")
+            .accepting()
+        {
+            return Err(UdpRuntimeError::Cancelled);
+        }
         let session = self.manager.reserve_session(now)?;
         let owner_slot = Arc::clone(&self.owner_slots)
             .try_acquire_owned()
@@ -269,9 +284,11 @@ where
             session,
             first_datagram,
             initial_candidates,
-            socket,
-            socket_guard,
-            owner_slot,
+            physical: DirectUdpSocketAdmission {
+                socket,
+                socket_guard,
+                owner_slot,
+            },
         })
     }
 
@@ -290,6 +307,8 @@ where
     }
 
     /// Atomically rechecks generation, runs protocol commit, and starts one task.
+    /// The callback must be bounded, synchronous, nonblocking and nonreentrant;
+    /// see [`PendingUdpSession::commit_with`] for its fail-closed obligations.
     pub fn commit_session_with<E, C>(
         &mut self,
         admission: DirectUdpSessionAdmission<F::Socket>,
@@ -349,11 +368,22 @@ where
             session,
             first_datagram,
             initial_candidates,
+            physical,
+        } = admission;
+        if !self
+            .tasks
+            .lock()
+            .expect("Direct task owner lock")
+            .accepting()
+        {
+            return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
+        }
+        let handle = session.commit_with(first_datagram, datagram, now, protocol_commit)?;
+        let DirectUdpSocketAdmission {
             socket,
             socket_guard,
             owner_slot,
-        } = admission;
-        let handle = session.commit_with(first_datagram, datagram, now, protocol_commit)?;
+        } = physical;
         let manager = self.manager.clone();
         let handler = Arc::clone(&self.handler);
         let connect_timeout = self.connect_timeout;
@@ -362,26 +392,32 @@ where
         let owner_lifetime = DirectOwnerLifetime {
             manager: manager.clone(),
             session: handle,
-            task_guard: Some(task_guard),
             socket_guard: Some(socket_guard),
-            owner_slot: Some(owner_slot),
         };
-        self.tasks.spawn(async move {
-            let _owner_lifetime = owner_lifetime;
-            let _ = run_direct_session(
-                manager,
-                resolver,
-                handler,
-                DirectUdpSessionRoot {
-                    socket,
-                    handle,
-                    initial_candidates,
-                },
-                connect_timeout,
-                registry,
-            )
-            .await;
-        });
+        let resources = DirectTaskResources {
+            root: DirectUdpSessionRoot {
+                socket,
+                handle,
+                initial_candidates,
+            },
+            lifetime: owner_lifetime,
+        };
+        let mut tasks = self.tasks.lock().expect("Direct task owner lock");
+        let id = tasks
+            .tasks
+            .spawn(async move {
+                // Before the first poll, struct field order drops the physical
+                // socket before its lifetime acknowledgement. After polling, the
+                // child future is dropped before this retained lifetime guard.
+                let DirectTaskResources { root, lifetime } = resources;
+                let _lifetime = lifetime;
+                run_direct_session(manager, resolver, handler, root, connect_timeout, registry)
+                    .await
+            })
+            .id();
+        tasks
+            .records
+            .insert(id, DirectTaskRecord::new(handle, task_guard, owner_slot));
         Ok(handle)
     }
 
@@ -400,55 +436,62 @@ where
         self.manager.remove(handle)
     }
 
+    /// Takes the external cleanup custody once, before a run future can be aborted.
+    pub fn take_cleanup(&mut self) -> Option<DirectUdpCleanup<H::Error>> {
+        if self.cleanup_taken {
+            return None;
+        }
+        self.cleanup_taken = true;
+        Some(DirectUdpCleanup {
+            tasks: Arc::clone(&self.tasks),
+        })
+    }
+
+    /// Returns a ready joined completion without retaining an event queue.
+    pub fn try_next_completion(&mut self) -> Option<DirectUdpCompletion<H::Error>> {
+        self.tasks
+            .lock()
+            .expect("Direct task owner lock")
+            .try_completion()
+    }
+
+    /// Waits for one joined terminal. A cancelled await retains task custody.
+    pub async fn next_completion(&mut self) -> Option<DirectUdpCompletion<H::Error>> {
+        direct_owner::next_completion(&self.tasks).await
+    }
+
+    /// Returns whether admitted-but-unjoined tasks remain.
+    pub fn has_tasks(&self) -> bool {
+        !self
+            .tasks
+            .lock()
+            .expect("Direct task owner lock")
+            .tasks
+            .is_empty()
+    }
+
     /// Cancels, joins, and if necessary aborts every owned task by one deadline.
-    pub async fn shutdown(self, grace: Duration) -> usize {
-        self.shutdown_with_control(UdpShutdownControl::Relative(Instant::now() + grace))
-            .await
+    /// Cancelling this await preserves task and completion data for a retry.
+    pub async fn shutdown(&mut self, grace: Duration) -> DirectUdpShutdownReport<H::Error> {
+        direct_owner::shutdown(
+            &self.tasks,
+            ShutdownControl::Relative(Instant::now() + grace),
+        )
+        .await
     }
 
-    /// Drains until the process lineage forces shutdown, then cancels and reaps
-    /// every owned task without starting another relative grace interval.
-    pub async fn shutdown_with_cancellation(self, cancellation: ProcessCancellation) -> usize {
-        self.shutdown_with_control(UdpShutdownControl::Process(cancellation))
-            .await
-    }
-
-    async fn shutdown_with_control(mut self, mut control: UdpShutdownControl) -> usize {
-        self._runtime_owner.begin_shutdown();
-        if self.tasks.is_empty() {
-            return 0;
-        }
-        loop {
-            tokio::select! {
-                biased;
-                result = self.tasks.join_next(), if !self.tasks.is_empty() => {
-                    if result.is_none() || self.tasks.is_empty() {
-                        return 0;
-                    }
-                }
-                () = control.forced() => break,
-            }
-        }
-        let forced = self.tasks.len();
-        self.registry.record_udp_forced_shutdowns(forced);
-        self.tasks.abort_all();
-        while self.tasks.join_next().await.is_some() {}
-        forced
+    /// Uses the process shutdown lineage rather than starting another grace interval.
+    pub async fn shutdown_with_cancellation(
+        &mut self,
+        cancellation: ProcessCancellation,
+    ) -> DirectUdpShutdownReport<H::Error> {
+        direct_owner::shutdown(&self.tasks, ShutdownControl::Process(cancellation)).await
     }
 }
 
-enum UdpShutdownControl {
-    Relative(Instant),
-    Process(ProcessCancellation),
-}
-
-impl UdpShutdownControl {
-    async fn forced(&mut self) {
-        match self {
-            Self::Relative(deadline) => tokio::time::sleep_until(*deadline).await,
-            Self::Process(cancellation) => cancellation.forced().await,
-        }
-    }
+struct DirectTaskResources<S> {
+    root: DirectUdpSessionRoot<S>,
+    lifetime: DirectOwnerLifetime,
 }
 
 struct UdpCandidateHint {
@@ -495,7 +538,7 @@ async fn run_direct_session<R, H, S>(
     session: DirectUdpSessionRoot<S>,
     connect_timeout: Duration,
     registry: OwnerRegistry,
-) -> Result<(), UdpRuntimeError>
+) -> Result<(), DirectTaskFailure<H::Error>>
 where
     R: UdpResolver,
     <R::Candidates as IntoIterator>::IntoIter: Send,
@@ -533,21 +576,21 @@ where
             if sent_request {
                 continue;
             }
-            return Err(UdpRuntimeError::Cancelled);
+            return Ok(());
         }
         let idle_deadline = manager.idle_deadline(handle)?;
         tokio::select! {
             biased;
             changed = cancellation.changed() => {
                 if changed.is_err() {
-                    return Err(UdpRuntimeError::Cancelled);
+                    return Err(UdpRuntimeError::Cancelled.into());
                 }
                 // Closed admission makes the remaining queue finite. Reuse the
                 // cooperative request path until every admitted packet drains.
             }
             () = tokio::time::sleep_until(idle_deadline) => {
                 if Instant::now() >= manager.idle_deadline(handle)? {
-                    return Err(UdpRuntimeError::Idle);
+                    return Err(UdpRuntimeError::Idle.into());
                 }
             }
             response = receive_target(
@@ -564,7 +607,7 @@ where
                 handler
                     .handle_target_response(handle, response)
                     .await
-                    .map_err(|_| UdpRuntimeError::Receive)?;
+                    .map_err(DirectTaskFailure::Handler)?;
                 manager.commit_activity(handle, Instant::now())?;
             }
             // Notifications coalesce. Poll for another queued request after

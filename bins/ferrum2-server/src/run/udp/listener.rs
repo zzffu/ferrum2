@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use ferrum2_crypto::SystemClock;
-use ferrum2_observability::{Direction, Metrics, Outcome, Reason, Role, Stage};
+use ferrum2_observability::{Direction, Metrics, Outcome, Role};
 use ferrum2_runtime::{
     AccountedDatagram, DirectUdpPacketHandler, DirectUdpRuntime, UdpSessionHandle,
 };
@@ -12,15 +12,17 @@ use ferrum2_shadowsocks::UdpServer;
 use tokio::net::UdpSocket;
 
 use crate::run::dns_egress;
-use crate::run::observation::{
-    record_udp_failure, record_udp_protocol_failure, record_udp_runtime_failure,
-};
 
 use super::identity::UdpMappings;
 use super::response_codec::{ResponseCodecPool, ResponseEncodeError};
 
 #[derive(Clone, Copy)]
-pub(super) struct UdpAdapterError;
+pub(super) enum UdpAdapterError {
+    Mapping,
+    Protocol(ferrum2_shadowsocks::UdpPacketError),
+    Runtime(ferrum2_runtime::UdpRuntimeError),
+    Send,
+}
 
 pub(super) const UDP_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 pub(super) const MAX_UDP_LISTENER_READINESS_DRAIN: usize = 32;
@@ -80,7 +82,7 @@ where
             .mappings
             .capability(session)
             .await
-            .ok_or(UdpAdapterError)?;
+            .ok_or(UdpAdapterError::Mapping)?;
         let encoded = loop {
             let returned = self.codec.returned.notified();
             match self.codec.try_encode(
@@ -92,13 +94,10 @@ where
                 Ok(Some(encoded)) => break encoded,
                 Ok(None) => returned.await,
                 Err(ResponseEncodeError::Protocol(error)) => {
-                    self.mappings.invalidate_handle(session);
-                    record_udp_protocol_failure(&self.metrics, error);
-                    return Err(UdpAdapterError);
+                    return Err(UdpAdapterError::Protocol(error));
                 }
                 Err(ResponseEncodeError::Runtime(error)) => {
-                    record_udp_runtime_failure(&self.metrics, error);
-                    return Err(UdpAdapterError);
+                    return Err(UdpAdapterError::Runtime(error));
                 }
             }
         };
@@ -108,10 +107,7 @@ where
         self.listener
             .send_to(encoded.wire.wire(wire_len), encoded.peer)
             .await
-            .map_err(|_| {
-                record_udp_failure(&self.metrics, Stage::Direct, Reason::Send, Outcome::Failed);
-                UdpAdapterError
-            })?;
+            .map_err(|_| UdpAdapterError::Send)?;
         self.metrics
             .udp_datagram(Role::Server, Direction::TargetToClient, Outcome::Completed);
         self.metrics

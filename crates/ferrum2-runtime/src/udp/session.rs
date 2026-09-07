@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Weak};
 
 use ferrum2_core::Datagram;
@@ -7,7 +8,9 @@ use tokio::time::Instant;
 
 use crate::owner::OwnerGuard;
 
-use super::manager::{UdpSessionManagerInner, matching_entry_mut};
+use super::manager::{
+    UdpSessionManagerInner, lock_state, matching_entry_mut, release_pending, retire_exact,
+};
 use super::reservation::{AccountedDatagram, UdpBufferReservation};
 use super::{
     UDP_SESSION_QUEUE_DEPTH, UdpCommitError, UdpDirection, UdpRuntimeError, UdpSessionHandle,
@@ -141,6 +144,8 @@ impl PendingUdpSession {
 
     /// Atomically activates this generation, commits protocol state, and
     /// returns the accounted first datagram without publishing it to a queue.
+    /// The callback obeys the bounded, nonblocking, nonreentrant obligations of
+    /// [`Self::commit_with`]; panic retires this generation without protocol rollback.
     pub fn commit_immediate_with<E, C>(
         mut self,
         datagram_reservation: PendingUdpDatagram,
@@ -167,6 +172,11 @@ impl PendingUdpSession {
     }
 
     /// Serializes generation recheck, protocol commit, activity, and enqueue.
+    ///
+    /// The callback must be synchronous, bounded, nonblocking and nonreentrant:
+    /// do not call the runtime manager, perform I/O, or emit diagnostics. A returned
+    /// error must leave protocol accepted state unchanged. A panic retires this
+    /// runtime generation; arbitrary protocol side effects are not rolled back.
     /// Activity never moves backwards when callers commit out of capture order.
     pub fn commit_with<E, C>(
         mut self,
@@ -226,6 +236,11 @@ impl PendingUdpDatagram {
     }
 
     /// Serializes generation recheck, protocol commit, activity, and enqueue.
+    ///
+    /// The callback must be synchronous, bounded, nonblocking and nonreentrant:
+    /// do not call the runtime manager, perform I/O, or emit diagnostics. A returned
+    /// error must leave protocol accepted state unchanged. A panic retires this
+    /// runtime generation; arbitrary protocol side effects are not rolled back.
     pub fn commit_with<E, C>(
         self,
         datagram: Datagram,
@@ -254,6 +269,8 @@ impl PendingUdpDatagram {
 
     /// Atomically rechecks generation, commits protocol state and activity,
     /// and returns this datagram without publishing it to a queue.
+    /// The callback obeys the bounded, nonblocking, nonreentrant obligations of
+    /// [`Self::commit_with`]; panic retires this generation without protocol rollback.
     pub fn commit_immediate_with<E, C>(
         self,
         datagram: Datagram,
@@ -288,10 +305,7 @@ impl PendingUdpDatagram {
             .attach(datagram)
             .map_err(UdpCommitError::Runtime)?;
         let notify = {
-            let mut state = manager
-                .state
-                .lock()
-                .expect("UDP session state lock poisoned");
+            let mut state = lock_state(&manager);
             if state.shutting_down {
                 return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
             }
@@ -300,7 +314,24 @@ impl PendingUdpDatagram {
             if entry.committed == activate_session {
                 return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
             }
-            protocol_commit().map_err(UdpCommitError::Protocol)?;
+            if entry.pending[self.direction.index()] == 0 {
+                state.cleanup_failed = true;
+                retire_exact(&manager, &mut state, self.handle);
+                return Err(UdpCommitError::Runtime(UdpRuntimeError::StateUnavailable));
+            }
+            // Catch inside the guard's scope: callback unwind must not poison
+            // the manager or escape into reservation Drop while it is locked.
+            match catch_unwind(AssertUnwindSafe(protocol_commit)) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(UdpCommitError::Protocol(error)),
+                Err(_) => {
+                    state.cleanup_failed = true;
+                    retire_exact(&manager, &mut state, self.handle);
+                    return Err(UdpCommitError::Runtime(UdpRuntimeError::ProtocolPanicked));
+                }
+            }
+            let entry =
+                matching_entry_mut(&mut state, self.handle).map_err(UdpCommitError::Runtime)?;
             let index = self.direction.index();
             debug_assert!(entry.pending[index] > 0);
             entry.pending[index] -= 1;
@@ -339,10 +370,7 @@ impl PendingUdpDatagram {
             .attach(datagram)
             .map_err(UdpCommitError::Runtime)?;
         {
-            let mut state = manager
-                .state
-                .lock()
-                .expect("UDP session state lock poisoned");
+            let mut state = lock_state(&manager);
             if state.shutting_down {
                 return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
             }
@@ -351,7 +379,24 @@ impl PendingUdpDatagram {
             if entry.committed == activate_session {
                 return Err(UdpCommitError::Runtime(UdpRuntimeError::Cancelled));
             }
-            protocol_commit().map_err(UdpCommitError::Protocol)?;
+            if entry.pending[self.direction.index()] == 0 {
+                state.cleanup_failed = true;
+                retire_exact(&manager, &mut state, self.handle);
+                return Err(UdpCommitError::Runtime(UdpRuntimeError::StateUnavailable));
+            }
+            // Catch inside the guard's scope: callback unwind must not poison
+            // the manager or escape into reservation Drop while it is locked.
+            match catch_unwind(AssertUnwindSafe(protocol_commit)) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(UdpCommitError::Protocol(error)),
+                Err(_) => {
+                    state.cleanup_failed = true;
+                    retire_exact(&manager, &mut state, self.handle);
+                    return Err(UdpCommitError::Runtime(UdpRuntimeError::ProtocolPanicked));
+                }
+            }
+            let entry =
+                matching_entry_mut(&mut state, self.handle).map_err(UdpCommitError::Runtime)?;
             let index = self.direction.index();
             debug_assert!(entry.pending[index] > 0);
             entry.pending[index] -= 1;
@@ -377,15 +422,8 @@ impl Drop for PendingUdpDatagram {
         let Some(manager) = self.manager.upgrade() else {
             return;
         };
-        let mut state = manager
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
-        if let Ok(entry) = matching_entry_mut(&mut state, self.handle) {
-            let pending = &mut entry.pending[self.direction.index()];
-            debug_assert!(*pending > 0);
-            *pending -= 1;
-        }
+        let mut state = lock_state(&manager);
+        release_pending(&manager, &mut state, self.handle, self.direction);
     }
 }
 
@@ -402,10 +440,7 @@ pub(super) fn reserve_datagram(
     } else {
         UdpBufferReservation::unmetered(allocated_capacity)?
     };
-    let mut state = manager
-        .state
-        .lock()
-        .expect("UDP session state lock poisoned");
+    let mut state = lock_state(manager);
     if state.shutting_down {
         return Err(UdpRuntimeError::Cancelled);
     }

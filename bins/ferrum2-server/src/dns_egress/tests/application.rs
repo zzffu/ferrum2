@@ -81,6 +81,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
 #[tokio::test]
 async fn caller_owned_cache_is_used_with_compiled_final_policy() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let listen = reserve_address();
     let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .await
@@ -149,7 +155,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         specs,
         dns.timeout,
         dns.max_inflight,
-        Arc::new(ServerDnsEgress::test(config.outbounds.len())),
+        Arc::new(ServerDnsEgress::test(
+            Arc::clone(&network_owner.sockets),
+            config.outbounds.len(),
+        )),
     )
     .expect("tagged resolver");
     owner.ready().await.expect("tagged ready");
@@ -170,4 +179,9 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     drop(state.take());
     owner.shutdown().await.expect("tagged shutdown");
     std::fs::remove_file(path).expect("remove shared cache config");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }

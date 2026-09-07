@@ -41,6 +41,8 @@ pub(in crate::run) fn network_reset_coordinator(
 }
 
 pub(in crate::run) struct TunNetworkServices {
+    #[cfg(all(windows, not(test)))]
+    pub(in crate::run) network_socket_service: Arc<crate::run::egress::ClientNetworkSocketService>,
     pub(in crate::run) coordinator: NetworkResetCoordinator,
     pub(in crate::run) underlay: ferrum2_tun::UnderlayPublisher,
     pub(in crate::run) network_interface_catalog:
@@ -51,22 +53,26 @@ pub(in crate::run) struct TunNetworkServices {
 pub(in crate::run) fn network_change_process_root(
     context: Arc<ClientContext>,
     coordinator: NetworkResetCoordinator,
-    catalog: ferrum2_platform_windows::WindowsNetworkInterfaceCatalog,
-    monitor: ferrum2_platform_windows::WindowsNetworkChangeMonitor,
+    sockets: Arc<crate::run::egress::ClientNetworkSocketService>,
+    monitor: crate::run::network_wait::NativeNetworkChangeWait,
 ) -> ProcessRoot<RunError> {
     ProcessRoot::new_cancellable(move |_| async move {
         Ok(Some(ClientNetworkChangeRoot {
             monitor,
-            catalog,
-            reset: Arc::new(ClientNetworkResetRuntime::new(&context, coordinator)),
+            sockets: Arc::clone(&sockets),
+            reset: Arc::new(ClientNetworkResetRuntime::new(
+                &context,
+                coordinator,
+                sockets,
+            )),
         }))
     })
 }
 
 #[cfg(all(windows, not(test)))]
 pub(super) struct ClientNetworkChangeRoot {
-    monitor: ferrum2_platform_windows::WindowsNetworkChangeMonitor,
-    catalog: ferrum2_platform_windows::WindowsNetworkInterfaceCatalog,
+    monitor: crate::run::network_wait::NativeNetworkChangeWait,
+    sockets: Arc<crate::run::egress::ClientNetworkSocketService>,
     reset: Arc<ClientNetworkResetRuntime>,
 }
 
@@ -75,190 +81,118 @@ impl PreparedProcessRoot<RunError> for ClientNetworkChangeRoot {
     fn activate(&mut self) -> Result<(), RunError> {
         Ok(())
     }
-
     fn run(
         self: Box<Self>,
         mut cancellation: ProcessCancellation,
     ) -> ProcessFuture<Result<(), RunError>> {
         Box::pin(async move {
-            let Self {
-                monitor,
-                catalog,
-                reset,
-            } = *self;
-            let mut monitor = Some(monitor);
-            let run_result = async {
+            loop {
+                let outcome = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    result = self.monitor.wait(NETWORK_CHANGE_WAIT_BOUND) => result?,
+                };
+                match outcome {
+                    ferrum2_platform_windows::NetworkChangeWaitOutcome::Stopped => return Ok(()),
+                    ferrum2_platform_windows::NetworkChangeWaitOutcome::TimedOut => continue,
+                    ferrum2_platform_windows::NetworkChangeWaitOutcome::Changed => {}
+                }
                 loop {
-                    let current = monitor.take().ok_or(RunError::ShutdownCleanup)?;
-                    let (returned, outcome) = wait_for_network_change(
-                        current,
-                        NETWORK_CHANGE_WAIT_BOUND,
-                        &mut cancellation,
-                    )
-                    .await?;
-                    monitor = Some(returned);
-                    match outcome? {
+                    let outcome = tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return Ok(()),
+                        result = self.monitor.wait(NETWORK_CHANGE_QUIET_PERIOD) => result?,
+                    };
+                    match outcome {
                         ferrum2_platform_windows::NetworkChangeWaitOutcome::Stopped => {
                             return Ok(());
                         }
-                        ferrum2_platform_windows::NetworkChangeWaitOutcome::TimedOut => continue,
+                        ferrum2_platform_windows::NetworkChangeWaitOutcome::TimedOut => break,
                         ferrum2_platform_windows::NetworkChangeWaitOutcome::Changed => {}
                     }
-                    loop {
-                        let current = monitor.take().ok_or(RunError::ShutdownCleanup)?;
-                        let (returned, outcome) = wait_for_network_change(
-                            current,
-                            NETWORK_CHANGE_QUIET_PERIOD,
-                            &mut cancellation,
-                        )
-                        .await?;
-                        monitor = Some(returned);
-                        match outcome? {
-                            ferrum2_platform_windows::NetworkChangeWaitOutcome::Stopped => {
-                                return Ok(());
-                            }
-                            ferrum2_platform_windows::NetworkChangeWaitOutcome::TimedOut => break,
-                            ferrum2_platform_windows::NetworkChangeWaitOutcome::Changed => {}
+                }
+                let mut retry = false;
+                loop {
+                    let reason = if retry {
+                        NetworkResetReason::Retry
+                    } else {
+                        NetworkResetReason::NetworkChange
+                    };
+                    self.reset
+                        .metrics
+                        .network_reset(reason, NetworkLifecycleResult::Started);
+                    let result = tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => {
+                            self.reset.metrics.network_reset(reason, NetworkLifecycleResult::Failed);
+                            return Ok(());
                         }
-                    }
-                    let mut retry = false;
-                    loop {
-                        let metric_reason = if retry {
-                            NetworkResetReason::Retry
-                        } else {
-                            NetworkResetReason::NetworkChange
-                        };
-                        reset
+                        result = reset_client_network(&self.sockets, &self.reset, retry) => result,
+                    };
+                    if result.is_ok() {
+                        self.reset
                             .metrics
-                            .network_reset(metric_reason, NetworkLifecycleResult::Started);
-                        let reset_result = tokio::select! {
-                            biased;
-                            _ = cancellation.cancelled() => {
-                                reset.metrics.network_reset(
-                                    metric_reason,
-                                    NetworkLifecycleResult::Failed,
-                                );
-                                return Ok(());
-                            }
-                            result = reset_client_network(&catalog, &reset, retry) => result,
-                        };
-                        match reset_result {
-                            Ok(()) => {
-                                reset.metrics.network_reset(
-                                    metric_reason,
-                                    NetworkLifecycleResult::Succeeded,
-                                );
-                                break;
-                            }
-                            Err(_) => {
-                                reset
-                                    .metrics
-                                    .network_reset(metric_reason, NetworkLifecycleResult::Failed);
-                                retry = true;
-                                tokio::select! {
-                                    biased;
-                                    _ = cancellation.cancelled() => return Ok(()),
-                                    _ = tokio::time::sleep(NETWORK_RESET_RETRY_DELAY) => {}
-                                }
-                            }
-                        }
+                            .network_reset(reason, NetworkLifecycleResult::Succeeded);
+                        break;
+                    }
+                    self.reset
+                        .metrics
+                        .network_reset(reason, NetworkLifecycleResult::Failed);
+                    retry = true;
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(NETWORK_RESET_RETRY_DELAY) => {},
                     }
                 }
             }
-            .await;
-            let cleanup = match monitor {
-                Some(monitor) => monitor.close().map_err(|_| RunError::ShutdownCleanup),
-                None => Err(RunError::ShutdownCleanup),
-            };
-            match cleanup {
-                Ok(()) => run_result,
-                Err(error) => Err(error),
-            }
         })
     }
-
     fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), RunError>> {
+        // The external network owner retains and joins any native wait even if this
+        // root's factory/run future is cancelled or aborted.
         Box::pin(async move {
-            let Self { monitor, .. } = *self;
-            monitor.close().map_err(|_| RunError::ShutdownCleanup)
+            drop(self);
+            Ok(())
         })
     }
 }
 
 #[cfg(all(windows, not(test)))]
 async fn reset_client_network(
-    catalog: &ferrum2_platform_windows::WindowsNetworkInterfaceCatalog,
+    sockets: &crate::run::egress::ClientNetworkSocketService,
     reset: &ClientNetworkResetRuntime,
     retry: bool,
 ) -> Result<(), ferrum2_tun::TunNetworkResetError> {
     if reset.coordinator.status().pending_generation().is_some() {
         return reset.retry().await;
     }
-    let snapshot = capture_next_network_snapshot(catalog, &reset.coordinator)
+    let generation = reset
+        .coordinator
+        .status()
+        .published_generation()
+        .checked_add(1)
+        .ok_or(ferrum2_tun::TunNetworkResetError)?;
+    let snapshot = sockets
+        .capture_snapshot(generation)
         .await
-        .map_err(|()| ferrum2_tun::TunNetworkResetError)?;
+        .map(Arc::new)
+        .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
     let reason = if retry {
         ferrum2_tun::TunNetworkResetReason::Retry
     } else {
         ferrum2_tun::TunNetworkResetReason::NetworkChange
     };
-    reset.reset(snapshot, reason).await
-}
-
-#[cfg(all(windows, not(test)))]
-async fn wait_for_network_change(
-    mut monitor: ferrum2_platform_windows::WindowsNetworkChangeMonitor,
-    timeout: Duration,
-    cancellation: &mut ProcessCancellation,
-) -> Result<
-    (
-        ferrum2_platform_windows::WindowsNetworkChangeMonitor,
-        Result<ferrum2_platform_windows::NetworkChangeWaitOutcome, RunError>,
-    ),
-    RunError,
-> {
-    let stop = monitor.stop_signal();
-    let mut waiting = tokio::task::spawn_blocking(move || {
-        let result = monitor.wait(timeout);
-        (monitor, result)
-    });
-    tokio::select! {
-        biased;
-        result = &mut waiting => {
-            let (monitor, outcome) = result.map_err(|_| RunError::RuntimeRoot)?;
-            Ok((monitor, outcome.map_err(|_| RunError::RuntimeRoot)))
-        }
-        _ = cancellation.cancelled() => {
-            let stopped = stop.signal();
-            let (monitor, outcome) = (&mut waiting)
-                .await
-                .map_err(|_| RunError::ShutdownCleanup)?;
-            let outcome = match (stopped, outcome) {
-                (Ok(()), Ok(_)) => Ok(ferrum2_platform_windows::NetworkChangeWaitOutcome::Stopped),
-                _ => Err(RunError::ShutdownCleanup),
-            };
-            Ok((monitor, outcome))
-        }
-    }
-}
-
-#[cfg(all(windows, not(test)))]
-async fn capture_next_network_snapshot(
-    catalog: &ferrum2_platform_windows::WindowsNetworkInterfaceCatalog,
-    coordinator: &NetworkResetCoordinator,
-) -> Result<Arc<NetworkSnapshot>, ()> {
-    let generation = coordinator
+    if reset
+        .coordinator
         .status()
         .published_generation()
         .checked_add(1)
-        .ok_or(())?;
-    let catalog = catalog.clone();
-    tokio::task::spawn_blocking(move || {
-        NetworkSnapshot::capture(generation, &catalog).map(Arc::new)
-    })
-    .await
-    .map_err(|_| ())?
-    .map_err(|_| ())
+        != Some(generation)
+    {
+        return Err(ferrum2_tun::TunNetworkResetError);
+    }
+    reset.reset(snapshot, reason).await
 }
 
 pub(super) type ClientNetworkResetAction = Arc<dyn Fn(u64) -> Result<(), ()> + Send + Sync>;
@@ -300,6 +234,8 @@ impl ResetNetwork for ClientNetworkResetHook {
 }
 
 pub(super) struct ClientNetworkResetRuntime {
+    #[cfg(all(windows, not(test)))]
+    sockets: Arc<crate::run::egress::ClientNetworkSocketService>,
     pub(super) coordinator: NetworkResetCoordinator,
     pub(super) hooks: [Arc<ClientNetworkResetHook>; 4],
     registrations: Mutex<Option<[NetworkResetHookRegistration; 4]>>,
@@ -310,7 +246,13 @@ pub(super) struct ClientNetworkResetRuntime {
 }
 
 impl ClientNetworkResetRuntime {
-    pub(super) fn new(context: &Arc<ClientContext>, coordinator: NetworkResetCoordinator) -> Self {
+    pub(super) fn new(
+        context: &Arc<ClientContext>,
+        coordinator: NetworkResetCoordinator,
+        #[cfg(all(windows, not(test)))] sockets: Arc<
+            crate::run::egress::ClientNetworkSocketService,
+        >,
+    ) -> Self {
         let initial_generation = coordinator.status().published_generation();
         let accept: ClientNetworkResetAction = Arc::new(|_| Ok(()));
         // The owner has already constructed the stack when it crosses the bounded bridge.
@@ -343,6 +285,8 @@ impl ClientNetworkResetRuntime {
         ));
         let hooks = [stack, router, outbound, inbound_dns];
         Self {
+            #[cfg(all(windows, not(test)))]
+            sockets,
             coordinator,
             hooks,
             registrations: Mutex::new(None),
@@ -419,6 +363,11 @@ impl ClientNetworkResetRuntime {
         if report.outcome() != NetworkResetOutcome::ResetCompleted {
             return Err(ferrum2_tun::TunNetworkResetError);
         }
+        #[cfg(all(windows, not(test)))]
+        self.sockets
+            .retire_generation(snapshot.generation().saturating_sub(1))
+            .await
+            .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
         let _ = self.take_hook_udp_associations();
         self.metrics.set_network_generation(snapshot.generation());
         Ok(())
@@ -444,6 +393,11 @@ impl ClientNetworkResetRuntime {
             .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
         match report.outcome() {
             NetworkResetOutcome::ResetCompleted => {
+                #[cfg(all(windows, not(test)))]
+                self.sockets
+                    .retire_generation(report.published_generation().saturating_sub(1))
+                    .await
+                    .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
                 self.metrics.network_associations_reset(
                     NetworkLifecycleOperation::ResetNetwork,
                     Transport::Udp,
@@ -470,6 +424,11 @@ impl ClientNetworkResetRuntime {
             .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
         match report.outcome() {
             NetworkResetOutcome::ResetCompleted => {
+                #[cfg(all(windows, not(test)))]
+                self.sockets
+                    .retire_generation(report.published_generation().saturating_sub(1))
+                    .await
+                    .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
                 self.metrics.network_associations_reset(
                     NetworkLifecycleOperation::ResetNetwork,
                     Transport::Udp,
@@ -503,6 +462,11 @@ impl ClientNetworkResetRuntime {
             .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
         match report.outcome() {
             NetworkResetOutcome::FullRebuildRequired(_) => {
+                #[cfg(all(windows, not(test)))]
+                self.sockets
+                    .retire_generation(report.published_generation())
+                    .await
+                    .map_err(|_| ferrum2_tun::TunNetworkResetError)?;
                 let udp_associations = self.egress.reset_network();
                 self.pending_full_rebuild_udp_associations
                     .fetch_add(udp_associations, Ordering::AcqRel);

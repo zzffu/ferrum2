@@ -177,3 +177,104 @@ fn validated_limits_freeze_defaults_and_inclusive_ranges() {
         assert_eq!(actual, Err(expected), "{label}");
     }
 }
+
+#[test]
+fn protocol_panic_retires_provisional_generation_without_poisoning_manager() {
+    for immediate in [false, true] {
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let manager = UdpSessionManager::new(limits(1), registry.clone());
+        let now = Instant::now();
+        let session = manager.reserve_session(now).expect("session");
+        let handle = session.handle();
+        let reservation = session
+            .reserve_datagram(UdpDirection::ToTarget, 7)
+            .expect("reservation");
+        let mut removals = manager.subscribe_removals();
+        let result = if immediate {
+            session
+                .commit_immediate_with(
+                    reservation,
+                    ip_datagram(b"request"),
+                    now,
+                    || -> Result<(), ()> { panic!("closed test fault") },
+                )
+                .map(|_| ())
+        } else {
+            session
+                .commit_with(
+                    reservation,
+                    ip_datagram(b"request"),
+                    now,
+                    || -> Result<(), ()> { panic!("closed test fault") },
+                )
+                .map(|_| ())
+        };
+        assert!(matches!(
+            result,
+            Err(UdpCommitError::Runtime(UdpRuntimeError::ProtocolPanicked))
+        ));
+        assert_eq!(removals.try_recv(), Ok(handle));
+        assert!(removals.try_recv().is_err());
+        assert!(manager.cleanup_failed());
+        assert_eq!(manager.session_count(), 0);
+        assert_eq!(registry.snapshot(), baseline);
+        let replacement = manager
+            .reserve_session(now)
+            .expect("manager lock remains usable");
+        assert_ne!(replacement.handle(), handle);
+        drop(replacement);
+        assert_eq!(registry.snapshot(), baseline);
+    }
+}
+
+#[test]
+fn live_protocol_panic_discards_only_its_exact_generation_and_pending_owners() {
+    let registry = OwnerRegistry::new();
+    let baseline = registry.snapshot();
+    let manager = UdpSessionManager::new(limits(2), registry.clone());
+    let now = Instant::now();
+    let first = manager.reserve_session(now).expect("first");
+    let reservation = first
+        .reserve_datagram(UdpDirection::ToTarget, 7)
+        .expect("first buffer");
+    let first = first
+        .commit(reservation, ip_datagram(b"request"), now)
+        .expect("first commit");
+    let second = manager.reserve_session(now).expect("second");
+    let reservation = second
+        .reserve_datagram(UdpDirection::ToTarget, 7)
+        .expect("second buffer");
+    let second = second
+        .commit(reservation, ip_datagram(b"request"), now)
+        .expect("second commit");
+    let pending = manager
+        .reserve_datagram(first, UdpDirection::ToTarget, 7)
+        .expect("pending");
+    let sibling = manager
+        .reserve_datagram(first, UdpDirection::ToClient, 7)
+        .expect("pending sibling");
+    assert!(matches!(
+        pending.commit_with(ip_datagram(b"request"), now, || -> Result<(), ()> {
+            panic!("closed test fault")
+        }),
+        Err(UdpCommitError::Runtime(UdpRuntimeError::ProtocolPanicked))
+    ));
+    drop(sibling);
+    assert_eq!(manager.session_count(), 1);
+    assert!(matches!(
+        manager.pop(first, UdpDirection::ToTarget),
+        Err(UdpRuntimeError::Cancelled)
+    ));
+    assert_eq!(
+        manager
+            .pop(second, UdpDirection::ToTarget)
+            .expect("other generation")
+            .expect("queued")
+            .datagram()
+            .payload(),
+        b"request"
+    );
+    manager.remove(second);
+    assert_eq!(registry.snapshot(), baseline);
+}

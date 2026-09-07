@@ -168,6 +168,7 @@ pub(super) fn record_udp_runtime_failure(metrics: &Metrics, error: UdpRuntimeErr
         UdpRuntimeError::BufferLimit => Reason::BufferLimit,
         UdpRuntimeError::QueueFull => Reason::QueueFull,
         UdpRuntimeError::Counter => Reason::Counter,
+        UdpRuntimeError::ProtocolPanicked | UdpRuntimeError::StateUnavailable => Reason::RelayIo,
         UdpRuntimeError::Resolve => Reason::Resolve,
         UdpRuntimeError::Send => Reason::Send,
         UdpRuntimeError::Receive => Reason::Receive,

@@ -101,6 +101,12 @@ fn upstream_spec(
 
 #[tokio::test]
 async fn direct_exact_server_resolves_domain_tcp_and_udp_without_policy_fallback() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let bootstrap = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("bootstrap DNS bind");
@@ -135,7 +141,10 @@ async fn direct_exact_server_resolves_domain_tcp_and_udp_without_policy_fallback
     );
     let logical = TargetAddr::domain("exact-upstream.test", upstream_address.port())
         .expect("logical upstream");
-    let egress = Arc::new(ServerDnsEgress::test(1).with_outbound_resolvers(vec![direct]));
+    let egress = Arc::new(
+        ServerDnsEgress::test(Arc::clone(&network_owner.sockets), 1)
+            .with_outbound_resolvers(vec![direct]),
+    );
     let (resolver, mut owner) = TaggedResolver::new(
         vec![
             upstream_spec(
@@ -193,10 +202,21 @@ async fn direct_exact_server_resolves_domain_tcp_and_udp_without_policy_fallback
     drop(resolver);
     owner.shutdown().await.expect("domain upstream shutdown");
     drop(tagged);
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 #[tokio::test]
 async fn direct_system_resolver_connects_domain_tcp() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("system target bind");
@@ -215,8 +235,10 @@ async fn direct_system_resolver_connects_domain_tcp() {
     );
     let system =
         ServerDnsResolver::for_direct(DirectDomainResolver::System, Arc::new(OnceLock::new()));
-    let egress =
-        Arc::new(ServerDnsEgress::test(2).with_outbound_resolvers(vec![unavailable, system]));
+    let egress = Arc::new(
+        ServerDnsEgress::test(Arc::clone(&network_owner.sockets), 2)
+            .with_outbound_resolvers(vec![unavailable, system]),
+    );
     let (resolver, mut owner) = TaggedResolver::new(
         vec![DnsUpstreamSpec {
             target: TargetAddr::domain("localhost", address.port()).expect("localhost target"),
@@ -248,10 +270,21 @@ async fn direct_system_resolver_connects_domain_tcp() {
     upstream.await.expect("system upstream join");
     drop(resolver);
     owner.shutdown().await.expect("system domain shutdown");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 #[tokio::test]
 async fn numeric_target_bypasses_uninitialized_exact_resolver() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("numeric target bind");
@@ -268,7 +301,10 @@ async fn numeric_target_bypasses_uninitialized_exact_resolver() {
         },
         Arc::new(OnceLock::new()),
     );
-    let egress = Arc::new(ServerDnsEgress::test(1).with_outbound_resolvers(vec![direct]));
+    let egress = Arc::new(
+        ServerDnsEgress::test(Arc::clone(&network_owner.sockets), 1)
+            .with_outbound_resolvers(vec![direct]),
+    );
     let (resolver, mut owner) = TaggedResolver::new(
         vec![upstream_spec(
             TargetAddr::ip(address).expect("numeric target"),
@@ -301,17 +337,31 @@ async fn numeric_target_bypasses_uninitialized_exact_resolver() {
     upstream.await.expect("numeric upstream join");
     drop(resolver);
     owner.shutdown().await.expect("numeric resolver shutdown");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 #[tokio::test]
 async fn domain_target_without_plan_fails_closed_before_connect() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("no-plan target bind");
     let address = listener.local_addr().expect("no-plan target address");
     let direct =
         ServerDnsResolver::for_direct(DirectDomainResolver::System, Arc::new(OnceLock::new()));
-    let egress = Arc::new(ServerDnsEgress::test(1).with_outbound_resolvers(vec![direct]));
+    let egress = Arc::new(
+        ServerDnsEgress::test(Arc::clone(&network_owner.sockets), 1)
+            .with_outbound_resolvers(vec![direct]),
+    );
     let (resolver, mut owner) = TaggedResolver::new(
         vec![upstream_spec(
             TargetAddr::domain("localhost", address.port()).expect("no-plan domain target"),
@@ -343,4 +393,9 @@ async fn domain_target_without_plan_fails_closed_before_connect() {
     );
     drop(resolver);
     owner.shutdown().await.expect("no-plan resolver shutdown");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }

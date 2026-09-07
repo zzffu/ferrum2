@@ -542,10 +542,12 @@ impl ServerPhysicalSocketContext {
                     Ok(stream)
                 }
                 Err(error) => {
-                    self.metrics.outbound_interface_resolution(
-                        interface_resolution_source(error.attempted_source()),
-                        interface_resolution_result(&error),
-                    );
+                    if let Some(source) = error.attempted_source() {
+                        self.metrics.outbound_interface_resolution(
+                            interface_resolution_source(source),
+                            interface_resolution_result(&error),
+                        );
+                    }
                     Err(closed_physical_socket_error())
                 }
             }
@@ -585,10 +587,12 @@ impl ServerPhysicalSocketContext {
                     Ok(socket)
                 }
                 Err(error) => {
-                    self.metrics.outbound_interface_resolution(
-                        interface_resolution_source(error.attempted_source()),
-                        interface_resolution_result(&error),
-                    );
+                    if let Some(source) = error.attempted_source() {
+                        self.metrics.outbound_interface_resolution(
+                            interface_resolution_source(source),
+                            interface_resolution_result(&error),
+                        );
+                    }
                     Err(closed_physical_socket_error())
                 }
             }
@@ -596,10 +600,11 @@ impl ServerPhysicalSocketContext {
     }
 
     #[cfg(test)]
-    pub(super) fn test(outbound_count: usize, metrics: Arc<Metrics>) -> Arc<Self> {
-        let registry = ferrum2_runtime::OwnerRegistry::new();
-        let sockets = super::tcp::prepare_server_network_socket_service(&registry, &metrics)
-            .expect("test network socket service");
+    pub(super) fn test(
+        sockets: Arc<super::network::ServerNetworkSocketService>,
+        outbound_count: usize,
+        metrics: Arc<Metrics>,
+    ) -> Arc<Self> {
         Arc::new(Self::new(
             sockets,
             vec![DialOptions::default(); outbound_count].into(),
@@ -630,9 +635,16 @@ impl ServerDnsEgress {
     }
 
     #[cfg(test)]
-    fn test(outbound_count: usize) -> Self {
+    fn test(
+        sockets: Arc<super::network::ServerNetworkSocketService>,
+        outbound_count: usize,
+    ) -> Self {
         let metrics = Arc::new(Metrics::new());
-        Self::new(ServerPhysicalSocketContext::test(outbound_count, metrics))
+        Self::new(ServerPhysicalSocketContext::test(
+            sockets,
+            outbound_count,
+            metrics,
+        ))
     }
 
     pub(super) fn with_outbound_resolvers(mut self, resolvers: Vec<ServerDnsResolver>) -> Self {

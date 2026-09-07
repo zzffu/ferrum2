@@ -279,6 +279,9 @@ pub(super) fn record_udp_runtime_error(
         UdpRuntimeError::Receive => (Reason::Receive, true),
         UdpRuntimeError::Idle => (Reason::Idle, true),
         UdpRuntimeError::Cancelled => (Reason::Cancelled, true),
+        UdpRuntimeError::ProtocolPanicked | UdpRuntimeError::StateUnavailable => {
+            (Reason::RelayIo, true)
+        }
     };
     if terminal {
         record_udp_terminal(context, Stage::Relay, reason, Outcome::Failed);

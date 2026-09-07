@@ -13,6 +13,12 @@ pub(super) fn materialized_server_test_config_source(
 
 #[tokio::test]
 async fn materialized_policy_proxy_composes_reject_cnip_cache_generation_and_no_fallback() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let listen = reserve_address();
     let local = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .await
@@ -157,7 +163,10 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         specs,
         dns.timeout,
         dns.max_inflight,
-        Arc::new(ServerDnsEgress::test(config.outbounds.len())),
+        Arc::new(ServerDnsEgress::test(
+            Arc::clone(&network_owner.sockets),
+            config.outbounds.len(),
+        )),
     )
     .expect("tagged DNS resolver");
     owner.ready().await.expect("tagged DNS ready");
@@ -270,10 +279,21 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     drop(udp);
     drop(state.take());
     owner.shutdown().await.expect("tagged DNS shutdown");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 #[tokio::test]
 async fn tagged_dns_selection_uses_authenticated_original_context_and_final() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let listen = reserve_address();
     let selected_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .await
@@ -401,7 +421,10 @@ async fn tagged_dns_selection_uses_authenticated_original_context_and_final() {
         )
         .await;
     });
-    let egress = Arc::new(ServerDnsEgress::test(config.outbounds.len()));
+    let egress = Arc::new(ServerDnsEgress::test(
+        Arc::clone(&network_owner.sockets),
+        config.outbounds.len(),
+    ));
     let (resolver, mut owner) = TaggedResolver::new(specs, dns.timeout, dns.max_inflight, egress)
         .expect("server DNS resolver");
     owner.ready().await.expect("server DNS resolver ready");
@@ -450,4 +473,9 @@ async fn tagged_dns_selection_uses_authenticated_original_context_and_final() {
         ferrum2_dns::RuntimeStats::default()
     );
     std::fs::remove_file(path).expect("remove server DNS policy config");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }

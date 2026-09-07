@@ -63,7 +63,7 @@ async fn rejected_udp_identity_stays_rejected_and_shares_protocol_session_ceilin
         async move {
             let _ = stopped.await;
         },
-        |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        |mut runtime| async move { runtime.shutdown(Duration::ZERO).await },
     ));
 
     let peer = udp_loopback().await;

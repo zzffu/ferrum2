@@ -54,6 +54,10 @@ pub struct OwnerSnapshot {
     pub network_runtime_owners: usize,
     /// Reset coordinator drivers currently holding serialized reset ownership.
     pub network_reset_drivers: usize,
+    /// Socket monitors reserved or accepted but not yet joined by their parent.
+    pub network_socket_monitors: usize,
+    /// Native snapshot captures accepted but not yet joined by their parent.
+    pub network_snapshot_captures: usize,
 }
 
 #[derive(Debug, Default)]
@@ -83,6 +87,8 @@ struct OwnerCounters {
     network_reset_hooks: AtomicUsize,
     network_runtime_owners: AtomicUsize,
     network_reset_drivers: AtomicUsize,
+    network_socket_monitors: AtomicUsize,
+    network_snapshot_captures: AtomicUsize,
 }
 
 /// Cloneable owner accounting used by deterministic lifecycle tests.
@@ -132,6 +138,14 @@ impl OwnerRegistry {
             network_reset_hooks: self.counters.network_reset_hooks.load(Ordering::Relaxed),
             network_runtime_owners: self.counters.network_runtime_owners.load(Ordering::Relaxed),
             network_reset_drivers: self.counters.network_reset_drivers.load(Ordering::Relaxed),
+            network_socket_monitors: self
+                .counters
+                .network_socket_monitors
+                .load(Ordering::Relaxed),
+            network_snapshot_captures: self
+                .counters
+                .network_snapshot_captures
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -230,6 +244,12 @@ impl OwnerRegistry {
         OwnerGuard::new(self, OwnerKind::NetworkRuntimeOwner)
     }
 
+    pub(crate) fn track_network_socket_monitor(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::NetworkSocketMonitor)
+    }
+    pub(crate) fn track_network_snapshot_capture(&self) -> OwnerGuard {
+        OwnerGuard::new(self, OwnerKind::NetworkSnapshotCapture)
+    }
     pub(crate) fn track_network_reset_driver(&self) -> OwnerGuard {
         OwnerGuard::new(self, OwnerKind::NetworkResetDriver)
     }
@@ -299,6 +319,8 @@ enum OwnerKind {
     NetworkResetHook,
     NetworkRuntimeOwner,
     NetworkResetDriver,
+    NetworkSocketMonitor,
+    NetworkSnapshotCapture,
 }
 
 /// Drop guard for one TCP flow owned by a TUN foundation stack.
@@ -368,6 +390,8 @@ fn counter(counters: &OwnerCounters, kind: OwnerKind) -> &AtomicUsize {
         OwnerKind::NetworkResetHook => &counters.network_reset_hooks,
         OwnerKind::NetworkRuntimeOwner => &counters.network_runtime_owners,
         OwnerKind::NetworkResetDriver => &counters.network_reset_drivers,
+        OwnerKind::NetworkSocketMonitor => &counters.network_socket_monitors,
+        OwnerKind::NetworkSnapshotCapture => &counters.network_snapshot_captures,
     }
 }
 
@@ -393,5 +417,7 @@ impl OwnerSnapshot {
             && self.network_reset_hooks == other.network_reset_hooks
             && self.network_runtime_owners == other.network_runtime_owners
             && self.network_reset_drivers == other.network_reset_drivers
+            && self.network_socket_monitors == other.network_socket_monitors
+            && self.network_snapshot_captures == other.network_snapshot_captures
     }
 }

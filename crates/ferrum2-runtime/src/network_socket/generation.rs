@@ -12,6 +12,8 @@ use ferrum2_net::ResolvedInterface;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::oneshot;
 
+use super::monitor_owner::{MonitorReservation, MonitorStop, NetworkSocketOwnerError};
+
 use crate::{
     DirectUdpSocket, NetworkRuntimeCancellation, NetworkRuntimeOwner,
     NetworkRuntimeOwnerCancellation,
@@ -27,11 +29,17 @@ pub struct GenerationBoundTcpStream<T> {
     closed: Arc<StdMutex<Option<NetworkRuntimeOwnerCancellation>>>,
     cancellation: StdMutex<Pin<Box<dyn Future<Output = NetworkRuntimeOwnerCancellation> + Send>>>,
     drop_signal: Option<oneshot::Sender<()>>,
-    _monitor: tokio::task::JoinHandle<()>,
 }
 
 impl<T: LocalEndpoint + Send + 'static> GenerationBoundTcpStream<T> {
-    pub(super) fn new(stream: T, resolved: ResolvedInterface, owner: NetworkRuntimeOwner) -> Self {
+    pub(super) fn new(
+        stream: T,
+        resolved: ResolvedInterface,
+        owner: NetworkRuntimeOwner,
+        reservation: MonitorReservation,
+    ) -> Result<Self, NetworkSocketOwnerError> {
+        let generation = resolved.snapshot_generation();
+        let mut stop = reservation.stop();
         let local_socket_addr = stream.local_socket_addr();
         let stream = Arc::new(StdMutex::new(Some(stream)));
         let closed = Arc::new(StdMutex::new(None));
@@ -43,11 +51,12 @@ impl<T: LocalEndpoint + Send + 'static> GenerationBoundTcpStream<T> {
         let monitor_owner = Arc::clone(&owner);
         let monitor_closed = Arc::clone(&closed);
         let (drop_signal, drop_receiver) = oneshot::channel();
-        let monitor = tokio::spawn(async move {
+        let monitor = async move {
             let terminal = tokio::select! {
                 biased;
                 cancellation = monitor_cancellation.cancelled() => Some(cancellation),
                 _ = drop_receiver => None,
+                () = stop.stopped() => None,
             };
             let mut stream_guard = lock_unpoisoned(&monitor_stream);
             let stream = stream_guard.take();
@@ -58,8 +67,9 @@ impl<T: LocalEndpoint + Send + 'static> GenerationBoundTcpStream<T> {
             let owner = lock_unpoisoned(&monitor_owner).take();
             drop(owner);
             drop(stream_guard);
-        });
-        Self {
+            Ok(())
+        };
+        let wrapped = Self {
             stream,
             owner,
             resolved,
@@ -69,8 +79,9 @@ impl<T: LocalEndpoint + Send + 'static> GenerationBoundTcpStream<T> {
                 operation_cancellation.cancelled().await
             })),
             drop_signal: Some(drop_signal),
-            _monitor: monitor,
-        }
+        };
+        reservation.spawn(generation, monitor)?;
+        Ok(wrapped)
     }
 }
 
@@ -280,14 +291,15 @@ pub struct GenerationBoundUdpSocket<T> {
     resource: Arc<StdMutex<Option<Arc<GenerationBoundUdpResource<T>>>>>,
     resolved: ResolvedInterface,
     cancellation: NetworkRuntimeCancellation,
+    stop: MonitorStop,
     closed: Arc<StdMutex<Option<NetworkRuntimeOwnerCancellation>>>,
     drop_signal: Option<oneshot::Sender<()>>,
-    _monitor: tokio::task::JoinHandle<()>,
 }
 
 struct GenerationBoundUdpResource<T> {
     socket: Option<T>,
     owner: Option<NetworkRuntimeOwner>,
+    dropped: Option<oneshot::Sender<()>>,
 }
 
 impl<T> GenerationBoundUdpResource<T> {
@@ -302,6 +314,9 @@ impl<T> Drop for GenerationBoundUdpResource<T> {
         drop(socket);
         let owner = self.owner.take();
         drop(owner);
+        if let Some(dropped) = self.dropped.take() {
+            let _ = dropped.send(());
+        }
     }
 }
 
@@ -320,33 +335,51 @@ fn close_generation_bound_udp_resource<T>(
 }
 
 impl<T: Send + Sync + 'static> GenerationBoundUdpSocket<T> {
-    pub(super) fn new(socket: T, resolved: ResolvedInterface, owner: NetworkRuntimeOwner) -> Self {
+    pub(super) fn new(
+        socket: T,
+        resolved: ResolvedInterface,
+        owner: NetworkRuntimeOwner,
+        reservation: MonitorReservation,
+    ) -> Result<Self, NetworkSocketOwnerError> {
+        let generation = resolved.snapshot_generation();
+        let stop = reservation.stop();
+        let mut monitor_stop = stop.clone();
+        let (dropped, physical_drop) = oneshot::channel();
         let cancellation = owner.cancellation();
         let mut monitor_cancellation = cancellation.clone();
         let resource = Arc::new(StdMutex::new(Some(Arc::new(GenerationBoundUdpResource {
             socket: Some(socket),
             owner: Some(owner),
+            dropped: Some(dropped),
         }))));
         let closed = Arc::new(StdMutex::new(None));
         let monitor_resource = Arc::clone(&resource);
         let monitor_closed = Arc::clone(&closed);
         let (drop_signal, drop_receiver) = oneshot::channel();
-        let monitor = tokio::spawn(async move {
+        let monitor = async move {
             let terminal = tokio::select! {
                 biased;
                 cancellation = monitor_cancellation.cancelled() => Some(cancellation),
                 _ = drop_receiver => None,
+                () = monitor_stop.stopped() => None,
             };
             close_generation_bound_udp_resource(&monitor_resource, &monitor_closed, terminal);
-        });
-        Self {
+            // Operation-held Arcs keep the actual socket and acknowledgement alive.
+            // A monitor joins only after that final physical Drop has happened.
+            physical_drop
+                .await
+                .map_err(|_| NetworkSocketOwnerError::WorkerFailed)
+        };
+        let wrapped = Self {
             resource,
             resolved,
             cancellation,
+            stop,
             closed,
             drop_signal: Some(drop_signal),
-            _monitor: monitor,
-        }
+        };
+        reservation.spawn(generation, monitor)?;
+        Ok(wrapped)
     }
 }
 
@@ -416,9 +449,14 @@ impl<T> fmt::Debug for GenerationBoundUdpSocket<T> {
 impl<T: DirectUdpSocket> DirectUdpSocket for GenerationBoundUdpSocket<T> {
     async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
         let mut cancellation = self.cancellation.clone();
+        let mut stop = self.stop.clone();
         let outcome = tokio::select! {
             biased;
             cancellation = cancellation.cancelled() => Err(cancellation),
+            () = stop.stopped() => {
+                close_generation_bound_udp_resource(&self.resource, &self.closed, None);
+                return Err(closed_resource_io_error());
+            }
             result = async {
                 let resource = self.live_resource()?;
                 resource.socket().send_to(payload, target).await
@@ -442,9 +480,14 @@ impl<T: DirectUdpSocket> DirectUdpSocket for GenerationBoundUdpSocket<T> {
 
     async fn readable(&self) -> io::Result<()> {
         let mut cancellation = self.cancellation.clone();
+        let mut stop = self.stop.clone();
         let outcome = tokio::select! {
             biased;
             cancellation = cancellation.cancelled() => Err(cancellation),
+            () = stop.stopped() => {
+                close_generation_bound_udp_resource(&self.resource, &self.closed, None);
+                return Err(closed_resource_io_error());
+            }
             result = async {
                 let resource = self.live_resource()?;
                 resource.socket().readable().await
@@ -468,9 +511,14 @@ impl<T: DirectUdpSocket> DirectUdpSocket for GenerationBoundUdpSocket<T> {
 
     async fn recv_buf_from(&self, payload: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
         let mut cancellation = self.cancellation.clone();
+        let mut stop = self.stop.clone();
         let outcome = tokio::select! {
             biased;
             cancellation = cancellation.cancelled() => Err(cancellation),
+            () = stop.stopped() => {
+                close_generation_bound_udp_resource(&self.resource, &self.closed, None);
+                return Err(closed_resource_io_error());
+            }
             result = async {
                 let resource = self.live_resource()?;
                 resource.socket().recv_buf_from(payload).await
@@ -541,3 +589,6 @@ fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
+
+#[cfg(test)]
+mod tests;

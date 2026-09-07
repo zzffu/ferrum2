@@ -46,7 +46,7 @@ async fn listener_readiness_drain_yields_at_32_with_shutdown_priority() {
         async move {
             let _ = stopped.await;
         },
-        |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        |mut runtime| async move { runtime.shutdown(Duration::ZERO).await },
     ));
 
     tokio::time::timeout(
@@ -211,5 +211,120 @@ async fn udp_shared_roots_drain_external_and_force_fatal_without_early_cleanup()
             assert_eq!(&*sent.lock().expect("scripted sends"), &[peer]);
         }
         std::fs::remove_file(path).expect("remove terminal UDP config");
+    }
+}
+
+#[tokio::test]
+async fn direct_terminal_is_observed_while_listener_waits_without_another_packet() {
+    #[derive(Clone, Copy)]
+    enum Fault {
+        Send,
+        Panic,
+    }
+    struct FaultSocket(Fault);
+    impl ferrum2_runtime::DirectUdpSocket for FaultSocket {
+        async fn send_to(&self, _: &[u8], _: SocketAddr) -> io::Result<usize> {
+            match self.0 {
+                Fault::Send => Err(io::Error::other("discarded injected socket source")),
+                Fault::Panic => panic!("closed injected Direct fault"),
+            }
+        }
+        async fn readable(&self) -> io::Result<()> {
+            std::future::pending().await
+        }
+        async fn recv_buf_from(&self, _: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+            std::future::pending().await
+        }
+        fn try_recv_buf_from(&self, _: &mut BytesMut) -> io::Result<(usize, SocketAddr)> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+    struct FaultFactory(Fault);
+    impl DirectUdpSocketFactory for FaultFactory {
+        type Socket = FaultSocket;
+        type OpenContext = Option<ServerUdpNetworkPolicy>;
+        async fn open(&self, _: Self::OpenContext, _: SocketAddr) -> io::Result<Self::Socket> {
+            Ok(FaultSocket(self.0))
+        }
+    }
+    for fault in [Fault::Send, Fault::Panic] {
+        let (path, config) = server_test_config(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1));
+        let keys = aes_keys();
+        let clock = Arc::new(SystemClock::new());
+        let mut client = UdpClientSession::new(&keys, &SystemRandom, |_| false).unwrap();
+        let wire = encoded_udp_request(
+            &mut client,
+            &clock,
+            TargetAddr::ip("127.0.0.1:9000".parse().unwrap()).unwrap(),
+            b"request",
+        );
+        let listener = Arc::new(AdmissionUdpListener {
+            request: Mutex::new(Some((wire, "127.0.0.1:49152".parse().unwrap()))),
+        });
+        let registry = OwnerRegistry::new();
+        let baseline = active(registry.snapshot());
+        let metrics = Arc::new(Metrics::new());
+        let prepared = prepare_udp_server_with_socket_factory(
+            0,
+            listener,
+            ServerUdpShared {
+                routing: Arc::new(ServerRouting {
+                    program: config.route,
+                    outbound_count: config.outbounds.len(),
+                }),
+                protocol: Arc::new(UdpServer::new(&keys).unwrap()),
+                clock,
+                config: config.udp,
+                sessions: UdpSessionManager::new(
+                    udp_runtime_limits(&config.udp).unwrap(),
+                    registry.clone(),
+                ),
+                mappings: Arc::new(UdpMappings::new(config.udp.max_sessions)),
+                admission: Arc::new(tokio::sync::Mutex::new(())),
+                connect_timeout: config.runtime.connect_timeout,
+                direct_resolvers: vec![dns_egress::ServerDnsResolver::new(None)].into(),
+                registry: registry.clone(),
+                metrics: Arc::clone(&metrics),
+            },
+            FaultFactory(fault),
+        )
+        .unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(prepared.run_with_shutdown(
+            async move {
+                let _ = stopped.await;
+            },
+            |mut runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        ));
+        let reason = match fault {
+            Fault::Send => "send",
+            Fault::Panic => "relay_io",
+        };
+        let expected = format!(
+            "ferrum2_udp_failures_total{{role=\"server\",stage=\"direct\",reason=\"{reason}\"}} 1"
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !metrics.encode_text().unwrap().contains(&expected) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("joined terminal observed without another datagram");
+        match fault {
+            Fault::Send => {
+                assert!(
+                    !task.is_finished(),
+                    "one target failure must not terminate listener"
+                );
+                stop.send(()).unwrap();
+                assert_eq!(task.await.unwrap(), Ok(()));
+            }
+            Fault::Panic => assert_eq!(task.await.unwrap(), Err(RunError::RuntimeRoot)),
+        }
+        let text = metrics.encode_text().unwrap();
+        assert!(text.contains(&expected));
+        assert!(!text.contains("discarded injected socket source"));
+        assert_eq!(active(registry.snapshot()), baseline);
+        std::fs::remove_file(path).unwrap();
     }
 }

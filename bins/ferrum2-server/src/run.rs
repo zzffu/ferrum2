@@ -20,6 +20,9 @@ mod dns;
 mod dns_egress;
 mod materialize;
 mod network;
+mod network_owner;
+#[cfg(any(windows, test))]
+mod network_wait;
 mod observation;
 mod routing;
 mod tcp;
@@ -28,11 +31,6 @@ mod tokio_io;
 mod udp;
 
 use dns::{ServerDnsDependentRoot, ServerDnsDrain, ServerDnsRoot};
-use network::ServerNetworkSocketService;
-#[cfg(all(windows, not(test)))]
-use network::prepare_server_network_runtime;
-#[cfg(any(not(windows), test))]
-use network::prepare_server_network_socket_service;
 use observation::{ServerMetricsRoot, log_level};
 use routing::ServerRouting;
 use tcp::{ServerContext, ServerTcpListeners, ServerTcpRoot};
@@ -190,13 +188,8 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
         let result = async {
             let metrics = Arc::new(Metrics::new());
             let registry = OwnerRegistry::new();
-            #[cfg(all(windows, not(test)))]
-            let (network_sockets, network_change_monitor) =
-                prepare_server_network_runtime(&registry, &metrics)?;
-            #[cfg(all(windows, not(test)))]
-            let mut network_change_monitor = Some(network_change_monitor);
-            #[cfg(any(not(windows), test))]
-            let network_sockets = prepare_server_network_socket_service(&registry, &metrics)?;
+            let mut network = network_owner::ServerNetworkRuntime::prepare(&registry, &metrics)?;
+            let network_sockets = Arc::clone(&network.sockets);
             let result = async {
                 let materializer = materialize::ServerV2Materializer::with_network_sockets(
                     system.clone(),
@@ -232,20 +225,13 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
                         materialized_cache,
                         dns_specs,
                         materialized: true,
-                        network_sockets: Some(network_sockets),
-                        #[cfg(all(windows, not(test)))]
-                        network_change_monitor: network_change_monitor
-                            .take()
-                            .ok_or(RunError::StartupRuntime)?,
+                        network: Some(network.run_parts()),
                     },
                 )
                 .await
             }
             .await;
-            #[cfg(all(windows, not(test)))]
-            if let Some(monitor) = network_change_monitor {
-                network::close_server_network_change_monitor(monitor)?;
-            }
+            network.shutdown().await?;
             result
         }
         .await;
@@ -276,11 +262,8 @@ pub(crate) fn materialize_only(prepared: PreparedServerV2) -> Result<(), RunErro
         let result = async {
             let metrics = Arc::new(Metrics::new());
             let registry = OwnerRegistry::new();
-            #[cfg(all(windows, not(test)))]
-            let (network_sockets, network_change_monitor) =
-                prepare_server_network_runtime(&registry, &metrics)?;
-            #[cfg(any(not(windows), test))]
-            let network_sockets = prepare_server_network_socket_service(&registry, &metrics)?;
+            let mut network = network_owner::ServerNetworkRuntime::prepare(&registry, &metrics)?;
+            let network_sockets = Arc::clone(&network.sockets);
             let materializer = materialize::ServerV2Materializer::with_network_sockets(
                 system.clone(),
                 metrics,
@@ -290,8 +273,7 @@ pub(crate) fn materialize_only(prepared: PreparedServerV2) -> Result<(), RunErro
                 Ok(materialized) => materialized.validate_only().map(drop),
                 Err(error) => Err(error),
             };
-            #[cfg(all(windows, not(test)))]
-            network::close_server_network_change_monitor(network_change_monitor)?;
+            network.shutdown().await?;
             result
         }
         .await;
@@ -308,9 +290,7 @@ struct ServerRunResources {
     materialized_cache: Option<DnsCache>,
     dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
     materialized: bool,
-    network_sockets: Option<Arc<ServerNetworkSocketService>>,
-    #[cfg(all(windows, not(test)))]
-    network_change_monitor: ferrum2_platform_windows::WindowsNetworkChangeMonitor,
+    network: Option<network_owner::ServerNetworkRunParts>,
 }
 
 impl ServerRunResources {
@@ -321,7 +301,7 @@ impl ServerRunResources {
             materialized_cache: None,
             dns_specs,
             materialized: false,
-            network_sockets: None,
+            network: None,
         }
     }
 }
@@ -365,12 +345,8 @@ where
         materialized_cache,
         dns_specs,
         materialized,
-        network_sockets,
-        #[cfg(all(windows, not(test)))]
-        network_change_monitor,
+        network,
     } = resources;
-    #[cfg(all(windows, not(test)))]
-    let mut network_change_monitor = Some(network_change_monitor);
     let result = async {
         publish_rule_program_metadata(&config, &metrics);
         let route_network = Arc::new(runtime_route_network(&config.route_network));
@@ -380,19 +356,14 @@ where
             .map(|outbound| runtime_dial_options(outbound.dial_options()))
             .collect::<Vec<_>>()
             .into();
-        let network_sockets = match network_sockets {
-            Some(network_sockets) => network_sockets,
-            None => {
-                #[cfg(test)]
-                {
-                    prepare_server_network_socket_service(&registry, &metrics)?
-                }
-                #[cfg(not(test))]
-                {
-                    return Err(RunError::StartupRuntime);
-                }
-            }
-        };
+        let network_owner::ServerNetworkRunParts {
+            sockets: network_sockets,
+            process_resources,
+            #[cfg(all(windows, not(test)))]
+                waiter: network_change_monitor,
+            #[cfg(all(windows, not(test)))]
+            retirement,
+        } = network.ok_or(RunError::StartupRuntime)?;
         let physical_sockets = Arc::new(dns_egress::ServerPhysicalSocketContext::new(
             Arc::clone(&network_sockets),
             Arc::clone(&outbound_dial_options),
@@ -648,29 +619,24 @@ where
         roots.insert(
             0,
             network::network_change_process_root(
-                network_change_monitor
-                    .take()
-                    .ok_or(RunError::StartupRuntime)?,
+                network_change_monitor,
                 Arc::clone(&network_sockets),
+                retirement,
                 network_change_metrics,
                 udp_network_reset,
             ),
         );
         let supervisor = ProcessSupervisor::new(roots, shutdown_grace, registry)
-            .map_err(|_| RunError::StartupProtocol)?;
+            .map_err(|_| RunError::StartupProtocol)?
+            .with_process_resources(process_resources);
         report_result(supervisor.run_until(shutdown).await)
     }
     .await;
-    let result = if let Some(mut root) = materialization_root {
+    if let Some(mut root) = materialization_root {
         result.and(root.cleanup().await)
     } else {
         result
-    };
-    #[cfg(all(windows, not(test)))]
-    if let Some(monitor) = network_change_monitor {
-        network::close_server_network_change_monitor(monitor)?;
     }
-    result
 }
 
 fn publish_rule_program_metadata(config: &ValidatedServerConfig, metrics: &Metrics) {
@@ -736,7 +702,7 @@ async fn run_with_registry_prepared<S>(
     registry: OwnerRegistry,
     shutdown: S,
     metrics: Arc<Metrics>,
-    resources: ServerRunResources,
+    mut resources: ServerRunResources,
 ) -> Result<(), RunError>
 where
     S: std::future::Future<Output = ()> + Send,
@@ -752,13 +718,17 @@ where
         config.runtime.connect_timeout,
     )
     .map_err(|_| RunError::StartupRuntime)?;
+    let mut network = network_owner::ServerNetworkRuntime::prepare(&registry, &metrics)?;
+    resources.network = Some(network.run_parts());
     let result = run_with_registry_prepared_using_system(
         system, config, registry, shutdown, metrics, resources,
     )
     .await;
+    let network_cleanup = network.shutdown().await;
     owner
         .shutdown()
         .await
         .map_err(|_| RunError::ShutdownCleanup)?;
+    network_cleanup?;
     result
 }

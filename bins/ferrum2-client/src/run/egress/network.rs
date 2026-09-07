@@ -174,6 +174,7 @@ type ClientPlatformNetworkSocketService = ferrum2_runtime::NetworkSocketService<
 #[cfg(all(windows, not(test)))]
 pub(in crate::run) struct ClientNetworkSocketService {
     inner: ClientPlatformNetworkSocketService,
+    retirement: std::sync::Weak<tokio::sync::Mutex<ferrum2_runtime::NetworkSocketOwner>>,
     metrics: Arc<Metrics>,
     reset_hub: ClientNetworkResetHub,
 }
@@ -184,18 +185,48 @@ impl ClientNetworkSocketService {
         coordinator: NetworkResetCoordinator,
         catalog: ferrum2_platform_windows::WindowsNetworkInterfaceCatalog,
         metrics: Arc<Metrics>,
-    ) -> Self {
-        Self {
-            inner: ferrum2_runtime::NetworkSocketService::new(
-                coordinator,
-                ferrum2_net::NetworkInterfaceResolver::new(catalog),
-                ferrum2_runtime::SystemNetworkSocketOperations::new(
-                    ferrum2_platform_windows::WindowsResolvedSocketBinder,
-                ),
+        registry: ferrum2_runtime::OwnerRegistry,
+    ) -> (
+        Self,
+        Arc<tokio::sync::Mutex<ferrum2_runtime::NetworkSocketOwner>>,
+    ) {
+        let (inner, owner) = ferrum2_runtime::NetworkSocketService::new(
+            coordinator,
+            ferrum2_net::NetworkInterfaceResolver::new(catalog),
+            ferrum2_runtime::SystemNetworkSocketOperations::new(
+                ferrum2_platform_windows::WindowsResolvedSocketBinder,
             ),
-            metrics,
-            reset_hub: ClientNetworkResetHub::default(),
-        }
+            ferrum2_runtime::NetworkResetLimits::default(),
+            registry,
+        );
+        let owner = Arc::new(tokio::sync::Mutex::new(owner));
+        (
+            Self {
+                inner,
+                retirement: Arc::downgrade(&owner),
+                metrics,
+                reset_hub: ClientNetworkResetHub::default(),
+            },
+            owner,
+        )
+    }
+
+    pub(in crate::run) async fn capture_snapshot(
+        &self,
+        generation: u64,
+    ) -> Result<ferrum2_net::NetworkSnapshot, ferrum2_runtime::NetworkSocketOwnerError> {
+        self.inner.capture_snapshot(generation).await
+    }
+
+    pub(in crate::run) async fn retire_generation(
+        &self,
+        generation: u64,
+    ) -> Result<(), ferrum2_runtime::NetworkSocketOwnerError> {
+        let owner = self
+            .retirement
+            .upgrade()
+            .ok_or(ferrum2_runtime::NetworkSocketOwnerError::Closed)?;
+        owner.lock().await.retire_generation(generation).await
     }
 
     fn published_generation(&self) -> u64 {
@@ -228,11 +259,15 @@ impl ClientNetworkSocketService {
             Ok(stream) => {
                 record_interface_resolution_success(&self.metrics, stream.resolved_interface())
             }
-            Err(error) => record_interface_resolution(
-                &self.metrics,
-                error.attempted_source(),
-                interface_resolution_result(error),
-            ),
+            Err(error) => {
+                if let Some(source) = error.attempted_source() {
+                    record_interface_resolution(
+                        &self.metrics,
+                        source,
+                        interface_resolution_result(error),
+                    );
+                }
+            }
         }
         result
     }
@@ -257,11 +292,15 @@ impl ClientNetworkSocketService {
             Ok(socket) => {
                 record_interface_resolution_success(&self.metrics, socket.resolved_interface())
             }
-            Err(error) => record_interface_resolution(
-                &self.metrics,
-                error.attempted_source(),
-                interface_resolution_result(error),
-            ),
+            Err(error) => {
+                if let Some(source) = error.attempted_source() {
+                    record_interface_resolution(
+                        &self.metrics,
+                        source,
+                        interface_resolution_result(error),
+                    );
+                }
+            }
         }
         result
     }
@@ -420,6 +459,7 @@ pub(in crate::run) fn interface_resolution_result<E>(
     error: &NetworkSocketServiceError<E>,
 ) -> InterfaceResolutionResult {
     match error {
+        NetworkSocketServiceError::Owner(_) => InterfaceResolutionResult::Failure,
         NetworkSocketServiceError::Admission(
             NetworkRuntimeResourceAdmissionError::InterfaceResolution(_)
             | NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged { .. },
@@ -438,6 +478,7 @@ pub(in crate::run) fn connect_error_from_network_service<E>(
     error: NetworkSocketServiceError<SystemNetworkSocketError<E>>,
 ) -> ConnectError {
     let kind = match error {
+        NetworkSocketServiceError::Owner(_) => ConnectErrorKind::Other,
         NetworkSocketServiceError::Connection {
             error: SystemNetworkSocketError::Socket(error),
             ..
@@ -499,6 +540,7 @@ pub(in crate::run) fn io_error_from_network_service<E>(
     error: NetworkSocketServiceError<SystemNetworkSocketError<E>>,
 ) -> io::Error {
     let kind = match error {
+        NetworkSocketServiceError::Owner(_) => io::ErrorKind::Other,
         NetworkSocketServiceError::Connection {
             error: SystemNetworkSocketError::Socket(error),
             ..

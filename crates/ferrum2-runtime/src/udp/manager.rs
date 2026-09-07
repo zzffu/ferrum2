@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::{Notify, Semaphore, broadcast, watch};
 use tokio::time::Instant;
@@ -30,6 +30,7 @@ pub(super) struct SessionState {
     pub(super) entries: BTreeMap<u32, SessionEntry>,
     pub(super) next_generation: u64,
     pub(super) shutting_down: bool,
+    pub(super) cleanup_failed: bool,
 }
 
 pub(super) struct UdpSessionManagerInner {
@@ -88,12 +89,12 @@ impl UdpSessionManager {
 
     /// Returns the number of live committed and provisional session owners.
     pub fn session_count(&self) -> usize {
-        self.inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned")
-            .entries
-            .len()
+        lock_state(&self.inner).entries.len()
+    }
+
+    /// Reports a sticky contained protocol panic or internal cleanup invariant failure.
+    pub fn cleanup_failed(&self) -> bool {
+        lock_state(&self.inner).cleanup_failed
     }
 
     /// Subscribes to exact generation removals for event-driven mapping
@@ -108,11 +109,7 @@ impl UdpSessionManager {
     /// not live. Queue and buffer capacity do not affect liveness, and this
     /// check does not reserve capacity, refresh activity, or wake workers.
     pub fn retain_live_sessions(&self, handles: &mut Vec<UdpSessionHandle>) {
-        let state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let state = lock_state(&self.inner);
         if state.shutting_down {
             handles.clear();
             return;
@@ -130,11 +127,7 @@ impl UdpSessionManager {
     /// At capacity, exactly the deterministic oldest committed idle-expired
     /// entry is removed. Active and provisional state is never evicted.
     pub fn reserve_session(&self, now: Instant) -> Result<PendingUdpSession, UdpRuntimeError> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let mut state = lock_state(&self.inner);
         if state.shutting_down {
             return Err(UdpRuntimeError::Cancelled);
         }
@@ -231,11 +224,7 @@ impl UdpSessionManager {
 
     /// Removes one exact generation and invalidates every late capability.
     pub fn remove(&self, handle: UdpSessionHandle) -> bool {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let mut state = lock_state(&self.inner);
         let removed = if entry_matches(&state, handle) {
             remove_entry(&mut state, handle.slot)
         } else {
@@ -254,11 +243,7 @@ impl UdpSessionManager {
     ///
     /// If permanent shutdown has already started, this operation does not reopen admission.
     pub fn reset_all(&self) -> usize {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let mut state = lock_state(&self.inner);
         let slots: Vec<_> = state.entries.keys().copied().collect();
         let removed: Vec<_> = slots
             .into_iter()
@@ -274,11 +259,7 @@ impl UdpSessionManager {
 
     /// Removes every session and wakes every owned worker.
     pub fn cancel_all(&self) {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let mut state = lock_state(&self.inner);
         state.shutting_down = true;
         let slots: Vec<_> = state.entries.keys().copied().collect();
         let removed: Vec<_> = slots
@@ -293,11 +274,7 @@ impl UdpSessionManager {
 
     /// Requests shutdown without discarding already admitted queue entries.
     pub fn signal_all(&self) {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let mut state = lock_state(&self.inner);
         state.shutting_down = true;
         for entry in state.entries.values() {
             entry.cancellation.send_replace(true);
@@ -311,11 +288,7 @@ impl UdpSessionManager {
         handle: UdpSessionHandle,
         direction: UdpDirection,
     ) -> Result<Option<AccountedDatagram>, UdpRuntimeError> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let mut state = lock_state(&self.inner);
         let entry = matching_entry_mut(&mut state, handle)?;
         if !entry.committed {
             return Err(UdpRuntimeError::Cancelled);
@@ -329,11 +302,7 @@ impl UdpSessionManager {
         &self,
         handle: UdpSessionHandle,
     ) -> Result<(), UdpRuntimeError> {
-        let state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let state = lock_state(&self.inner);
         if state.shutting_down {
             return Err(UdpRuntimeError::Cancelled);
         }
@@ -353,11 +322,7 @@ impl UdpSessionManager {
         handle: UdpSessionHandle,
         now: Instant,
     ) -> Result<(), UdpRuntimeError> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let mut state = lock_state(&self.inner);
         if state.shutting_down {
             return Err(UdpRuntimeError::Cancelled);
         }
@@ -374,31 +339,19 @@ impl UdpSessionManager {
         &self,
         handle: UdpSessionHandle,
     ) -> Result<watch::Receiver<bool>, UdpRuntimeError> {
-        let state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let state = lock_state(&self.inner);
         let entry = matching_entry(&state, handle)?;
         Ok(entry.cancellation.subscribe())
     }
 
     pub(super) fn notify(&self, handle: UdpSessionHandle) -> Result<Arc<Notify>, UdpRuntimeError> {
-        let state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let state = lock_state(&self.inner);
         Ok(Arc::clone(&matching_entry(&state, handle)?.notify))
     }
 
     /// Returns the manager-owned idle deadline for one exact live generation.
     pub fn idle_deadline(&self, handle: UdpSessionHandle) -> Result<Instant, UdpRuntimeError> {
-        let state = self
-            .inner
-            .state
-            .lock()
-            .expect("UDP session state lock poisoned");
+        let state = lock_state(&self.inner);
         Ok(matching_entry(&state, handle)?.last_activity + self.inner.limits.idle_timeout())
     }
 }
@@ -485,4 +438,91 @@ pub(super) fn remove_entry(state: &mut SessionState, slot: u32) -> Option<UdpSes
 
 pub(super) fn publish_removal(manager: &UdpSessionManagerInner, handle: UdpSessionHandle) {
     let _ = manager.removal_events.send(handle);
+}
+
+/// A poisoned manager is destructively retired, never restored for ordinary use.
+pub(super) fn lock_state(manager: &UdpSessionManagerInner) -> MutexGuard<'_, SessionState> {
+    match manager.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => {
+            let mut state = poisoned.into_inner();
+            state.shutting_down = true;
+            state.cleanup_failed = true;
+            for (slot, entry) in std::mem::take(&mut state.entries) {
+                entry.cancellation.send_replace(true);
+                entry.notify.notify_waiters();
+                publish_removal(
+                    manager,
+                    UdpSessionHandle {
+                        slot,
+                        generation: entry.generation,
+                    },
+                );
+            }
+            state
+        }
+    }
+}
+
+pub(super) fn retire_exact(
+    manager: &UdpSessionManagerInner,
+    state: &mut SessionState,
+    handle: UdpSessionHandle,
+) {
+    if entry_matches(state, handle)
+        && let Some(removed) = remove_entry(state, handle.slot)
+    {
+        publish_removal(manager, removed);
+    }
+}
+
+pub(super) fn release_pending(
+    manager: &UdpSessionManagerInner,
+    state: &mut SessionState,
+    handle: UdpSessionHandle,
+    direction: UdpDirection,
+) {
+    if let Ok(entry) = matching_entry_mut(state, handle) {
+        let pending = &mut entry.pending[direction.index()];
+        if let Some(remaining) = pending.checked_sub(1) {
+            *pending = remaining;
+        } else {
+            state.cleanup_failed = true;
+            retire_exact(manager, state, handle);
+        }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn unexpected_manager_poison_closes_admission_and_pending_drop_only_retires() {
+        let registry = OwnerRegistry::new();
+        let baseline = registry.snapshot();
+        let manager = UdpSessionManager::new(UdpRuntimeLimits::default(), registry.clone());
+        let pending = manager
+            .reserve_session(Instant::now())
+            .expect("pending session");
+        let datagram = pending
+            .reserve_datagram(UdpDirection::ToTarget, 7)
+            .expect("pending datagram");
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _guard = manager.inner.state.lock().expect("healthy lock");
+                panic!("closed internal fault");
+            }))
+            .is_err()
+        );
+        assert!(catch_unwind(AssertUnwindSafe(|| drop((datagram, pending)))).is_ok());
+        assert!(manager.cleanup_failed());
+        assert!(matches!(
+            manager.reserve_session(Instant::now()),
+            Err(UdpRuntimeError::Cancelled)
+        ));
+        assert_eq!(manager.session_count(), 0);
+        assert_eq!(registry.snapshot(), baseline);
+    }
 }

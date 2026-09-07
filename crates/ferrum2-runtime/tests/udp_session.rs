@@ -128,7 +128,7 @@ async fn global_byte_permits_use_exact_capacity_and_release_after_moves() {
     let manager = UdpSessionManager::new(limits(2), registry.clone());
     let (first_socket, _) = socket_fixture(Duration::ZERO, []);
     let (second_socket, _) = socket_fixture(Duration::ZERO, []);
-    let first = shared_runtime(manager.clone(), &registry, first_socket);
+    let mut first = shared_runtime(manager.clone(), &registry, first_socket);
     let mut second = shared_runtime(manager, &registry, second_socket);
     let budget = first.sessions().buffer_budget();
     let mut reservations = Vec::new();

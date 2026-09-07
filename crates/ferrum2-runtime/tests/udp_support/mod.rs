@@ -248,12 +248,24 @@ type ScriptedRuntime = DirectUdpRuntime<ScriptedResolver, ScriptedFactory, Recor
 pub(crate) struct UdpProcessRoot(pub(crate) ScriptedRuntime);
 
 impl PreparedProcessRoot<()> for UdpProcessRoot {
+    fn take_run_cleanup(&mut self) -> Option<ProcessFuture<Result<(), ()>>> {
+        let mut cleanup = self.0.take_cleanup()?;
+        Some(Box::pin(async move {
+            let report = cleanup.shutdown(Duration::ZERO).await;
+            if report.cleanup_failed() {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }))
+    }
+
     fn activate(&mut self) -> Result<(), ()> {
         Ok(())
     }
 
     fn run(
-        self: Box<Self>,
+        mut self: Box<Self>,
         mut cancellation: ProcessCancellation,
     ) -> ProcessFuture<Result<(), ()>> {
         Box::pin(async move {
@@ -263,7 +275,7 @@ impl PreparedProcessRoot<()> for UdpProcessRoot {
         })
     }
 
-    fn rollback(self: Box<Self>) -> ProcessFuture<Result<(), ()>> {
+    fn rollback(mut self: Box<Self>) -> ProcessFuture<Result<(), ()>> {
         Box::pin(async move {
             self.0.shutdown(Duration::ZERO).await;
             Ok(())

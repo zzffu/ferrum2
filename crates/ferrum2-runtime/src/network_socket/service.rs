@@ -1,5 +1,8 @@
+use super::monitor_owner::{NetworkSocketOwner, NetworkSocketOwnerError, Registrar};
 use std::fmt;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use ferrum2_net::{
     DialOptions, InterfaceSelectionSource, NetworkInterfaceCatalog, NetworkInterfaceResolver,
@@ -21,32 +24,46 @@ use super::operations::NetworkSocketOperations;
 /// coordinator. Generation races retry that whole sequence at most once.
 pub struct NetworkSocketService<C, O> {
     coordinator: NetworkResetCoordinator,
-    resolver: NetworkInterfaceResolver<C>,
-    operations: O,
+    resolver: Arc<NetworkInterfaceResolver<C>>,
+    operations: Arc<O>,
+    registrar: Registrar,
 }
 
 impl<C, O> NetworkSocketService<C, O> {
-    pub const fn new(
+    /// Creates the cloneable service and its unique retryable join owner.
+    /// Supply the same validated limits used to construct the coordinator;
+    /// monitor admission uses that existing physical-owner cohort capacity.
+    pub fn new(
         coordinator: NetworkResetCoordinator,
         resolver: NetworkInterfaceResolver<C>,
         operations: O,
-    ) -> Self {
-        Self {
-            coordinator,
-            resolver,
-            operations,
-        }
+        limits: crate::NetworkResetLimits,
+        owners: crate::OwnerRegistry,
+    ) -> (Self, NetworkSocketOwner) {
+        let (registrar, owner) = NetworkSocketOwner::new(
+            NonZeroUsize::new(limits.max_runtime_owners()).expect("validated network owner limit"),
+            owners,
+        );
+        (
+            Self {
+                coordinator,
+                resolver: Arc::new(resolver),
+                operations: Arc::new(operations),
+                registrar,
+            },
+            owner,
+        )
     }
 
     pub const fn coordinator(&self) -> &NetworkResetCoordinator {
         &self.coordinator
     }
 
-    pub const fn resolver(&self) -> &NetworkInterfaceResolver<C> {
+    pub fn resolver(&self) -> &NetworkInterfaceResolver<C> {
         &self.resolver
     }
 
-    pub const fn operations(&self) -> &O {
+    pub fn operations(&self) -> &O {
         &self.operations
     }
 
@@ -68,6 +85,10 @@ where
         route: &RouteNetworkOptions,
         destination: SocketAddr,
     ) -> Result<GenerationBoundTcpStream<O::TcpStream>, NetworkSocketServiceError<O::Error>> {
+        let mut monitor = self
+            .registrar
+            .reserve()
+            .map_err(NetworkSocketServiceError::Owner)?;
         let admitted = self
             .coordinator
             .prepare_and_admit_runtime_resource(
@@ -85,6 +106,7 @@ where
         tokio::pin!(connect);
         let stream = tokio::select! {
             biased;
+            () = monitor.stopped() => return Err(NetworkSocketServiceError::Owner(NetworkSocketOwnerError::Closed)),
             cancellation = owner.cancelled() => {
                 return Err(NetworkSocketServiceError::Cancelled {
                     attempted_source,
@@ -103,7 +125,8 @@ where
                 cancellation,
             });
         }
-        Ok(GenerationBoundTcpStream::new(stream, resolved, owner))
+        GenerationBoundTcpStream::new(stream, resolved, owner, monitor)
+            .map_err(NetworkSocketServiceError::Owner)
     }
 
     /// Opens one bound, unconnected UDP socket for a multi-target association.
@@ -117,6 +140,10 @@ where
         route: &RouteNetworkOptions,
         selection_destination: SocketAddr,
     ) -> Result<GenerationBoundUdpSocket<O::UdpSocket>, NetworkSocketServiceError<O::Error>> {
+        let monitor = self
+            .registrar
+            .reserve()
+            .map_err(NetworkSocketServiceError::Owner)?;
         let admitted = self
             .coordinator
             .prepare_and_admit_runtime_resource(
@@ -129,7 +156,8 @@ where
             )
             .map_err(NetworkSocketServiceError::Admission)?;
         let (socket, resolved, owner) = admitted.into_parts();
-        Ok(GenerationBoundUdpSocket::new(socket, resolved, owner))
+        GenerationBoundUdpSocket::new(socket, resolved, owner, monitor)
+            .map_err(NetworkSocketServiceError::Owner)
     }
 
     /// Opens one bound, unconnected UDP socket only for an already-frozen generation.
@@ -144,6 +172,10 @@ where
         route: &RouteNetworkOptions,
         selection_destination: SocketAddr,
     ) -> Result<GenerationBoundUdpSocket<O::UdpSocket>, NetworkSocketServiceError<O::Error>> {
+        let monitor = self
+            .registrar
+            .reserve()
+            .map_err(NetworkSocketServiceError::Owner)?;
         let admitted = self
             .coordinator
             .prepare_and_admit_runtime_resource_for_generation(
@@ -157,7 +189,8 @@ where
             )
             .map_err(NetworkSocketServiceError::Admission)?;
         let (socket, resolved, owner) = admitted.into_parts();
-        Ok(GenerationBoundUdpSocket::new(socket, resolved, owner))
+        GenerationBoundUdpSocket::new(socket, resolved, owner, monitor)
+            .map_err(NetworkSocketServiceError::Owner)
     }
 
     /// Opens and explicitly connects one UDP socket to a single physical target.
@@ -167,6 +200,10 @@ where
         route: &RouteNetworkOptions,
         destination: SocketAddr,
     ) -> Result<GenerationBoundUdpSocket<O::UdpSocket>, NetworkSocketServiceError<O::Error>> {
+        let mut monitor = self
+            .registrar
+            .reserve()
+            .map_err(NetworkSocketServiceError::Owner)?;
         let admitted = self
             .coordinator
             .prepare_and_admit_runtime_resource(
@@ -184,6 +221,7 @@ where
         tokio::pin!(connect);
         let socket = tokio::select! {
             biased;
+            () = monitor.stopped() => return Err(NetworkSocketServiceError::Owner(NetworkSocketOwnerError::Closed)),
             cancellation = owner.cancelled() => {
                 return Err(NetworkSocketServiceError::Cancelled {
                     attempted_source,
@@ -202,7 +240,8 @@ where
                 cancellation,
             });
         }
-        Ok(GenerationBoundUdpSocket::new(socket, resolved, owner))
+        GenerationBoundUdpSocket::new(socket, resolved, owner, monitor)
+            .map_err(NetworkSocketServiceError::Owner)
     }
 }
 
@@ -218,6 +257,7 @@ impl<C, O> fmt::Debug for NetworkSocketService<C, O> {
 /// Closed service failure retaining only the selected source and nested closed categories.
 #[derive(Eq, PartialEq)]
 pub enum NetworkSocketServiceError<E> {
+    Owner(NetworkSocketOwnerError),
     Admission(NetworkRuntimeResourceAdmissionError<E>),
     Connection {
         attempted_source: InterfaceSelectionSource,
@@ -230,15 +270,16 @@ pub enum NetworkSocketServiceError<E> {
 }
 
 impl<E> NetworkSocketServiceError<E> {
-    pub const fn attempted_source(&self) -> InterfaceSelectionSource {
+    pub const fn attempted_source(&self) -> Option<InterfaceSelectionSource> {
         match self {
-            Self::Admission(error) => error.attempted_source(),
+            Self::Owner(_) => None,
+            Self::Admission(error) => Some(error.attempted_source()),
             Self::Connection {
                 attempted_source, ..
             }
             | Self::Cancelled {
                 attempted_source, ..
-            } => *attempted_source,
+            } => Some(*attempted_source),
         }
     }
 }
@@ -246,6 +287,7 @@ impl<E> NetworkSocketServiceError<E> {
 impl<E> fmt::Debug for NetworkSocketServiceError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Owner(error) => formatter.debug_tuple("Owner").field(error).finish(),
             Self::Admission(error) => formatter.debug_tuple("Admission").field(error).finish(),
             Self::Connection {
                 attempted_source, ..
@@ -263,5 +305,27 @@ impl<E> fmt::Debug for NetworkSocketServiceError<E> {
                 .field("cancellation", cancellation)
                 .finish(),
         }
+    }
+}
+
+impl<C, O> Clone for NetworkSocketService<C, O> {
+    fn clone(&self) -> Self {
+        Self {
+            coordinator: self.coordinator.clone(),
+            resolver: Arc::clone(&self.resolver),
+            operations: Arc::clone(&self.operations),
+            registrar: self.registrar.clone(),
+        }
+    }
+}
+impl<C: NetworkInterfaceCatalog + 'static, O> NetworkSocketService<C, O> {
+    /// Captures through the one module-owned native work slot. A dropped waiter
+    /// retains actual work; another call receives Busy until its join is observed.
+    pub async fn capture_snapshot(
+        &self,
+        generation: u64,
+    ) -> Result<ferrum2_net::NetworkSnapshot, NetworkSocketOwnerError> {
+        super::snapshot_capture::capture(&self.registrar, Arc::clone(&self.resolver), generation)
+            .await
     }
 }

@@ -26,6 +26,8 @@ pub(in crate::run) fn process_root(
         coordinator: network_reset_coordinator,
         underlay,
         network_interface_catalog,
+        #[cfg(all(windows, not(test)))]
+        network_socket_service,
     } = network;
     let strict_route_requested = config.strict_route_requested();
     let strict_route = config.strict_route_effective();
@@ -48,6 +50,8 @@ pub(in crate::run) fn process_root(
     let network_reset = Arc::new(ClientNetworkResetRuntime::new(
         &context,
         network_reset_coordinator,
+        #[cfg(all(windows, not(test)))]
+        network_socket_service,
     ));
     let handler_context = Arc::clone(&context);
     let udp_context = Arc::clone(&context);

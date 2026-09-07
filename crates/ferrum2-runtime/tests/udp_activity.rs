@@ -88,7 +88,15 @@ async fn activity_after_timer_registration_expires_at_the_refreshed_deadline() {
     tokio::task::yield_now().await;
     assert_eq!(runtime.sessions().session_count(), 1);
     tokio::time::advance(MIN_UDP_IDLE_TIMEOUT - Duration::from_secs(2)).await;
+    assert!(matches!(
+        runtime
+            .next_completion()
+            .await
+            .expect("joined expiry")
+            .terminal(),
+        ferrum2_runtime::DirectUdpTerminal::Idle
+    ));
     wait_for_zero_udp_owners(&registry).await;
-    assert_eq!(runtime.shutdown(Duration::ZERO).await, 0);
+    assert_eq!(runtime.shutdown(Duration::ZERO).await.forced(), 0);
     assert_eq!(registry.snapshot(), baseline);
 }

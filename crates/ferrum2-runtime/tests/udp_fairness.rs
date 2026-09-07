@@ -139,7 +139,7 @@ async fn replenished_request_queue_cannot_starve_an_already_ready_response() {
     tokio::time::timeout(Duration::from_secs(1), completed.notified())
         .await
         .unwrap();
-    assert_eq!(runtime.shutdown(Duration::ZERO).await, 0);
+    assert_eq!(runtime.shutdown(Duration::ZERO).await.forced(), 0);
     assert_eq!(registry.snapshot(), baseline);
     assert!(
         observed_sends.load(Ordering::SeqCst) <= UDP_SESSION_QUEUE_DEPTH,
@@ -181,7 +181,7 @@ async fn one_coalesced_notification_drains_a_request_burst_without_any_response(
     })
     .await
     .expect("coalesced notifications must not strand queued requests");
-    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await, 0);
+    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await.forced(), 0);
     assert_eq!(registry.snapshot(), baseline);
 }
 
@@ -247,7 +247,7 @@ async fn continuously_ready_io_yields_so_another_task_can_cancel_the_session() {
     started.notified().await;
     let observed = count.load(Ordering::SeqCst);
     manager.remove(handle);
-    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await, 0);
+    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await.forced(), 0);
     assert_eq!(registry.snapshot(), baseline);
     assert!(
         observed < RESPONSE_GUARD,
@@ -281,7 +281,7 @@ async fn shutdown_before_first_poll_drains_every_admitted_request() {
             .commit(ip_datagram(b"request"), Instant::now())
             .unwrap();
     }
-    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await, 0);
+    assert_eq!(runtime.shutdown(Duration::from_secs(1)).await.forced(), 0);
     assert_eq!(registry.snapshot(), baseline);
     assert_eq!(
         *sends.lock().unwrap(),

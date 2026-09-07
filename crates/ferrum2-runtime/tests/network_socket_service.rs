@@ -16,8 +16,8 @@ use ferrum2_net::{
 use ferrum2_runtime::{
     DirectUdpSocket, GenerationBoundTcpStream, NetworkResetCoordinator, NetworkResetIntent,
     NetworkResetLimits, NetworkResetReason, NetworkRuntimeResourceAdmissionError,
-    NetworkSnapshotPublisher, NetworkSocketOperations, NetworkSocketService,
-    NetworkSocketServiceError, OwnerRegistry, RuntimeTcpStream,
+    NetworkSnapshotPublisher, NetworkSocketOperations, NetworkSocketOwner, NetworkSocketOwnerError,
+    NetworkSocketService, NetworkSocketServiceError, OwnerRegistry, RuntimeTcpStream,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 
@@ -327,15 +327,18 @@ fn service(
 ) -> (
     NetworkResetCoordinator,
     NetworkSocketService<Catalog, FakeOperations>,
+    NetworkSocketOwner,
 ) {
     let coordinator = coordinator(owners);
     *state.snapshots.lock().unwrap() = Some(coordinator.snapshots());
-    let service = NetworkSocketService::new(
+    let (service, owner) = NetworkSocketService::new(
         coordinator.clone(),
         NetworkInterfaceResolver::new(Catalog),
         FakeOperations { state },
+        NetworkResetLimits::default(),
+        owners.clone(),
     );
-    (coordinator, service)
+    (coordinator, service, owner)
 }
 
 fn route() -> RouteNetworkOptions {
@@ -346,7 +349,7 @@ fn route() -> RouteNetworkOptions {
 async fn unconnected_udp_uses_first_target_only_for_selection_and_allows_send_to() {
     let owners = OwnerRegistry::new();
     let state = Arc::new(FakeState::default());
-    let (_coordinator, service) = service(&owners, Arc::clone(&state));
+    let (_coordinator, service, mut owner) = service(&owners, Arc::clone(&state));
     let first = destination(53);
     let second = destination(5353);
 
@@ -370,6 +373,8 @@ async fn unconnected_udp_uses_first_target_only_for_selection_and_allows_send_to
     drop(socket);
     assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
 
 #[tokio::test]
@@ -377,7 +382,7 @@ async fn frozen_udp_generation_never_retries_into_the_new_generation() {
     let owners = OwnerRegistry::new();
     let state = Arc::new(FakeState::default());
     state.race_publications.store(1, Ordering::SeqCst);
-    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let (coordinator, service, mut owner) = service(&owners, Arc::clone(&state));
 
     let error = service
         .open_udp_for_generation(1, &DialOptions::default(), &route(), destination(53))
@@ -420,13 +425,15 @@ async fn frozen_udp_generation_never_retries_into_the_new_generation() {
         calls_before,
         "an already-stale generation must fail before socket preparation"
     );
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
 
 #[tokio::test]
 async fn connected_udp_has_an_explicit_connect_path() {
     let owners = OwnerRegistry::new();
     let state = Arc::new(FakeState::default());
-    let (_coordinator, service) = service(&owners, Arc::clone(&state));
+    let (_coordinator, service, mut owner) = service(&owners, Arc::clone(&state));
 
     let socket = service
         .connect_udp(&DialOptions::default(), &route(), destination(443))
@@ -445,6 +452,8 @@ async fn connected_udp_has_an_explicit_connect_path() {
     drop(socket);
     assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
 
 #[tokio::test]
@@ -452,7 +461,7 @@ async fn a_second_generation_race_fails_after_exactly_two_complete_prepares() {
     let owners = OwnerRegistry::new();
     let state = Arc::new(FakeState::default());
     state.race_publications.store(2, Ordering::SeqCst);
-    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let (coordinator, service, mut owner) = service(&owners, Arc::clone(&state));
 
     let error = service
         .connect_tcp(&DialOptions::default(), &route(), destination(443))
@@ -468,7 +477,7 @@ async fn a_second_generation_race_fails_after_exactly_two_complete_prepares() {
     ));
     assert_eq!(
         error.attempted_source(),
-        InterfaceSelectionSource::AutoDetected
+        Some(InterfaceSelectionSource::AutoDetected)
     );
     assert_eq!(
         state
@@ -483,6 +492,8 @@ async fn a_second_generation_race_fails_after_exactly_two_complete_prepares() {
     assert_eq!(state.tcp_socket_drops.load(Ordering::SeqCst), 2);
     assert_eq!(coordinator.snapshots().generation(), 3);
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
 
 #[tokio::test]
@@ -490,7 +501,7 @@ async fn one_generation_race_retries_the_whole_prepare_and_admits_the_new_source
     let owners = OwnerRegistry::new();
     let state = Arc::new(FakeState::default());
     state.race_publications.store(1, Ordering::SeqCst);
-    let (_coordinator, service) = service(&owners, Arc::clone(&state));
+    let (_coordinator, service, mut owner) = service(&owners, Arc::clone(&state));
 
     let stream = service
         .connect_tcp(&DialOptions::default(), &route(), destination(443))
@@ -515,6 +526,8 @@ async fn one_generation_race_retries_the_whole_prepare_and_admits_the_new_source
     drop(stream);
     assert_eq!(state.tcp_stream_drops.load(Ordering::SeqCst), 1);
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
 
 #[tokio::test]
@@ -522,7 +535,7 @@ async fn stable_connection_failure_retains_the_closed_selection_source() {
     let owners = OwnerRegistry::new();
     let state = Arc::new(FakeState::default());
     state.tcp_connect_failure.store(1, Ordering::SeqCst);
-    let (_coordinator, service) = service(&owners, Arc::clone(&state));
+    let (_coordinator, service, mut owner) = service(&owners, Arc::clone(&state));
 
     let error = service
         .connect_tcp(&DialOptions::default(), &route(), destination(443))
@@ -537,9 +550,11 @@ async fn stable_connection_failure_retains_the_closed_selection_source() {
     ));
     assert_eq!(
         error.attempted_source(),
-        InterfaceSelectionSource::AutoDetected
+        Some(InterfaceSelectionSource::AutoDetected)
     );
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
 
 #[tokio::test]
@@ -547,7 +562,7 @@ async fn tcp_connect_reset_closes_the_prepared_socket_and_releases_owner() {
     let owners = OwnerRegistry::new();
     let state = Arc::new(FakeState::default());
     state.tcp_connect_pending.store(1, Ordering::SeqCst);
-    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let (coordinator, service, mut owner) = service(&owners, Arc::clone(&state));
     let connect = tokio::spawn(async move {
         service
             .connect_tcp(&DialOptions::default(), &route(), destination(443))
@@ -567,6 +582,8 @@ async fn tcp_connect_reset_closes_the_prepared_socket_and_releases_owner() {
     assert_eq!(report.cancelled_runtime_owners(), 1);
     assert_eq!(state.tcp_socket_drops.load(Ordering::SeqCst), 1);
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
 
 #[tokio::test]
@@ -574,7 +591,7 @@ async fn udp_connect_reset_closes_the_prepared_socket_and_releases_owner() {
     let owners = OwnerRegistry::new();
     let state = Arc::new(FakeState::default());
     state.udp_connect_pending.store(1, Ordering::SeqCst);
-    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let (coordinator, service, mut owner) = service(&owners, Arc::clone(&state));
     let connect = tokio::spawn(async move {
         service
             .connect_udp(&DialOptions::default(), &route(), destination(443))
@@ -594,13 +611,15 @@ async fn udp_connect_reset_closes_the_prepared_socket_and_releases_owner() {
     assert_eq!(report.cancelled_runtime_owners(), 1);
     assert_eq!(state.udp_socket_drops.load(Ordering::SeqCst), 1);
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
 
 #[tokio::test]
 async fn idle_connected_resources_are_closed_before_reset_acknowledgement() {
     let owners = OwnerRegistry::new();
     let tcp_state = Arc::new(FakeState::default());
-    let (tcp_coordinator, tcp_service) = service(&owners, Arc::clone(&tcp_state));
+    let (tcp_coordinator, tcp_service, mut tcp_owner) = service(&owners, Arc::clone(&tcp_state));
     let mut stream = tcp_service
         .connect_tcp(&DialOptions::default(), &route(), destination(443))
         .await
@@ -622,7 +641,7 @@ async fn idle_connected_resources_are_closed_before_reset_acknowledgement() {
     );
 
     let udp_state = Arc::new(FakeState::default());
-    let (udp_coordinator, udp_service) = service(&owners, Arc::clone(&udp_state));
+    let (udp_coordinator, udp_service, mut udp_owner) = service(&owners, Arc::clone(&udp_state));
     let socket = udp_service
         .open_udp(&DialOptions::default(), &route(), destination(53))
         .unwrap();
@@ -643,13 +662,16 @@ async fn idle_connected_resources_are_closed_before_reset_acknowledgement() {
         InterfaceSelectionSource::AutoDetected
     );
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    tcp_owner.shutdown().await.unwrap();
+    udp_owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
 
 #[tokio::test]
 async fn udp_reset_waits_for_an_inflight_operation_before_acknowledging_its_owner() {
     let owners = OwnerRegistry::new();
     let state = Arc::new(FakeState::default());
-    let (coordinator, service) = service(&owners, Arc::clone(&state));
+    let (coordinator, service, mut owner) = service(&owners, Arc::clone(&state));
     let socket = Arc::new(
         service
             .open_udp(&DialOptions::default(), &route(), destination(53))
@@ -673,4 +695,9 @@ async fn udp_reset_waits_for_an_inflight_operation_before_acknowledging_its_owne
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
     assert!(socket.is_closed().await);
     assert!(socket.closed().is_some());
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
+
+#[path = "network_socket_service/ownership.rs"]
+mod ownership;

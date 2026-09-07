@@ -70,10 +70,12 @@ impl DirectUdpSocketFactory for ServerNetworkUdpSocketFactory {
                     Ok(socket)
                 }
                 Err(error) => {
-                    self.metrics.outbound_interface_resolution(
-                        interface_resolution_source(error.attempted_source()),
-                        interface_resolution_result(&error),
-                    );
+                    if let Some(source) = error.attempted_source() {
+                        self.metrics.outbound_interface_resolution(
+                            interface_resolution_source(source),
+                            interface_resolution_result(&error),
+                        );
+                    }
                     Err(closed_udp_socket_error())
                 }
             }

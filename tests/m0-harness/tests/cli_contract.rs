@@ -38,6 +38,8 @@ const OWNER_COUNTER_FIELDS: [&str; 25] = [
     "network_reset_drivers",
     "network_reset_hooks",
     "network_runtime_owners",
+    "network_socket_monitors",
+    "network_snapshot_captures",
     "owned_buffers",
     "owned_permits",
     "prepared_process_roots",

@@ -147,6 +147,8 @@ macro_rules! owner_counters {
             sniff_buffered_bytes,
             network_reset_hooks,
             network_runtime_owners,
+            network_socket_monitors,
+            network_snapshot_captures,
             network_reset_drivers,
         }
     };

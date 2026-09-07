@@ -80,13 +80,13 @@ async fn slow_socket_opens_for_distinct_sessions_run_concurrently() {
         async move {
             let _ = stopped_first.await;
         },
-        |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        |mut runtime| async move { runtime.shutdown(Duration::ZERO).await },
     ));
     let second_task = tokio::spawn(second.run_with_shutdown(
         async move {
             let _ = stopped_second.await;
         },
-        |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        |mut runtime| async move { runtime.shutdown(Duration::ZERO).await },
     ));
 
     wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 2).await;
@@ -178,7 +178,7 @@ async fn shutdown_cancels_stalled_socket_open_and_rolls_back_provisional_session
         async move {
             let _ = stopped.await;
         },
-        |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        |mut runtime| async move { runtime.shutdown(Duration::ZERO).await },
     ));
 
     wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 1).await;
@@ -264,7 +264,7 @@ async fn post_open_session_limit_race_rolls_back_provisional_resources() {
         async move {
             let _ = stopped.await;
         },
-        |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        |mut runtime| async move { runtime.shutdown(Duration::ZERO).await },
     ));
 
     wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 1).await;
@@ -397,7 +397,7 @@ async fn replacement_generation_wins_while_socket_open_is_stalled() {
         async move {
             let _ = stopped.await;
         },
-        |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        |mut runtime| async move { runtime.shutdown(Duration::ZERO).await },
     ));
 
     wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 1).await;

@@ -1,5 +1,6 @@
 mod admission;
 mod commit;
+mod completion;
 mod identity;
 mod listener;
 mod physical;

@@ -24,6 +24,7 @@ use super::commit::{
     NewDirectCommitError, commit_existing_direct_request, commit_new_direct_session,
     commit_rejected_request,
 };
+use super::completion::{observe_completion, observe_shutdown};
 use super::listener::{MAX_UDP_LISTENER_READINESS_DRAIN, ServerUdpListener, ServerUdpRuntime};
 use super::physical::ServerUdpNetworkPolicy;
 use super::route::select_udp_route;
@@ -40,7 +41,11 @@ where
         let shutdown_cancellation = cancellation.clone();
         self.run_with_shutdown(
             async move { cancellation.cancelled().await },
-            move |runtime| runtime.shutdown_with_cancellation(shutdown_cancellation),
+            move |mut runtime| async move {
+                runtime
+                    .shutdown_with_cancellation(shutdown_cancellation)
+                    .await
+            },
         )
         .await
     }
@@ -53,7 +58,9 @@ where
     where
         S: std::future::Future<Output = ()>,
         C: FnOnce(ServerUdpRuntime<L, SF>) -> F,
-        F: std::future::Future<Output = usize>,
+        F: std::future::Future<
+                Output = ferrum2_runtime::DirectUdpShutdownReport<super::listener::UdpAdapterError>,
+            >,
     {
         let Self {
             inbound,
@@ -83,6 +90,11 @@ where
         let mut readiness_drain = 0;
 
         let terminal = 'packets: loop {
+            while let Some(completion) = runtime.try_next_completion() {
+                if observe_completion(&metrics, &mappings, &completion) {
+                    break 'packets Err(RunError::RuntimeRoot);
+                }
+            }
             if readiness_drain == MAX_UDP_LISTENER_READINESS_DRAIN {
                 readiness_drain = 0;
                 tokio::select! {
@@ -104,6 +116,15 @@ where
                         };
                         mappings.prune_protocol(&protocol, clock.monotonic_now());
                         drop(maintenance_guard);
+                        update_udp_resource_metrics(&metrics, &registry);
+                        continue;
+                    }
+                    completion = runtime.next_completion(), if runtime.has_tasks() => {
+                        if let Some(completion) = completion
+                            && observe_completion(&metrics, &mappings, &completion)
+                        {
+                            break Err(RunError::RuntimeRoot);
+                        }
                         update_udp_resource_metrics(&metrics, &registry);
                         continue;
                     }
@@ -257,6 +278,13 @@ where
                             Ok(()) => record_udp_request_accepted(&metrics, wire_len),
                             Err(UdpCommitError::Runtime(error)) => {
                                 record_udp_runtime_failure(&metrics, error);
+                                if matches!(
+                                    error,
+                                    UdpRuntimeError::ProtocolPanicked
+                                        | UdpRuntimeError::StateUnavailable
+                                ) {
+                                    break 'packets Err(RunError::RuntimeRoot);
+                                }
                             }
                             Err(UdpCommitError::Protocol(error)) => {
                                 record_udp_protocol_failure(&metrics, error);
@@ -418,6 +446,13 @@ where
                                             }
                                             Err(UdpCommitError::Runtime(error)) => {
                                                 record_udp_runtime_failure(&metrics, error);
+                                                if matches!(
+                                                    error,
+                                                    UdpRuntimeError::ProtocolPanicked
+                                                        | UdpRuntimeError::StateUnavailable
+                                                ) {
+                                                    break 'packets Err(RunError::RuntimeRoot);
+                                                }
                                             }
                                             Err(UdpCommitError::Protocol(error)) => {
                                                 record_udp_protocol_failure(&metrics, error);
@@ -481,7 +516,13 @@ where
                         record_udp_request_accepted(&metrics, wire_len);
                     }
                     Err(NewDirectCommitError::Runtime(error)) => {
-                        record_udp_runtime_failure(&metrics, error)
+                        record_udp_runtime_failure(&metrics, error);
+                        if matches!(
+                            error,
+                            UdpRuntimeError::ProtocolPanicked | UdpRuntimeError::StateUnavailable
+                        ) {
+                            break 'packets Err(RunError::RuntimeRoot);
+                        }
                     }
                     Err(NewDirectCommitError::Protocol(error)) => {
                         record_udp_protocol_failure(&metrics, error)
@@ -497,16 +538,18 @@ where
             }
         };
 
-        let forced = if terminal.is_err() {
+        let report = if terminal.is_err() {
             runtime.shutdown(std::time::Duration::ZERO).await
         } else {
             shutdown_runtime(runtime).await
         };
-        for _ in 0..forced {
-            metrics.udp_forced_shutdown(Role::Server);
-        }
+        let cleanup_failed = observe_shutdown(&metrics, &mappings, &report);
         update_udp_resource_metrics(&metrics, &registry);
-        terminal
+        if cleanup_failed {
+            Err(RunError::RuntimeRoot)
+        } else {
+            terminal
+        }
     }
 }
 
@@ -515,6 +558,23 @@ where
     L: ServerUdpListener,
     F: DirectUdpSocketFactory<OpenContext = Option<ServerUdpNetworkPolicy>>,
 {
+    fn take_run_cleanup(&mut self) -> Option<ProcessFuture<Result<(), RunError>>> {
+        let mut cleanup = self.runtime.take_cleanup()?;
+        let metrics = Arc::clone(&self.metrics);
+        let mappings = Arc::clone(&self.mappings);
+        let registry = self.registry.clone();
+        Some(Box::pin(async move {
+            let report = cleanup.shutdown(std::time::Duration::ZERO).await;
+            let cleanup_failed = observe_shutdown(&metrics, &mappings, &report);
+            update_udp_resource_metrics(&metrics, &registry);
+            if cleanup_failed {
+                Err(RunError::RuntimeRoot)
+            } else {
+                Ok(())
+            }
+        }))
+    }
+
     fn activate(&mut self) -> Result<(), RunError> {
         Ok(())
     }

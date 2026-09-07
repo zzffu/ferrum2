@@ -72,13 +72,13 @@ async fn concurrent_same_session_rolls_back_losing_socket_before_protocol_commit
         async move {
             let _ = stopped_first.await;
         },
-        |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        |mut runtime| async move { runtime.shutdown(Duration::ZERO).await },
     ));
     let second_task = tokio::spawn(second.run_with_shutdown(
         async move {
             let _ = stopped_second.await;
         },
-        |runtime| async move { runtime.shutdown(Duration::ZERO).await },
+        |mut runtime| async move { runtime.shutdown(Duration::ZERO).await },
     ));
 
     wait_for_send_entries(&socket_factory.entered, &socket_factory.entry_changed, 2).await;

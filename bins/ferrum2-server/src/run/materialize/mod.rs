@@ -62,11 +62,11 @@ pub(super) struct ServerV2Materializer {
 
 impl ServerV2Materializer {
     #[cfg(test)]
-    pub(super) fn new(system: ferrum2_dns::SystemResolver, metrics: Arc<Metrics>) -> Self {
-        let registry = ferrum2_runtime::OwnerRegistry::new();
-        let network_sockets =
-            super::tcp::prepare_server_network_socket_service(&registry, &metrics)
-                .expect("test materialization network socket service");
+    pub(super) fn new(
+        system: ferrum2_dns::SystemResolver,
+        network_sockets: Arc<ServerNetworkSocketService>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self::with_network_sockets(system, metrics, network_sockets)
     }
 
@@ -86,13 +86,10 @@ impl ServerV2Materializer {
     #[cfg(test)]
     fn with_downloader(
         system: ferrum2_dns::SystemResolver,
+        network_sockets: Arc<ServerNetworkSocketService>,
         metrics: Arc<Metrics>,
         downloader: Arc<dyn RuleSetDownloader>,
     ) -> Self {
-        let registry = ferrum2_runtime::OwnerRegistry::new();
-        let network_sockets =
-            super::tcp::prepare_server_network_socket_service(&registry, &metrics)
-                .expect("test materialization network socket service");
         Self {
             system,
             metrics,

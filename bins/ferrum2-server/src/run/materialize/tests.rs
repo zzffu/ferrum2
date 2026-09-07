@@ -146,6 +146,12 @@ fn reserve_address() -> SocketAddr {
 
 #[tokio::test]
 async fn deferred_ruleset_domain_uses_the_selected_direct_resolver() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let listener = TokioTcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("deferred RuleSet listener");
@@ -163,7 +169,11 @@ async fn deferred_ruleset_domain_uses_the_selected_direct_resolver() {
     );
     let dialer = ServerRuleSetDialer::new(
         vec![unavailable, system],
-        ServerPhysicalSocketContext::test(2, Arc::new(Metrics::new())),
+        ServerPhysicalSocketContext::test(
+            Arc::clone(&network_owner.sockets),
+            2,
+            Arc::new(Metrics::new()),
+        ),
     );
     let target = RuleSetDialTargets::Domain(
         TargetAddr::domain("localhost", address.port()).expect("deferred RuleSet target"),
@@ -182,6 +192,11 @@ async fn deferred_ruleset_domain_uses_the_selected_direct_resolver() {
         .expect("selected Direct domain dial");
     drop(stream);
     let _ = accepted.await.expect("deferred RuleSet accept join");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 fn minimal_v2_source(listen: SocketAddr) -> String {
@@ -249,6 +264,12 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
 
 #[tokio::test]
 async fn minimal_v2_materializes_without_network_or_refresh_owner() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
         std::num::NonZeroU16::new(16).unwrap(),
         Duration::from_secs(5),
@@ -261,6 +282,7 @@ async fn minimal_v2_materializes_without_network_or_refresh_owner() {
     let downloader = Arc::new(RecordingDownloader::failure());
     let materializer = ServerV2Materializer::with_downloader(
         system.clone(),
+        Arc::clone(&network_owner.sockets),
         Arc::new(Metrics::new()),
         downloader.clone(),
     );
@@ -279,10 +301,21 @@ async fn minimal_v2_materializes_without_network_or_refresh_owner() {
         .shutdown()
         .await
         .expect("join test system resolver");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 #[tokio::test]
 async fn numeric_bootstrap_materializes_domain_dns_upstream_in_dependency_order() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
         std::num::NonZeroU16::new(16).unwrap(),
         Duration::from_secs(5),
@@ -382,7 +415,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
     assert!(bootstrap_position < resolved_position);
 
     let metrics = Arc::new(Metrics::new());
-    let materializer = ServerV2Materializer::new(system.clone(), Arc::clone(&metrics));
+    let materializer = ServerV2Materializer::new(
+        system.clone(),
+        Arc::clone(&network_owner.sockets),
+        Arc::clone(&metrics),
+    );
     let materialized = materializer
         .materialize(prepared)
         .await
@@ -439,10 +476,21 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         .shutdown()
         .await
         .expect("join test system resolver");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 #[tokio::test]
 async fn production_ruleset_transport_uses_tagged_dns_and_reaps_failed_tls_path() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
         std::num::NonZeroU16::new(16).unwrap(),
         Duration::from_secs(5),
@@ -585,7 +633,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         .expect("RuleSet dependency node");
     assert!(resolver_position < rule_set_position);
     let metrics = Arc::new(Metrics::new());
-    let materializer = ServerV2Materializer::new(system.clone(), Arc::clone(&metrics));
+    let materializer = ServerV2Materializer::new(
+        system.clone(),
+        Arc::clone(&network_owner.sockets),
+        Arc::clone(&metrics),
+    );
     let error = match materializer.materialize(prepared).await {
         Ok(_) => panic!("controlled TLS endpoint unexpectedly materialized"),
         Err(error) => error,
@@ -635,6 +687,11 @@ psk = "AAECAwQFBgcICQoLDA0ODw=="
         .shutdown()
         .await
         .expect("join test system resolver");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 #[test]
@@ -649,6 +706,12 @@ fn validate_only_entrypoint_never_binds_listener() {
 
 #[tokio::test]
 async fn real_srs_initial_snapshot_finishes_before_listener_bind() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
         std::num::NonZeroU16::new(16).unwrap(),
         Duration::from_secs(5),
@@ -662,6 +725,7 @@ async fn real_srs_initial_snapshot_finishes_before_listener_bind() {
     let metrics = Arc::new(Metrics::new());
     let materializer = ServerV2Materializer::with_downloader(
         system.clone(),
+        Arc::clone(&network_owner.sockets),
         Arc::clone(&metrics),
         downloader.clone(),
     );
@@ -704,10 +768,21 @@ async fn real_srs_initial_snapshot_finishes_before_listener_bind() {
         .shutdown()
         .await
         .expect("join test system resolver");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 #[tokio::test]
 async fn initial_ruleset_failure_returns_before_listener_bind() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
         std::num::NonZeroU16::new(16).unwrap(),
         Duration::from_secs(5),
@@ -720,6 +795,7 @@ async fn initial_ruleset_failure_returns_before_listener_bind() {
     let downloader = Arc::new(RecordingDownloader::failure());
     let materializer = ServerV2Materializer::with_downloader(
         system.clone(),
+        Arc::clone(&network_owner.sockets),
         Arc::new(Metrics::new()),
         downloader.clone(),
     );
@@ -736,10 +812,21 @@ async fn initial_ruleset_failure_returns_before_listener_bind() {
         .shutdown()
         .await
         .expect("join test system resolver");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 #[tokio::test]
 async fn refresh_failure_retains_generation_and_root_cleanup_is_explicit() {
+    let mut network_owner = crate::run::network_owner::ServerNetworkRuntime::prepare(
+        &ferrum2_runtime::OwnerRegistry::new(),
+        &Metrics::new(),
+    )
+    .expect("test physical owner");
+
     let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
         std::num::NonZeroU16::new(16).unwrap(),
         Duration::from_secs(5),
@@ -752,6 +839,7 @@ async fn refresh_failure_retains_generation_and_root_cleanup_is_explicit() {
     let downloader = Arc::new(RecordingDownloader::success_then_failure());
     let materializer = ServerV2Materializer::with_downloader(
         system.clone(),
+        Arc::clone(&network_owner.sockets),
         Arc::new(Metrics::new()),
         downloader.clone(),
     );
@@ -784,6 +872,11 @@ async fn refresh_failure_retains_generation_and_root_cleanup_is_explicit() {
         .shutdown()
         .await
         .expect("join test system resolver");
+
+    network_owner
+        .shutdown()
+        .await
+        .expect("join physical test owner");
 }
 
 #[tokio::test]

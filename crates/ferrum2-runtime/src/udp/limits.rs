@@ -123,6 +123,10 @@ pub enum UdpRuntimeError {
     QueueFull,
     /// A generation counter could not advance without wrapping.
     Counter,
+    /// The protocol callback panicked; the affected generation was retired.
+    ProtocolPanicked,
+    /// Internal state is unavailable; admission fails closed.
+    StateUnavailable,
     /// Bounded resolution failed.
     Resolve,
     /// Direct target transmission failed.
@@ -138,6 +142,8 @@ pub enum UdpRuntimeError {
 impl fmt::Display for UdpRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let category = match self {
+            Self::ProtocolPanicked => "protocol_panicked",
+            Self::StateUnavailable => "state_unavailable",
             Self::Bounds => "bounds",
             Self::SessionLimit => "session_limit",
             Self::BufferLimit => "buffer_limit",
