@@ -475,35 +475,6 @@ fn production_features_preserve_security_and_resource_boundaries() {
         features(resolver),
         BTreeSet::from(["https-ring", "tls-ring", "tokio", "webpki-roots"])
     );
-
-    let smoltcp = dependency(package(metadata, "ferrum2-tun"), "smoltcp", None);
-    assert_eq!(smoltcp["uses_default_features"], false);
-    assert_eq!(
-        features(smoltcp),
-        BTreeSet::from([
-            "assembler-max-segment-count-4",
-            "iface-max-addr-count-2",
-            "iface-max-route-count-2",
-            "medium-ip",
-            "proto-ipv4",
-            "proto-ipv6",
-            "socket-tcp",
-            "socket-tcp-reno",
-            "socket-udp",
-            "std",
-        ])
-    );
-    let smoltcp_package = package(metadata, "smoltcp");
-    let resolved_smoltcp = metadata["resolve"]["nodes"]
-        .as_array()
-        .expect("resolve nodes")
-        .iter()
-        .find(|node| node["id"] == smoltcp_package["id"])
-        .expect("resolved smoltcp node");
-    assert!(
-        !features(resolved_smoltcp).contains("auto-icmp-echo-reply"),
-        "the resolved packet stack must not synthesize ICMP replies"
-    );
 }
 
 fn has_unsafe_token(tokens: TokenStream) -> bool {

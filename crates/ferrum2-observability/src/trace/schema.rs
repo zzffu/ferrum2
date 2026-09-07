@@ -402,6 +402,7 @@ closed_dimension! {
         DnsDamage => "dns_damage",
         MtuDamage => "mtu_damage",
         StrictRouteDamage => "strict_route_damage",
+        TcpIngressDamage => "tcp_ingress_damage",
         OwnershipLedgerDamage => "ownership_ledger_damage",
     }
 }

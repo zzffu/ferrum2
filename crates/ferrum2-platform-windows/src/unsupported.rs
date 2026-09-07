@@ -8,7 +8,7 @@ use socket2::Socket;
 
 use crate::{
     AdapterConfig, CreateError, Error, ErrorKind, ManagedTunHealth, NetworkChangeOutcome,
-    NetworkChangeWaitOutcome, SendOutcome, WaitOutcome,
+    NetworkChangeWaitOutcome, SendOutcome, TcpIngressEndpoint, WaitOutcome,
 };
 
 const UNSUPPORTED: Error = Error::new(ErrorKind::UnrecoverableCorruption);
@@ -105,6 +105,18 @@ impl Adapter {
     }
     pub fn network_interface_catalog(&self) -> WindowsNetworkInterfaceCatalog {
         WindowsNetworkInterfaceCatalog::system()
+    }
+    pub fn verify_tcp_peer_route(&self, _: std::net::IpAddr) -> Result<(), Error> {
+        Err(UNSUPPORTED)
+    }
+    pub fn install_tcp_ingress(&mut self, _: &[TcpIngressEndpoint]) -> Result<(), Error> {
+        Err(UNSUPPORTED)
+    }
+    pub fn clear_tcp_ingress(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+    pub fn verify_tcp_ingress(&self) -> Result<(), Error> {
+        Err(UNSUPPORTED)
     }
     pub fn refresh_underlay(&mut self) -> Result<Option<UnderlayPolicy>, Error> {
         Err(UNSUPPORTED)

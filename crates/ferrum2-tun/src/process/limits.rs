@@ -4,7 +4,6 @@ use crate::Config;
 
 pub(super) fn runtime_limits_are_exact(config: &Config) -> bool {
     (1..=4096).contains(&config.max_tcp_flows)
-        && (4096..=262_144).contains(&config.tcp_buffer_bytes)
         && (Duration::from_secs(1)..=Duration::from_secs(86_400)).contains(&config.tcp_timeout)
         && (ferrum2_runtime::MIN_UDP_IDLE_TIMEOUT..=ferrum2_runtime::MAX_UDP_IDLE_TIMEOUT)
             .contains(&config.udp_timeout)
@@ -25,7 +24,6 @@ mod tests {
             ring_capacity: 1 << 20,
             ready_timeout: Duration::from_secs(1),
             max_tcp_flows: 1,
-            tcp_buffer_bytes: 4_096,
             tcp_timeout: Duration::from_secs(1),
             udp_timeout: ferrum2_runtime::MIN_UDP_IDLE_TIMEOUT,
             max_udp_mappings: 1,
@@ -45,10 +43,6 @@ mod tests {
 
         let mut invalid = valid_config();
         invalid.max_tcp_flows = 0;
-        assert!(!runtime_limits_are_exact(&invalid));
-
-        let mut invalid = valid_config();
-        invalid.tcp_buffer_bytes = 262_145;
         assert!(!runtime_limits_are_exact(&invalid));
 
         let mut invalid = valid_config();

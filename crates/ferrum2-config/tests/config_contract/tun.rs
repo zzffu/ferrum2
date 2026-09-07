@@ -211,6 +211,26 @@ fn tun_optional_families_routes_and_filtering_are_family_exact() {
             "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv6_address = \"fd00::/126\"\noutbound = \"proxy\"",
             ConfigField::TunIpv6Address,
         ),
+        (
+            "IPv4 /31 has no synthetic peer",
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.1/31\"\noutbound = \"proxy\"",
+            ConfigField::TunIpv4Address,
+        ),
+        (
+            "IPv4 /32 has no synthetic peer",
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.1/32\"\noutbound = \"proxy\"",
+            ConfigField::TunIpv4Address,
+        ),
+        (
+            "IPv6 /127 has no ordinary synthetic peer",
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv6_address = \"fd00::1/127\"\noutbound = \"proxy\"",
+            ConfigField::TunIpv6Address,
+        ),
+        (
+            "IPv6 /128 has no synthetic peer",
+            "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv6_address = \"fd00::1/128\"\noutbound = \"proxy\"",
+            ConfigField::TunIpv6Address,
+        ),
     ] {
         let error = validated_client(TempConfig::text(&tun_client(tun)).path())
             .err()
@@ -409,29 +429,28 @@ fn tun_resource_and_shape_failures_are_redacted_and_field_specific() {
 }
 
 #[test]
-fn removed_tun_udp_memory_field_is_always_unknown() {
+fn removed_tun_memory_fields_are_always_unknown() {
     let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\noutbound = \"proxy\"";
-    for value in ["0", "65536", "134217728", "18446744073709551615"] {
-        let source = base.replace(
-            "outbound =",
-            &format!("max_udp_buffered_bytes = {value}\noutbound ="),
-        );
-        let error = validated_client(TempConfig::text(&tun_client(&source)).path())
-            .err()
-            .expect("removed TUN UDP memory field must fail");
-        assert_eq!(
-            (error.kind(), error.field()),
-            (ConfigErrorKind::Syntax, ConfigField::Config)
-        );
-        let rendered = format!("{error}\n{error:?}");
-        assert!(!rendered.contains(value));
+    for field in ["max_udp_buffered_bytes", "tcp_buffer_bytes"] {
+        for value in ["0", "65536", "134217728", "18446744073709551615"] {
+            let source = base.replace("outbound =", &format!("{field} = {value}\noutbound ="));
+            let error = validated_client(TempConfig::text(&tun_client(&source)).path())
+                .err()
+                .expect("removed TUN memory field must fail");
+            assert_eq!(
+                (error.kind(), error.field()),
+                (ConfigErrorKind::Syntax, ConfigField::Config)
+            );
+            let rendered = format!("{error}\n{error:?}");
+            assert!(!rendered.contains(value));
+        }
     }
 }
 
 #[test]
 fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
     let base = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\noutbound = \"proxy\"";
-    let minimums = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nmtu = 1280\nring_capacity = 131072\nready_timeout_ms = 1000\nmax_tcp_flows = 1\ntcp_buffer_bytes = 4096\nmax_udp_mappings = 1\noutbound = \"proxy\"";
+    let minimums = "[tun]\ntag = \"tun-in\"\nadapter_name = \"Ferrum2\"\nipv4_address = \"198.18.0.2/30\"\nipv6_address = \"fd00::2/126\"\nmtu = 1280\nring_capacity = 131072\nready_timeout_ms = 1000\nmax_tcp_flows = 1\nmax_udp_mappings = 1\noutbound = \"proxy\"";
     let accepted = [
         ("all minima", minimums.to_owned()),
         ("mtu maximum", minimums.replace("mtu = 1280", "mtu = 1500")),
@@ -446,10 +465,6 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
         (
             "flow maximum",
             minimums.replace("max_tcp_flows = 1", "max_tcp_flows = 4096"),
-        ),
-        (
-            "TCP bytes maximum",
-            minimums.replace("tcp_buffer_bytes = 4096", "tcp_buffer_bytes = 262144"),
         ),
         (
             "mapping maximum",
@@ -503,16 +518,6 @@ fn tun_every_resource_edge_unknown_field_and_prefix_overlap_fail_closed() {
             "flows high",
             "max_tcp_flows = 4097",
             ConfigField::TunMaxTcpFlows,
-        ),
-        (
-            "TCP bytes low",
-            "tcp_buffer_bytes = 4095",
-            ConfigField::TunTcpBufferBytes,
-        ),
-        (
-            "TCP bytes high",
-            "tcp_buffer_bytes = 262145",
-            ConfigField::TunTcpBufferBytes,
         ),
         (
             "mappings low",

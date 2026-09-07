@@ -3,27 +3,21 @@ pub(super) use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub(super) use std::sync::{Arc, Mutex};
 pub(super) use std::time::Duration;
 
-pub(super) use smoltcp::phy::{Device, TxToken};
-pub(super) use smoltcp::socket::tcp::{Socket as TcpSocket, State as TcpState};
-pub(super) use smoltcp::time::Instant;
-pub(super) use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
 pub(super) use crate::lifecycle::{
     NetworkChangeErrorDisposition, NetworkChangeTransition, NetworkResetHealthDisposition,
     classify_network_change, classify_network_change_error, classify_network_reset_health,
     classify_network_reset_refresh_error, map_managed_state_damage,
 };
 pub(super) use crate::reassembly::REASSEMBLY_TIMEOUT_MILLIS;
-pub(super) use crate::tcp::tcp_flow_pair;
+pub(super) use crate::tcp::tcp_flow_for_test;
 pub(super) use crate::{AdapterErrorDisposition, classify_adapter_error};
 pub(super) use crate::{
-    Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, MemoryTx, NativeLifecycleOwner,
-    NetworkResetBridgeOutcome, OutputFlushOutcome, OutputSendOutcome, OutputSlot, OwnerControl,
-    OwnerExit, OwnerRegistry, OwnerWake, PacketParser, PacketValidator, ParsedPacket, SessionItem,
-    Stack, TunEvent, TunEventSink, TunNetworkResetReason, TunRejectReason, TunRoot,
-    UdpDatagramEndpoints, UdpFiltering, UdpInjectOutcome, UdpPeerAuthorization,
-    UdpResponseDropReason, finish_stack_setup, map_owner_spawn, reconcile_owner_exit,
-    reported_owner_exit,
+    Families, GenerationTable, INGRESS_SLOTS, MemoryDevice, NativeLifecycleOwner,
+    NetworkResetBridgeOutcome, OutputFlushOutcome, OutputSendOutcome, OwnerControl, OwnerExit,
+    OwnerRegistry, OwnerWake, PacketParser, PacketValidator, ParsedPacket, SessionItem, Stack,
+    TunEvent, TunEventSink, TunNetworkResetReason, TunRejectReason, TunRoot, UdpDatagramEndpoints,
+    UdpFiltering, UdpInjectOutcome, UdpPeerAuthorization, UdpResponseDropReason,
+    finish_stack_setup, map_owner_spawn, reconcile_owner_exit, reported_owner_exit,
 };
 
 pub(super) fn checksum(parts: &[&[u8]]) -> u16 {
@@ -99,7 +93,7 @@ pub(super) fn ipv4_udp_fragments() -> (Vec<u8>, Vec<u8>) {
     (first, second)
 }
 
-pub(super) fn fragment_ipv4_udp(packet: &[u8], mtu: usize) -> Vec<Vec<u8>> {
+pub(super) fn fragment_ipv4_packet(packet: &[u8], mtu: usize) -> Vec<Vec<u8>> {
     let fragment_capacity = ((mtu - 20) / 8) * 8;
     let transport = &packet[20..];
     transport
@@ -249,78 +243,10 @@ pub(super) fn repair_ipv4_tcp_checksum(packet: &mut [u8]) {
     packet[36..38].copy_from_slice(&tcp.to_be_bytes());
 }
 
-pub(super) fn ipv4_tcp_after_syn(syn_ack: &[u8], flags: u8, payload: &[u8]) -> Vec<u8> {
-    let mut packet = ipv4_tcp();
-    packet.resize(40 + payload.len(), 0);
-    let packet_len = packet.len() as u16;
-    packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
-    packet[12..16].copy_from_slice(&syn_ack[16..20]);
-    packet[16..20].copy_from_slice(&syn_ack[12..16]);
-    packet[20..22].copy_from_slice(&syn_ack[22..24]);
-    packet[22..24].copy_from_slice(&syn_ack[20..22]);
-    packet[24..28].copy_from_slice(&1_u32.to_be_bytes());
-    let server_sequence = u32::from_be_bytes(syn_ack[24..28].try_into().expect("SYN-ACK seq"));
-    packet[28..32].copy_from_slice(&server_sequence.wrapping_add(1).to_be_bytes());
-    packet[33] = flags;
-    packet[40..].copy_from_slice(payload);
-    repair_ipv4_header(&mut packet);
-    repair_ipv4_tcp_checksum(&mut packet);
-    packet
-}
-
-pub(super) fn establish_ipv4_tcp_flow(
-    stack: &mut Stack,
-    flows: &mut tokio::sync::mpsc::Receiver<crate::TcpFlow>,
-    source_port: u16,
-    now_millis: i64,
-) -> (crate::TcpFlow, Vec<u8>) {
-    assert!(stack.enqueue(&ipv4_tcp_from_source_port(source_port), true));
-    stack.poll_quantum(Instant::from_millis(now_millis));
-    let mut syn_ack = Vec::new();
+pub(super) fn assert_packet_validity(name: &str, packet: &[u8], mtu: usize, expected: bool) {
     assert_eq!(
-        stack.flush_output(|packet| {
-            syn_ack.extend_from_slice(packet);
-            OutputSendOutcome::Sent
-        }),
-        OutputFlushOutcome::Sent
+        PacketValidator::new(mtu).accepts(packet),
+        expected,
+        "{name}"
     );
-    assert!(stack.enqueue(&ipv4_tcp_after_syn(&syn_ack, 0x10, &[]), true));
-    stack.poll_quantum(Instant::from_millis(now_millis + 1));
-    let flow = flows.try_recv().expect("flow after completed handshake");
-    assert!(matches!(
-        stack.flush_output(|_| OutputSendOutcome::Sent),
-        OutputFlushOutcome::Empty | OutputFlushOutcome::Sent
-    ));
-    (flow, syn_ack)
-}
-
-pub(super) fn assert_ingress_and_egress(name: &str, packet: &[u8], mtu: usize, expected: bool) {
-    let validator = PacketValidator::new(mtu);
-    assert_eq!(validator.accepts(packet), expected, "ingress {name}");
-
-    let mut accepted = 0;
-    let mut rejected = 0;
-    let mut output_count = 0;
-    let mut output = OutputSlot {
-        len: 0,
-        bytes: vec![0_u8; packet.len().max(1)],
-    };
-    MemoryTx {
-        validator,
-        validated_output: &mut accepted,
-        rejected_output: &mut rejected,
-        output: &mut output,
-        output_count: &mut output_count,
-    }
-    .consume(packet.len(), |bytes| bytes.copy_from_slice(packet));
-    assert_eq!(accepted, usize::from(expected), "egress accept {name}");
-    assert_eq!(rejected, usize::from(!expected), "egress reject {name}");
-    assert_eq!(
-        output_count,
-        usize::from(expected),
-        "egress packet count {name}"
-    );
-    if expected {
-        assert_eq!(&output.bytes[..output.len], packet, "egress bytes {name}");
-    }
 }

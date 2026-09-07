@@ -18,11 +18,7 @@ use crate::{
     SessionCancellation, TcpFlow, TunNetworkFullRebuildReason, TunNetworkResetError, UdpCandidate,
 };
 
-// Unsupported roots type-check bridge callbacks but never own a packet loop.
-#[cfg(test)]
-pub(crate) const PACKET_QUANTUM: usize = 8;
 pub(crate) const INGRESS_SLOTS: usize = 16;
-pub(crate) const TCP_REAP_QUANTUM: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OwnerExit {

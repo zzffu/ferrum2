@@ -53,7 +53,6 @@ mod tests {
                 ring_capacity: 1 << 20,
                 ready_timeout: Duration::from_secs(1),
                 max_tcp_flows: 1,
-                tcp_buffer_bytes: 4_096,
                 tcp_timeout: Duration::from_secs(1),
                 udp_timeout: Duration::from_secs(1),
                 max_udp_mappings: 1,

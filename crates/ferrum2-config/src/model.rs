@@ -46,7 +46,6 @@ pub struct TunConfig {
     pub ring_capacity: u32,
     pub ready_timeout: Duration,
     pub max_tcp_flows: usize,
-    pub tcp_buffer_bytes: usize,
     pub max_udp_mappings: usize,
     pub udp_filtering: UdpFiltering,
 }

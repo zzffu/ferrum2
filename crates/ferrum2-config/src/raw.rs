@@ -11,8 +11,8 @@ use crate::{
     DEFAULT_MAX_CONNECTIONS, DEFAULT_REPLAY_CAPACITY, DEFAULT_ROUTE_SNIFF_MAX_BYTES,
     DEFAULT_ROUTE_SNIFF_TIMEOUT_MS, DEFAULT_SHUTDOWN_GRACE_MS, DEFAULT_TUN_MAX_TCP_FLOWS,
     DEFAULT_TUN_MAX_UDP_MAPPINGS, DEFAULT_TUN_MTU, DEFAULT_TUN_READY_TIMEOUT_MS,
-    DEFAULT_TUN_RING_CAPACITY, DEFAULT_TUN_TCP_BUFFER_BYTES, DEFAULT_UDP_IDLE_TIMEOUT_MS,
-    DEFAULT_UDP_MAX_BUFFERED_BYTES, DEFAULT_UDP_MAX_SESSIONS,
+    DEFAULT_TUN_RING_CAPACITY, DEFAULT_UDP_IDLE_TIMEOUT_MS, DEFAULT_UDP_MAX_BUFFERED_BYTES,
+    DEFAULT_UDP_MAX_SESSIONS,
 };
 
 #[derive(Deserialize)]
@@ -85,8 +85,6 @@ pub(super) struct RawTun {
     pub(super) ready_timeout_ms: u64,
     #[serde(default = "default_tun_max_tcp_flows")]
     pub(super) max_tcp_flows: u64,
-    #[serde(default = "default_tun_tcp_buffer_bytes")]
-    pub(super) tcp_buffer_bytes: u64,
     #[serde(default = "default_tun_max_udp_mappings")]
     pub(super) max_udp_mappings: u64,
     #[serde(default = "default_tun_udp_filtering")]
@@ -532,10 +530,6 @@ const fn default_tun_ready_timeout_ms() -> u64 {
 
 const fn default_tun_max_tcp_flows() -> u64 {
     DEFAULT_TUN_MAX_TCP_FLOWS
-}
-
-const fn default_tun_tcp_buffer_bytes() -> u64 {
-    DEFAULT_TUN_TCP_BUFFER_BYTES
 }
 
 const fn default_tun_max_udp_mappings() -> u64 {

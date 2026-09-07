@@ -15,7 +15,6 @@ pub(super) fn record_tun_event(
 
     match event {
         TunEvent::PacketAccepted => metrics.tun_packet_accepted(),
-        TunEvent::PacketFoundationDropped => metrics.tun_packet_foundation_dropped(),
         TunEvent::SessionStarted => metrics.tun_session_started(),
         TunEvent::StrictRouteFilterInstalled => {
             metrics.tun_strict_route_filter_install(StrictRouteFilterInstallResult::Success);
@@ -151,7 +150,6 @@ pub(super) fn record_tun_event(
         TunEvent::TcpFlowsActive(flows) => metrics.set_tun_tcp_flows_active(flows),
         TunEvent::TcpFlowRejectedLimit => metrics.tun_tcp_flow_rejected_limit(),
         TunEvent::TcpFlowResetRestart => metrics.tun_tcp_flow_reset_restart(),
-        TunEvent::TcpBridgeBlocked => metrics.tun_tcp_bridge_blocked(),
         TunEvent::UdpAssociationsActive(associations) => {
             metrics.set_tun_udp_associations_active(associations);
         }
@@ -280,6 +278,9 @@ pub(super) const fn map_runtime_full_rebuild_reason(
         ferrum2_tun::TunNetworkFullRebuildReason::StrictRouteDamage => {
             ManagedNetworkDamage::StrictRouteDamaged
         }
+        ferrum2_tun::TunNetworkFullRebuildReason::TcpIngressDamage => {
+            ManagedNetworkDamage::TcpIngress
+        }
         ferrum2_tun::TunNetworkFullRebuildReason::OwnershipLedgerDamage => {
             ManagedNetworkDamage::OwnershipLedgerUntrusted
         }
@@ -306,6 +307,9 @@ const fn map_observability_full_rebuild_reason(
         ferrum2_tun::TunNetworkFullRebuildReason::MtuDamage => NetworkFullRebuildReason::MtuDamage,
         ferrum2_tun::TunNetworkFullRebuildReason::StrictRouteDamage => {
             NetworkFullRebuildReason::StrictRouteDamage
+        }
+        ferrum2_tun::TunNetworkFullRebuildReason::TcpIngressDamage => {
+            NetworkFullRebuildReason::TcpIngressDamage
         }
         ferrum2_tun::TunNetworkFullRebuildReason::OwnershipLedgerDamage => {
             NetworkFullRebuildReason::OwnershipLedgerDamage

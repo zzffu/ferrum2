@@ -6,4 +6,5 @@ mod managed_routes;
 mod notification;
 mod session;
 mod strict_route;
+mod tcp_ingress;
 mod underlay;

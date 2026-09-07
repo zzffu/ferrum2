@@ -12,6 +12,10 @@ fn only_managed_damage_escalates_a_network_change_to_full_rebuild() {
             settle_underlay: false,
         }
     );
+    assert_eq!(
+        map_managed_state_damage(ferrum2_platform_windows::ManagedStateDamage::TcpIngress),
+        crate::TunNetworkFullRebuildReason::TcpIngressDamage
+    );
     for damage in [
         ferrum2_platform_windows::ManagedStateDamage::Adapter,
         ferrum2_platform_windows::ManagedStateDamage::Session,
@@ -20,6 +24,7 @@ fn only_managed_damage_escalates_a_network_change_to_full_rebuild() {
         ferrum2_platform_windows::ManagedStateDamage::Route,
         ferrum2_platform_windows::ManagedStateDamage::Dns,
         ferrum2_platform_windows::ManagedStateDamage::StrictRoute,
+        ferrum2_platform_windows::ManagedStateDamage::TcpIngress,
         ferrum2_platform_windows::ManagedStateDamage::OwnershipLedger,
     ] {
         assert_eq!(
@@ -434,8 +439,10 @@ async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
         tokio::task::yield_now().await;
     }
     for port in 10_000..10_033 {
-        let (flow, _owner) =
-            tcp_flow_pair(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port)), 4);
+        let (flow, _peer, _lease) =
+            tcp_flow_for_test(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port)))
+                .await
+                .expect("loopback TCP flow");
         flow_sender
             .send(SessionItem {
                 value: flow,
@@ -457,7 +464,7 @@ async fn tcp_handler_churn_is_reaped_and_panic_fails_the_required_root() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_owner() {
+async fn pending_tcp_handler_survives_quiesce_and_forced_shutdown_reaps_every_owner() {
     use ferrum2_runtime::{
         OwnerRegistry, ProcessCause, ProcessCleanupFailure, ProcessExitKind, ProcessState,
         ProcessSupervisor,
@@ -474,7 +481,8 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
     enum FakeOwnerRequest {
         Admit {
             flow: crate::TcpFlow,
-            owner: crate::tcp::FlowOwner,
+            peer: tokio::net::TcpStream,
+            lease: crate::tcp::TcpSocketLease,
             result: std::sync::mpsc::SyncSender<bool>,
         },
     }
@@ -508,7 +516,8 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
                 match requested_admissions.try_recv() {
                     Ok(FakeOwnerRequest::Admit {
                         flow,
-                        owner,
+                        peer,
+                        lease,
                         result,
                     }) => {
                         let accepted = owner_control.admitting.load(Ordering::Acquire)
@@ -519,7 +528,7 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
                                 })
                                 .is_ok();
                         if accepted {
-                            owners.push((owner, owner_registry.track_tun_tcp_flow()));
+                            owners.push((peer, lease, owner_registry.track_tun_tcp_flow()));
                             owner_flow_count.fetch_add(1, Ordering::AcqRel);
                         }
                         let _ = result.send(accepted);
@@ -532,14 +541,14 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
             }
 
             let cleanup_deadline = std::time::Instant::now() + Duration::from_secs(3);
-            while owners.iter().any(|(owner, _)| !owner.is_aborted())
+            while owners.iter().any(|(_, lease, _)| !lease.flow_dropped())
                 && std::time::Instant::now() < cleanup_deadline
             {
                 std::thread::yield_now();
             }
             let owned_flows = owners.len();
             saw_aborted_flow.store(
-                owned_flows != 0 && owners.iter().all(|(owner, _)| owner.is_aborted()),
+                owned_flows != 0 && owners.iter().all(|(_, lease, _)| lease.flow_dropped()),
                 Ordering::Release,
             );
             drop(owners);
@@ -549,12 +558,10 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
             owner_exit
         });
 
-        let pressured = Arc::new(tokio::sync::Notify::new());
-        let pressure_reported = Arc::new(AtomicBool::new(false));
+        let handler_pending = Arc::new(tokio::sync::Notify::new());
         let handler_starts = Arc::new(AtomicUsize::new(0));
         let handler_drops = Arc::new(AtomicUsize::new(0));
-        let handler_pressured = Arc::clone(&pressured);
-        let handler_pressure_reported = Arc::clone(&pressure_reported);
+        let pending_handler = Arc::clone(&handler_pending);
         let recorded_handler_starts = Arc::clone(&handler_starts);
         let recorded_handler_drops = Arc::clone(&handler_drops);
         let root_flow_count = Arc::clone(&flow_count);
@@ -574,37 +581,16 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
                 flow_count: root_flow_count,
                 association_count: Arc::new(AtomicUsize::new(0)),
                 registry: root_registry,
-                handle_tcp: Arc::new(move |mut flow, _cancellation, _session| {
-                    let pressured = Arc::clone(&handler_pressured);
-                    let pressure_reported = Arc::clone(&handler_pressure_reported);
+                handle_tcp: Arc::new(move |flow, _cancellation, _session| {
+                    let pending = Arc::clone(&pending_handler);
                     let starts = Arc::clone(&recorded_handler_starts);
                     let drops = Arc::clone(&recorded_handler_drops);
                     Box::pin(async move {
                         starts.fetch_add(1, Ordering::SeqCst);
                         let _drop = HandlerDrop(drops);
-                        flow.write_all(b"full")
-                            .await
-                            .expect("fill the bounded application-to-stack bridge");
-                        let unexpected =
-                            std::future::poll_fn(
-                                |context| match tokio::io::AsyncWrite::poll_write(
-                                    std::pin::Pin::new(&mut flow),
-                                    context,
-                                    b"x",
-                                ) {
-                                    std::task::Poll::Pending => {
-                                        if !pressure_reported.swap(true, Ordering::SeqCst) {
-                                            pressured.notify_one();
-                                        }
-                                        std::task::Poll::Pending
-                                    }
-                                    ready => ready,
-                                },
-                            )
-                            .await;
-                        panic!(
-                            "pressured flow completed before forced cancellation: {unexpected:?}"
-                        );
+                        let _flow = flow;
+                        pending.notify_one();
+                        std::future::pending::<()>().await;
                     })
                 }),
                 handle_udp: Arc::new(|_: crate::UdpCandidate, _, _| Box::pin(async {})),
@@ -627,23 +613,26 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
         }
         assert!(active.load(Ordering::Acquire), "TUN root becomes active");
 
-        let admit = |port| {
-            let (flow, owner) =
-                tcp_flow_pair(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port)), 4);
-            let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(0);
-            owner_requests
-                .send(FakeOwnerRequest::Admit {
-                    flow,
-                    owner,
-                    result: result_sender,
-                })
-                .expect("fake owner is accepting commands");
-            result_receiver.recv().expect("fake owner admission result")
-        };
-        assert!(admit(10_000), "active TUN owner admits the first flow");
-        tokio::time::timeout(Duration::from_secs(1), pressured.notified())
+        let (flow, peer, lease) =
+            tcp_flow_for_test(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 10_000)))
+                .await
+                .expect("loopback TCP flow");
+        let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(0);
+        owner_requests
+            .send(FakeOwnerRequest::Admit {
+                flow,
+                peer,
+                lease,
+                result: result_sender,
+            })
+            .expect("fake owner is accepting commands");
+        assert!(
+            result_receiver.recv().expect("fake owner admission result"),
+            "active TUN owner admits the first flow"
+        );
+        tokio::time::timeout(Duration::from_secs(1), handler_pending.notified())
             .await
-            .expect("TCP handler reaches real bridge backpressure");
+            .expect("TCP handler becomes pending");
         assert_eq!(handler_starts.load(Ordering::SeqCst), 1);
         assert_eq!(handler_drops.load(Ordering::SeqCst), 0);
         assert_eq!(flow_count.load(Ordering::Acquire), 1);
@@ -651,6 +640,11 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
         assert_eq!(registry.snapshot().active_tun_tcp_flows, 1);
         assert_eq!(registry.snapshot().active_tun_handler_tasks, 1);
 
+        // Complete real socket I/O before the paused shutdown timer is armed.
+        let (flow, peer, lease) =
+            tcp_flow_for_test(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 10_001)))
+                .await
+                .expect("second loopback TCP flow");
         shutdown_sender.send(()).expect("request process shutdown");
         for _ in 0..100 {
             if !admitting.load(Ordering::Acquire) {
@@ -662,7 +656,19 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
             !admitting.load(Ordering::Acquire),
             "quiescing reaches the fake owner"
         );
-        assert!(!admit(10_001), "quiescing rejects a new TCP flow");
+        let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(0);
+        owner_requests
+            .send(FakeOwnerRequest::Admit {
+                flow,
+                peer,
+                lease,
+                result: result_sender,
+            })
+            .expect("fake owner is accepting commands");
+        assert!(
+            !result_receiver.recv().expect("fake owner admission result"),
+            "quiescing rejects a new TCP flow"
+        );
         assert_eq!(handler_starts.load(Ordering::SeqCst), 1);
         assert_eq!(flow_count.load(Ordering::Acquire), 1);
 
@@ -670,7 +676,7 @@ async fn pressured_tcp_flow_survives_quiesce_and_forced_shutdown_reaps_every_own
         tokio::task::yield_now().await;
         assert!(
             !run.is_finished(),
-            "pressured flow remains owned during grace"
+            "pending flow remains owned during grace"
         );
         assert_eq!(handler_drops.load(Ordering::SeqCst), 0);
         assert_eq!(flow_count.load(Ordering::Acquire), 1);

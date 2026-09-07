@@ -14,7 +14,6 @@ pub struct Config {
     pub ring_capacity: u32,
     pub ready_timeout: Duration,
     pub max_tcp_flows: usize,
-    pub tcp_buffer_bytes: usize,
     pub tcp_timeout: Duration,
     pub udp_timeout: Duration,
     pub max_udp_mappings: usize,
@@ -83,11 +82,10 @@ pub enum TunDiagnosticReason {
     WintunRingFull,
 }
 
-/// One redacted event emitted by the TUN owner or a generation-bound bridge.
+/// One redacted event emitted by the TUN owner or a generation-bound worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TunEvent {
     PacketAccepted,
-    PacketFoundationDropped,
     SessionStarted,
     StrictRouteFilterInstalled,
     StrictRouteFilterInstallFailed,
@@ -122,7 +120,6 @@ pub enum TunEvent {
     TcpFlowsActive(usize),
     TcpFlowRejectedLimit,
     TcpFlowResetRestart,
-    TcpBridgeBlocked,
     UdpAssociationsActive(usize),
     UdpCandidatesActive(usize),
     UdpAssociationCreated,
@@ -167,6 +164,7 @@ pub enum TunNetworkFullRebuildReason {
     RouteDamage,
     DnsDamage,
     StrictRouteDamage,
+    TcpIngressDamage,
     OwnershipLedgerDamage,
 }
 

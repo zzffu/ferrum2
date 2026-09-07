@@ -41,6 +41,7 @@ pub(super) use super::super::core::strict_route::{
     StrictRouteOperations, StrictRouteSession, guid_matches, strict_route_state_matches,
     wfp_readback_present,
 };
+pub(super) use super::super::core::tcp_ingress::{TcpIngressOperations, TcpIngressSession};
 pub(super) use super::super::core::wintun::{
     SessionJournal, classify_receive_null, classify_send_allocation_failure, classify_wait_result,
 };
@@ -49,9 +50,13 @@ pub(super) use crate::strict_route::{
     STRICT_ROUTE_BLOCK_WEIGHT, StrictRouteAction, StrictRouteCondition, StrictRouteLayer,
     StrictRouteRule, StrictRouteRuleKind, strict_route_rules,
 };
+pub(super) use crate::tcp_ingress::{
+    TCP_INGRESS_FILTER_WEIGHT, TCP_PROTOCOL, TcpIngressCondition, TcpIngressLayer, TcpIngressRule,
+    tcp_ingress_rules, validate_tcp_ingress_addresses,
+};
 pub(super) use crate::{
     Error, ErrorKind, IpPrefix, Ipv4Prefix, Ipv6Prefix, ManagedStateDamage, ManagedTunHealth,
-    NetworkChangeWaitOutcome, SendOutcome, WaitOutcome,
+    NetworkChangeWaitOutcome, SendOutcome, TcpIngressEndpoint, WaitOutcome,
 };
 pub(super) use ferrum2_net::{
     DialOptions, InterfaceBinding, NetworkFamily, NetworkInterfaceCatalog,
@@ -67,8 +72,12 @@ pub(super) use windows_sys::Win32::NetworkManagement::IpHelper::{
     DNS_SETTING_IPV6, DNS_SETTING_NAMESERVER, MIB_IPFORWARD_ROW2, MIB_UNICASTIPADDRESS_ROW,
 };
 pub(super) use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_UINT64, FWPM_CONDITION_IP_LOCAL_INTERFACE,
-    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_ARRAY16_TYPE, FWP_BYTE_BLOB_TYPE, FWP_UINT8,
+    FWP_UINT16, FWP_UINT32, FWP_UINT64, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_IP_LOCAL_ADDRESS,
+    FWPM_CONDITION_IP_LOCAL_INTERFACE, FWPM_CONDITION_IP_LOCAL_PORT, FWPM_CONDITION_IP_PROTOCOL,
+    FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
 };
 pub(super) use windows_sys::Win32::Networking::WinSock::{
     AF_UNSPEC, IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, IpDadStateDeprecated,

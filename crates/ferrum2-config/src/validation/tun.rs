@@ -94,9 +94,6 @@ pub(super) fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
     if !(1..=4_096).contains(&raw.max_tcp_flows) {
         return Err(ConfigError::semantic(ConfigField::TunMaxTcpFlows));
     }
-    if !(4_096..=262_144).contains(&raw.tcp_buffer_bytes) {
-        return Err(ConfigError::semantic(ConfigField::TunTcpBufferBytes));
-    }
     if !(1..=8_192).contains(&raw.max_udp_mappings) {
         return Err(ConfigError::semantic(ConfigField::TunMaxUdpMappings));
     }
@@ -124,7 +121,6 @@ pub(super) fn validate_tun(raw: RawTun) -> Result<ValidatedTun, ConfigError> {
             ring_capacity: raw.ring_capacity as u32,
             ready_timeout: Duration::from_millis(raw.ready_timeout_ms),
             max_tcp_flows: raw.max_tcp_flows as usize,
-            tcp_buffer_bytes: raw.tcp_buffer_bytes as usize,
             max_udp_mappings: raw.max_udp_mappings as usize,
             udp_filtering,
         },
@@ -152,7 +148,8 @@ pub(super) fn validate_tun_ipv6_address(value: &str) -> Result<Ipv6Net, ConfigEr
         .parse()
         .map_err(|_| ConfigError::semantic(ConfigField::TunIpv6Address))?;
     let address = network.addr();
-    if address.is_unspecified()
+    if network.prefix_len() > 126
+        || address.is_unspecified()
         || address.is_loopback()
         || address.is_multicast()
         || address == network.network()

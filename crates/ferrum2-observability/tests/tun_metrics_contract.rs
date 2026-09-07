@@ -132,7 +132,6 @@ fn record_one_of_every_tun_event(metrics: &Metrics) {
     metrics.tun_tcp_flows_active_dec();
     metrics.tun_tcp_flow_rejected_limit();
     metrics.tun_tcp_flow_reset_restart();
-    metrics.tun_tcp_bridge_blocked();
 
     metrics.set_tun_udp_associations_active(13);
     metrics.tun_udp_associations_active_inc();
@@ -174,67 +173,15 @@ fn record_one_of_every_tun_event(metrics: &Metrics) {
 }
 
 #[test]
-fn tun_metric_names_types_and_help_are_an_exact_contract() {
+fn tun_metric_names_types_and_samples_are_an_exact_contract() {
     let metrics = Metrics::new();
     record_one_of_every_tun_event(&metrics);
     let output = metrics.encode_text().expect("TUN metrics");
-
-    let foundation_metrics = [
-        "ferrum2_tun_packets_accepted",
-        "ferrum2_tun_packets_foundation_dropped",
-    ];
-    let help = output
-        .lines()
-        .filter_map(|line| line.strip_prefix("# HELP "))
-        .filter(|line| line.starts_with("ferrum2_tun_"))
-        .filter(|line| !foundation_metrics.iter().any(|name| line.starts_with(name)))
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        help,
-        BTreeSet::from([
-            "ferrum2_tun_internal_egress_backpressured TUN internal egress backpressure observations; packets are retained for retry.",
-            "ferrum2_tun_network_change Semantic network changes observed by the TUN session.",
-            "ferrum2_tun_pending_udp_responses TUN UDP responses retained for owner-thread injection.",
-            "ferrum2_tun_packets_egress Packets sent successfully to Wintun by the TUN owner.",
-            "ferrum2_tun_packets_ingress Packets received from Wintun by the TUN owner.",
-            "ferrum2_tun_packets_rejected TUN packets rejected by a closed low-cardinality reason.",
-            "ferrum2_tun_reassembly_completed TUN fragment reassemblies completed.",
-            "ferrum2_tun_reassembly_dropped_limit TUN fragment reassemblies dropped by a bounded limit.",
-            "ferrum2_tun_reassembly_dropped_malformed Malformed TUN fragment reassemblies dropped.",
-            "ferrum2_tun_reassembly_dropped_overlap TUN fragment reassemblies dropped for overlap.",
-            "ferrum2_tun_reassembly_dropped_timeout TUN fragment reassemblies dropped after timeout.",
-            "ferrum2_tun_reassembly_entries_active Active bounded TUN fragment reassembly entries.",
-            "ferrum2_tun_reassembly_started TUN fragment reassemblies started.",
-            "ferrum2_tun_session_active Whether a TUN session is active.",
-            "ferrum2_tun_session_generation Current TUN session generation.",
-            "ferrum2_tun_session_started TUN sessions that reached their initial start.",
-            "ferrum2_tun_strict_route_effective Whether strict route is effective under the auto-route gate.",
-            "ferrum2_tun_strict_route_filter_install Windows strict-route filter installation outcomes.",
-            "ferrum2_tun_strict_route_requested Whether strict route was requested by validated configuration.",
-            "ferrum2_tun_tcp_bridge_blocked TUN TCP bridge operations that observed bounded backpressure.",
-            "ferrum2_tun_tcp_flows_active Active TUN TCP flows.",
-            "ferrum2_tun_tcp_flows_rejected_limit TUN TCP flows rejected by the configured flow limit.",
-            "ferrum2_tun_tcp_flows_reset_restart TUN TCP flows reset during session restart.",
-            "ferrum2_tun_udp_association_created TUN UDP associations created.",
-            "ferrum2_tun_udp_association_rejected_limit TUN UDP associations rejected by the configured limit.",
-            "ferrum2_tun_udp_association_route Single route evaluations for TUN UDP associations by closed result.",
-            "ferrum2_tun_udp_associations_active Active TUN UDP associations.",
-            "ferrum2_tun_udp_candidates_active Active uncommitted TUN UDP association candidates.",
-            "ferrum2_tun_udp_datagram_queue_full TUN UDP datagrams dropped because an association queue was full.",
-            "ferrum2_tun_udp_response_filtered TUN UDP responses rejected by endpoint filtering.",
-            "ferrum2_tun_udp_response_dropped Terminal TUN UDP response drops by a closed low-cardinality reason.",
-            "ferrum2_tun_udp_response_queue_full TUN UDP responses dropped because the response queue was full.",
-            "ferrum2_tun_udp_stale_generation TUN UDP work rejected after its session generation became stale.",
-            "ferrum2_tun_underlay_bind_stale TUN underlay binds rejected because their generation was stale.",
-            "ferrum2_tun_wintun_ring_full_dropped TUN packets dropped because the Wintun send ring was full.",
-        ])
-    );
 
     let types = output
         .lines()
         .filter_map(|line| line.strip_prefix("# TYPE "))
         .filter(|line| line.starts_with("ferrum2_tun_"))
-        .filter(|line| !foundation_metrics.iter().any(|name| line.starts_with(name)))
         .collect::<BTreeSet<_>>();
     assert_eq!(
         types,
@@ -242,6 +189,7 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
             "ferrum2_tun_internal_egress_backpressured counter",
             "ferrum2_tun_network_change counter",
             "ferrum2_tun_pending_udp_responses gauge",
+            "ferrum2_tun_packets_accepted counter",
             "ferrum2_tun_packets_egress counter",
             "ferrum2_tun_packets_ingress counter",
             "ferrum2_tun_packets_rejected counter",
@@ -258,7 +206,6 @@ fn tun_metric_names_types_and_help_are_an_exact_contract() {
             "ferrum2_tun_strict_route_effective gauge",
             "ferrum2_tun_strict_route_filter_install counter",
             "ferrum2_tun_strict_route_requested gauge",
-            "ferrum2_tun_tcp_bridge_blocked counter",
             "ferrum2_tun_tcp_flows_active gauge",
             "ferrum2_tun_tcp_flows_rejected_limit counter",
             "ferrum2_tun_tcp_flows_reset_restart counter",

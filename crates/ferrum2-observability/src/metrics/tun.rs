@@ -124,7 +124,6 @@ type TunUdpAssociationRouteFamily = SharedClosedFamily<
 
 pub(super) struct TunMetrics {
     tun_packets_accepted: Counter,
-    tun_packets_foundation_dropped: Counter,
     tun_session_started: Counter,
     tun_session_generation: Gauge,
     tun_session_active: Gauge,
@@ -138,7 +137,6 @@ pub(super) struct TunMetrics {
     tun_tcp_flows_active: Gauge,
     tun_tcp_flows_rejected_limit: Counter,
     tun_tcp_flows_reset_restart: Counter,
-    tun_tcp_bridge_blocked: Counter,
     tun_udp_associations_active: Gauge,
     tun_udp_candidates_active: Gauge,
     tun_udp_association_created: Counter,
@@ -171,7 +169,6 @@ pub(super) struct TunMetrics {
 impl TunMetrics {
     pub(super) fn register(registry: &mut Registry) -> Self {
         let tun_packets_accepted = Counter::default();
-        let tun_packets_foundation_dropped = Counter::default();
         let tun_session_started = Counter::default();
         let tun_session_generation = Gauge::default();
         let tun_session_active = Gauge::default();
@@ -191,7 +188,6 @@ impl TunMetrics {
         let tun_tcp_flows_active = Gauge::default();
         let tun_tcp_flows_rejected_limit = Counter::default();
         let tun_tcp_flows_reset_restart = Counter::default();
-        let tun_tcp_bridge_blocked = Counter::default();
         let tun_udp_associations_active = Gauge::default();
         let tun_udp_candidates_active = Gauge::default();
         let tun_udp_association_created = Counter::default();
@@ -246,13 +242,8 @@ impl TunMetrics {
         ));
         registry.register(
             "ferrum2_tun_packets_accepted",
-            "Validated TUN packets accepted by the foundation stack",
+            "Validated TUN packets accepted for processing",
             tun_packets_accepted.clone(),
-        );
-        registry.register(
-            "ferrum2_tun_packets_foundation_dropped",
-            "TUN packets deterministically dropped before policy composition",
-            tun_packets_foundation_dropped.clone(),
         );
         registry.register(
             "ferrum2_tun_session_started",
@@ -318,11 +309,6 @@ impl TunMetrics {
             "ferrum2_tun_tcp_flows_reset_restart",
             "TUN TCP flows reset during session restart",
             tun_tcp_flows_reset_restart.clone(),
-        );
-        registry.register(
-            "ferrum2_tun_tcp_bridge_blocked",
-            "TUN TCP bridge operations that observed bounded backpressure",
-            tun_tcp_bridge_blocked.clone(),
         );
         registry.register(
             "ferrum2_tun_udp_associations_active",
@@ -461,7 +447,6 @@ impl TunMetrics {
         );
         Self {
             tun_packets_accepted,
-            tun_packets_foundation_dropped,
             tun_session_started,
             tun_session_generation,
             tun_session_active,
@@ -475,7 +460,6 @@ impl TunMetrics {
             tun_tcp_flows_active,
             tun_tcp_flows_rejected_limit,
             tun_tcp_flows_reset_restart,
-            tun_tcp_bridge_blocked,
             tun_udp_associations_active,
             tun_udp_candidates_active,
             tun_udp_association_created,
@@ -510,11 +494,6 @@ impl TunMetrics {
 impl Metrics {
     pub fn tun_packet_accepted(&self) {
         self.tun.tun_packets_accepted.inc();
-    }
-
-    /// Records one accepted packet consumed by the foundation stack before policy.
-    pub fn tun_packet_foundation_dropped(&self) {
-        self.tun.tun_packets_foundation_dropped.inc();
     }
 
     /// Records the first successful start of a TUN session.
@@ -606,11 +585,6 @@ impl Metrics {
     /// Records one TUN TCP flow reset during session restart.
     pub fn tun_tcp_flow_reset_restart(&self) {
         self.tun.tun_tcp_flows_reset_restart.inc();
-    }
-
-    /// Records one bounded wait caused by TUN TCP bridge backpressure.
-    pub fn tun_tcp_bridge_blocked(&self) {
-        self.tun.tun_tcp_bridge_blocked.inc();
     }
 
     /// Increments the active TUN UDP association gauge.

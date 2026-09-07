@@ -10,7 +10,6 @@ fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
     let metrics = ferrum2_observability::Metrics::new();
     let events = [
         TunEvent::PacketAccepted,
-        TunEvent::PacketFoundationDropped,
         TunEvent::SessionStarted,
         TunEvent::StrictRouteFilterInstalled,
         TunEvent::StrictRouteFilterInstallFailed,
@@ -47,7 +46,6 @@ fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
         TunEvent::TcpFlowsActive(11),
         TunEvent::TcpFlowRejectedLimit,
         TunEvent::TcpFlowResetRestart,
-        TunEvent::TcpBridgeBlocked,
         TunEvent::UdpAssociationsActive(13),
         TunEvent::UdpCandidatesActive(17),
         TunEvent::UdpAssociationCreated,
@@ -108,7 +106,6 @@ fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
     let output = metrics.encode_text().expect("TUN metrics");
     for sample in [
         "ferrum2_tun_packets_accepted_total 1",
-        "ferrum2_tun_packets_foundation_dropped_total 1",
         "ferrum2_tun_session_started_total 1",
         "ferrum2_network_reset_total{reason=\"network_change\",result=\"started\"} 1",
         "ferrum2_network_reset_total{reason=\"network_change\",result=\"succeeded\"} 1",
@@ -130,7 +127,6 @@ fn every_tun_event_maps_to_one_exact_metric_or_closed_diagnostic() {
         "ferrum2_tun_tcp_flows_active 11",
         "ferrum2_tun_tcp_flows_rejected_limit_total 1",
         "ferrum2_tun_tcp_flows_reset_restart_total 1",
-        "ferrum2_tun_tcp_bridge_blocked_total 1",
         "ferrum2_tun_udp_associations_active 13",
         "ferrum2_tun_udp_candidates_active 17",
         "ferrum2_tun_udp_association_created_total 1",

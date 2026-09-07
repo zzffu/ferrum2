@@ -7,6 +7,7 @@ pub(crate) const OWNER_WORK_BUDGET: usize = 64;
 
 pub(crate) struct OwnerSessionServices {
     pub(crate) registry: OwnerRegistry,
+    pub(crate) runtime: tokio::runtime::Handle,
     pub(crate) network_catalog: ferrum2_platform_windows::WindowsNetworkInterfaceCatalog,
     pub(crate) events: TunEventSink,
     pub(crate) underlay: UnderlayPublisher,

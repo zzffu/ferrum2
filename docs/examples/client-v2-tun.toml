@@ -11,7 +11,6 @@ mtu = 1420
 ring_capacity = 8388608
 ready_timeout_ms = 10000
 max_tcp_flows = 256
-tcp_buffer_bytes = 32768
 max_udp_mappings = 1024
 udp_filtering = "endpoint_independent"
 auto_route = true

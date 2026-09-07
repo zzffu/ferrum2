@@ -49,10 +49,15 @@ use super::managed::{
     require_address_absent,
 };
 use super::managed_dns::{PlatformManagedIpv4Dns, PlatformManagedIpv6Dns};
-use super::network::{PlatformUnderlay, snapshot_underlay};
+use super::network::{PlatformUnderlay, route_identity, snapshot_underlay, unconstrained_route};
 use super::notification::{NotificationOwners, subscribe_network_changes};
 use super::strict_route::PlatformStrictRouteOperations;
-use crate::{AdapterConfig, CreateError, ManagedTunHealth, NetworkChangeOutcome};
+use super::tcp_ingress::{PlatformTcpIngressOperations, PlatformTcpIngressSession};
+use crate::tcp_ingress::validate_tcp_ingress_addresses;
+use crate::{
+    AdapterConfig, CreateError, ManagedStateDamage, ManagedTunHealth, NetworkChangeOutcome,
+    TcpIngressEndpoint,
+};
 use crate::{Error, SendOutcome, WaitOutcome};
 
 #[derive(Clone, Copy)]
@@ -85,6 +90,7 @@ pub struct Adapter {
     pub(super) network_catalog: WindowsNetworkInterfaceCatalog,
     pub(super) pending_notifications: Option<NotificationOwners>,
     pub(super) managed: Option<ManagedState>,
+    pub(super) tcp_ingress: Option<PlatformTcpIngressSession>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -126,6 +132,7 @@ impl Adapter {
             network_catalog,
             pending_notifications: None,
             managed: None,
+            tcp_ingress: None,
             _not_send: PhantomData,
         };
         let mut strict_route_install_failed = false;
@@ -158,6 +165,94 @@ impl Adapter {
     /// Returns a read-only platform catalog that recognizes this exact adapter as managed TUN.
     pub fn network_interface_catalog(&self) -> WindowsNetworkInterfaceCatalog {
         self.network_catalog.clone()
+    }
+
+    /// Proves the current system route to one synthetic TCP peer resolves to this managed TUN.
+    pub fn verify_tcp_peer_route(&self, peer: std::net::IpAddr) -> Result<(), Error> {
+        let family_enabled = match peer {
+            std::net::IpAddr::V4(address) => {
+                self.config.ipv4.is_some()
+                    && !address.is_unspecified()
+                    && !address.is_multicast()
+                    && address != std::net::Ipv4Addr::BROADCAST
+            }
+            std::net::IpAddr::V6(address) => {
+                self.config.ipv6.is_some() && !address.is_unspecified() && !address.is_multicast()
+            }
+        };
+        if !family_enabled {
+            return Err(Error::invalid_input());
+        }
+        let route = route_identity(unconstrained_route(std::net::SocketAddr::new(peer, 0))?)?;
+        (route.luid == unsafe { self.luid.Value } && route.index == self.interface_index)
+            .then_some(())
+            .ok_or(Error)
+    }
+    /// Installs a verified, process-owned WFP hard permit for the exact listener endpoints.
+    ///
+    /// The fixed sublayer identity deliberately permits only one live Ferrum2 owner. A concurrent
+    /// owner fails closed rather than sharing, deleting, or widening another process's policy.
+    /// An existing listener epoch must be cleared explicitly before installing its replacement.
+    pub fn install_tcp_ingress(&mut self, endpoints: &[TcpIngressEndpoint]) -> Result<(), Error> {
+        if self.tcp_ingress.is_some() {
+            return Err(Error::invalid_input());
+        }
+        validate_tcp_ingress_addresses(endpoints, self.config.ipv4, self.config.ipv6)?;
+        for endpoint in endpoints {
+            self.verify_tcp_peer_route(endpoint.peer())?;
+        }
+        if self.managed_health()? != ManagedTunHealth::Healthy {
+            return Err(Error::recoverable_session());
+        }
+        let interface_luid = unsafe { self.luid.Value };
+        self.tcp_ingress = Some(PlatformTcpIngressSession::open(
+            PlatformTcpIngressOperations,
+        )?);
+        let install = self
+            .tcp_ingress
+            .as_mut()
+            .ok_or_else(Error::cleanup)
+            .and_then(|session| session.install(endpoints, interface_luid));
+        if let Err(error) = install {
+            let close = self.clear_tcp_ingress();
+            return if close.is_err() || error.kind() == crate::ErrorKind::Cleanup {
+                Err(Error::cleanup())
+            } else {
+                Err(error)
+            };
+        }
+        let routes_exact = endpoints
+            .iter()
+            .try_for_each(|endpoint| self.verify_tcp_peer_route(endpoint.peer()));
+        let health = self.read_managed_health();
+        if routes_exact.is_ok() && health == Ok(ManagedTunHealth::Healthy) {
+            Ok(())
+        } else if self.clear_tcp_ingress().is_err() {
+            Err(Error::cleanup())
+        } else {
+            Err(Error)
+        }
+    }
+
+    /// Closes the dynamic ingress session. Absence is an idempotent successful cleanup.
+    pub fn clear_tcp_ingress(&mut self) -> Result<(), Error> {
+        let Some(session) = self.tcp_ingress.as_mut() else {
+            return Ok(());
+        };
+        session.close()?;
+        self.tcp_ingress = None;
+        Ok(())
+    }
+
+    /// Proves that an installed ingress guard and every security-relevant WFP field remain exact.
+    ///
+    /// This fails when called before installation; absence is tolerated only by general managed
+    /// health so adapter construction can complete before listener binding.
+    pub fn verify_tcp_ingress(&self) -> Result<(), Error> {
+        match self.tcp_ingress.as_ref() {
+            Some(session) if session.health()? => Ok(()),
+            Some(_) | None => Err(Error),
+        }
     }
 
     /// Replaces only the generation-bound underlay snapshot.
@@ -205,6 +300,11 @@ impl Adapter {
         let device_health = self.managed_device_health()?;
         if device_health != ManagedTunHealth::Healthy {
             return Ok(device_health);
+        }
+        if let Some(session) = self.tcp_ingress.as_ref()
+            && !session.health()?
+        {
+            return Ok(ManagedTunHealth::Damaged(ManagedStateDamage::TcpIngress));
         }
         let Some(state) = self.managed.as_ref() else {
             return Ok(ManagedTunHealth::Healthy);
@@ -315,6 +415,21 @@ impl Adapter {
                 state.policy.invalidate();
             }
             return Ok(NetworkChangeOutcome::ManagedStateDamaged(reason));
+        }
+        if let Some(session) = self.tcp_ingress.as_ref() {
+            let healthy = session.health().inspect_err(|_| {
+                if let Some(state) = &self.managed {
+                    state.policy.invalidate();
+                }
+            })?;
+            if !healthy {
+                if let Some(state) = &self.managed {
+                    state.policy.invalidate();
+                }
+                return Ok(NetworkChangeOutcome::ManagedStateDamaged(
+                    ManagedStateDamage::TcpIngress,
+                ));
+            }
         }
         match self.revalidate_managed_network_state(true) {
             Ok(ManagedNetworkValidationOutcome::Unchanged) => Ok(NetworkChangeOutcome::Unchanged),
@@ -747,8 +862,10 @@ impl Adapter {
             luid: unsafe { self.luid.Value },
             index: self.interface_index,
         };
+        let ingress_failed = self.clear_tcp_ingress().is_err();
         let failed = cleanup_transaction(&mut PlatformCleanup(self));
-        failed
+        ingress_failed
+            || failed
             || (identity.luid != 0
                 && identity.index != 0
                 && self.network_catalog.clear_managed_tun(identity).is_err())

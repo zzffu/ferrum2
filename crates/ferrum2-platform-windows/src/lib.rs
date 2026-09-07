@@ -104,6 +104,8 @@ pub enum ManagedStateDamage {
     StrictRoute,
     /// The internal ownership journal is incomplete or contradicts the configured managed plane.
     OwnershipLedger,
+    /// An installed TCP listener ingress guard is absent or no longer exact.
+    TcpIngress,
 }
 
 /// Complete validated setup input for one newly-created Wintun adapter.
@@ -177,6 +179,44 @@ impl Ipv6Prefix {
             .checked_shl(u32::from(128 - self.length))
             .unwrap_or(0);
         u128::from(self.address) & mask == u128::from(self.address)
+    }
+}
+
+/// Exact listener identity authorized by the temporary TCP ingress guard.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct TcpIngressEndpoint {
+    local: SocketAddr,
+    peer: std::net::IpAddr,
+}
+
+impl TcpIngressEndpoint {
+    /// Validates one exact local listener and synthetic remote peer pair without touching the OS.
+    pub fn new(local: SocketAddr, peer: std::net::IpAddr) -> Result<Self, Error> {
+        let local_ip = local.ip();
+        if local.port() == 0
+            || local_ip.is_unspecified()
+            || local_ip.is_multicast()
+            || matches!(local_ip, std::net::IpAddr::V4(address) if address == Ipv4Addr::BROADCAST)
+            || matches!(
+                local,
+                SocketAddr::V6(address) if address.flowinfo() != 0 || address.scope_id() != 0
+            )
+            || peer.is_unspecified()
+            || peer.is_multicast()
+            || matches!(peer, std::net::IpAddr::V4(address) if address == Ipv4Addr::BROADCAST)
+            || local_ip.is_ipv4() != peer.is_ipv4()
+        {
+            return Err(Error::invalid_input());
+        }
+        Ok(Self { local, peer })
+    }
+
+    pub const fn local(self) -> SocketAddr {
+        self.local
+    }
+
+    pub const fn peer(self) -> std::net::IpAddr {
+        self.peer
     }
 }
 
@@ -456,6 +496,9 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+mod tcp_ingress;
 
 #[cfg(any(
     all(windows, target_arch = "x86_64", feature = "live-backend"),

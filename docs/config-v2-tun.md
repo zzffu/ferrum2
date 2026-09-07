@@ -25,7 +25,6 @@ mtu = 1420
 ring_capacity = 8388608
 ready_timeout_ms = 10000
 max_tcp_flows = 256
-tcp_buffer_bytes = 32768
 max_udp_mappings = 1024
 udp_filtering = "endpoint_independent"
 auto_route = true
@@ -43,11 +42,35 @@ capture routes or an IPv6 synthetic DNS address, and the inverse applies to IPv6
 When `route_address` is omitted with `auto_route = true`, Ferrum2 installs the two `/1` capture
 routes for each enabled family. Excludes are subtracted from those captures before any Windows
 route is installed.
+IPv4 retains its existing host-address rules, including rejection of `/31` and `/32`. IPv6
+interface prefixes must be `/126` or wider; `/127` and `/128` do not leave an ordinary synthetic
+peer that Ferrum2 can use for the system TCP path.
+
 
 `auto_dns` retains its existing exact-endpoint semantics. It requires `auto_route = true` and at
 least one synthetic DNS address belonging to an enabled TUN subnet. Only TCP or UDP traffic whose
 destination exactly equals that configured address on port 53 is handled as synthetic DNS;
 Ferrum2 does not capture every port-53 destination and does not alter DoH or DoT traffic.
+
+## System TCP ingress
+
+Managed-TUN TCP is terminated by the Windows TCP stack. Ferrum2 rewrites each admitted packet's
+tuple to a per-family listener bound to the exact TUN interface address, then publishes the accepted
+system stream through the existing routing and outbound pipeline. `max_tcp_flows` remains the
+drop-new admission bound, and `[runtime].idle_timeout_ms` remains the TCP lifetime limit. Windows
+owns socket buffering and automatic tuning; there is no TUN TCP buffer setting.
+
+Each listener epoch installs an automatic, temporary WFP ingress permit scoped to this application,
+TCP, the managed TUN interface LUID, the exact listener address and ephemeral port, and the derived
+same-family synthetic peer. The permit is independent of `strict_route`: it is installed after the
+listeners bind and before admission opens, and is removed when those listeners stop. Ferrum2 does
+not create a broad firewall exception or a persistent Windows Firewall rule.
+
+The derived TCP peer may equal an unassigned synthetic DNS address. DNS matching still uses the
+original destination and exact port 53 before ordinary TCP routing, while reverse TCP translation
+uses the complete internal tuple. TCP DNS, UDP DNS, ordinary TCP, and the unchanged native UDP
+association path therefore coexist without treating every packet to the peer address as DNS.
+
 
 ## UDP mapping and filtering
 
@@ -120,6 +143,11 @@ routes, prove that every packet is captured, or provide a kill switch.
 exactly `auto_route && strict_route`. A configuration with `strict_route = true` and
 `auto_route = false` remains valid so startup diagnostics can report the retained request and an
 effective value of `false`; it must not claim that strict routing is enabled.
+
+The narrowly scoped system-TCP listener ingress permit is separate from strict routing and exists
+even when `strict_route = false`. Changing `strict_route` does not broaden that permit's application,
+protocol, interface, address, port, or peer identity.
+
 
 On Windows, an effective strict route owns one dynamic WFP session. A single-stack TUN installs an
 unsupported-address-family connect guard; a dual-stack TUN installs no family guard. When managed

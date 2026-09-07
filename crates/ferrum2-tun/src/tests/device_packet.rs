@@ -13,62 +13,6 @@ fn parser_address_rejections_preserve_the_public_source_destination_split() {
 }
 
 #[test]
-fn smoltcp_accepts_reassembled_rx_larger_than_reported_device_mtu() {
-    use smoltcp::iface::{
-        Config as InterfaceConfig, Interface, PollIngressSingleResult, SocketSet,
-    };
-    use smoltcp::socket::udp::{PacketBuffer, PacketMetadata, Socket as UdpSocket};
-    use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
-
-    const REPORTED_MTU: usize = 1_280;
-    const PAYLOAD_LEN: usize = 2_000;
-    let packet = ipv4_udp_with_payload(PAYLOAD_LEN);
-    let ParsedPacket::Complete(parsed) = PacketParser::new(Families::DUAL)
-        .parse(&packet)
-        .expect("canonical oversized packet")
-    else {
-        panic!("complete packet expected")
-    };
-    assert!(packet.len() > REPORTED_MTU);
-
-    let mut device = MemoryDevice::new(REPORTED_MTU, Families::DUAL);
-    assert_eq!(device.capabilities().max_transmission_unit, REPORTED_MTU);
-    let mut interface = Interface::new(
-        InterfaceConfig::new(HardwareAddress::Ip),
-        &mut device,
-        Instant::ZERO,
-    );
-    interface.update_ip_addrs(|addresses| {
-        addresses
-            .push(IpCidr::new(
-                IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)),
-                24,
-            ))
-            .expect("one interface address");
-    });
-    let rx = PacketBuffer::new(vec![PacketMetadata::EMPTY; 1], vec![0_u8; PAYLOAD_LEN]);
-    let tx = PacketBuffer::new(vec![PacketMetadata::EMPTY; 1], vec![0_u8; 1]);
-    let mut socket = UdpSocket::new(rx, tx);
-    socket.bind(53).expect("UDP listener");
-    let mut sockets = SocketSet::new(Vec::new());
-    let handle = sockets.add(socket);
-
-    assert!(device.enqueue_parsed(&packet, parsed));
-    assert_ne!(
-        interface.poll_ingress_single(Instant::ZERO, &mut device, &mut sockets),
-        PollIngressSingleResult::None,
-        "smoltcp 0.13.1 must not apply reported egress MTU to RX tokens"
-    );
-    let (payload, metadata) = sockets
-        .get_mut::<UdpSocket>(handle)
-        .recv()
-        .expect("oversized RX delivered");
-    assert_eq!(payload.len(), PAYLOAD_LEN);
-    assert_eq!(metadata.endpoint.port, 10_000);
-    assert_eq!(device.capabilities().max_transmission_unit, REPORTED_MTU);
-}
-
-#[test]
 fn capacity_aware_rotation_drains_eight_sixteen_and_sixty_four_packets() {
     use std::collections::VecDeque;
 
@@ -87,21 +31,29 @@ fn capacity_aware_rotation_drains_eight_sixteen_and_sixty_four_packets() {
         let mut source = VecDeque::from(vec![packet.clone(); count]);
         let mut scheduler = crate::FairScheduler::default();
         let mut drained = 0;
-        while !source.is_empty() || device.ingress_len != 0 {
+        while !source.is_empty() || device.ingress_len != 0 || device.has_output() {
             let outcome = scheduler.run_budget(64, |stage| match stage {
                 crate::WorkStage::Receive if device.ingress_available() != 0 => {
                     let Some(packet) = source.pop_front() else {
                         return StepOutcome::Idle;
                     };
-                    assert!(device.enqueue_parsed(&packet, parsed));
+                    assert_eq!(
+                        device.enqueue_rewritten(&packet, parsed, |_, _| Ok(())),
+                        Ok(true)
+                    );
                     StepOutcome::Worked
                 }
-                crate::WorkStage::Stack => {
-                    if device.dequeue_index().is_some() {
-                        drained += 1;
-                        StepOutcome::Worked
-                    } else {
-                        StepOutcome::Idle
+                crate::WorkStage::Stack => StepOutcome::from_work(device.promote_one_ingress()),
+                crate::WorkStage::FlushOutput => {
+                    match device.flush_output(|_| OutputSendOutcome::Sent) {
+                        OutputFlushOutcome::Empty => StepOutcome::Idle,
+                        OutputFlushOutcome::Sent => {
+                            drained += 1;
+                            StepOutcome::Worked
+                        }
+                        OutputFlushOutcome::DroppedRingFull | OutputFlushOutcome::Fatal => {
+                            unreachable!("deterministic drain always sends")
+                        }
                     }
                 }
                 _ => StepOutcome::Idle,
@@ -160,15 +112,18 @@ fn output_wave_is_packet_bounded_and_preserves_fifo_send_outcomes() {
         .collect::<Vec<_>>();
 
     for packet in &packets {
-        device
-            .transmit(Instant::ZERO)
-            .expect("bounded output slot")
-            .consume(packet.len(), |bytes| bytes.copy_from_slice(packet));
+        let ParsedPacket::Complete(parsed) = PacketParser::new(Families::DUAL)
+            .parse(packet)
+            .expect("valid TCP packet")
+        else {
+            panic!("complete TCP packet expected")
+        };
+        assert_eq!(
+            device.enqueue_rewritten(packet, parsed, |_, _| Ok(())),
+            Ok(true)
+        );
+        assert!(device.promote_one_ingress());
     }
-    assert!(
-        device.transmit(Instant::ZERO).is_none(),
-        "the packet-count bound is exact"
-    );
     assert_eq!(device.output_count, OUTPUT_SLOTS);
     assert_eq!(device.front_output(), Some(packets[0].as_slice()));
 
@@ -240,7 +195,6 @@ fn udp_injection_preserves_the_canonical_packet_reject_reason() {
         device.inject_udp_response(mixed, b"mixed family"),
         crate::UdpInjectOutcome::Rejected(crate::TunRejectReason::InvalidDestination)
     );
-    assert_eq!(device.rejected_output, 2);
     assert!(!device.has_output());
 }
 
@@ -258,7 +212,6 @@ fn stack_injects_pmtu_feedback_at_a_fixed_rate() {
         ),
         MTU,
         1,
-        1_024,
         Duration::from_secs(60),
         Arc::new(AtomicUsize::new(0)),
     )
@@ -305,22 +258,22 @@ fn packet_filter_accepts_only_complete_direct_tcp_or_udp() {
         ("IPv6 TCP", valid_v6_tcp.as_slice()),
         ("IPv4 TCP zero checksum", valid_zero_checksum_tcp.as_slice()),
     ] {
-        assert_ingress_and_egress(name, packet, 1420, true);
+        assert_packet_validity(name, packet, 1420, true);
     }
     let mut zero_v4_udp = valid_v4.clone();
     zero_v4_udp[26..28].fill(0);
-    assert_ingress_and_egress("IPv4 UDP zero checksum", &zero_v4_udp, 1420, true);
+    assert_packet_validity("IPv4 UDP zero checksum", &zero_v4_udp, 1420, true);
 
     let mut df = valid_v4.clone();
     df[6] = 0x40;
     repair_ipv4_header(&mut df);
-    assert_ingress_and_egress("IPv4 DF", &df, 1420, true);
+    assert_packet_validity("IPv4 DF", &df, 1420, true);
 
     let minimum_udp = ipv4_udp_with_payload(0);
-    assert_ingress_and_egress("IPv4 UDP minimum", &minimum_udp, 1420, true);
+    assert_packet_validity("IPv4 UDP minimum", &minimum_udp, 1420, true);
     let mtu_packet = ipv4_udp_with_payload(1420 - 28);
-    assert_ingress_and_egress("MTU exact", &mtu_packet, 1420, true);
-    assert_ingress_and_egress("MTU plus one", &mtu_packet, 1419, false);
+    assert_packet_validity("MTU exact", &mtu_packet, 1420, true);
+    assert_packet_validity("MTU plus one", &mtu_packet, 1419, false);
 
     let mut mutations = vec![
         ("empty", Vec::new()),
@@ -571,7 +524,7 @@ fn packet_filter_accepts_only_complete_direct_tcp_or_udp() {
     }
 
     for (name, packet) in mutations {
-        assert_ingress_and_egress(name, &packet, 1420, false);
+        assert_packet_validity(name, &packet, 1420, false);
     }
 
     for next_header in [0, 43, 44, 50, 51, 59, 60, 135, 139, 140, 253, 254] {
@@ -586,7 +539,7 @@ fn packet_filter_accepts_only_complete_direct_tcp_or_udp() {
             if payload > 0 {
                 packet[40] = 17;
             }
-            assert_ingress_and_egress(
+            assert_packet_validity(
                 &format!("IPv6 next header {next_header} {shape}"),
                 &packet,
                 1420,

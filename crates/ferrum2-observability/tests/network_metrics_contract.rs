@@ -27,6 +27,10 @@ const REBUILD_REASONS: &[(NetworkFullRebuildReason, &str)] = &[
         "strict_route_damage",
     ),
     (
+        NetworkFullRebuildReason::TcpIngressDamage,
+        "tcp_ingress_damage",
+    ),
+    (
         NetworkFullRebuildReason::OwnershipLedgerDamage,
         "ownership_ledger_damage",
     ),

@@ -4,7 +4,7 @@ This file refines the repository-level `AGENTS.md` for this crate.
 
 ## Scope and Boundaries
 
-`ferrum2-tun` owns the private packet-loop supervisor and restartable sessions, the smoltcp stack, canonical packet parsing and fragment reassembly, bounded TCP flow bridges, and UDP candidate/association lifecycle. Routing, policy decisions, DNS behavior, and outbound transports belong to callers. Every queue and state table needs clear ownership plus packet-count, entry-count, protocol-length, timeout, and generation bounds. Do not maintain or reintroduce an aggregate TUN byte budget or startup memory formula.
+`ferrum2-tun` owns the private packet-loop supervisor and restartable sessions, the Windows system TCP packet converter and socket leases, canonical packet parsing and fragment reassembly, and the native UDP candidate/association lifecycle. Routing, policy decisions, DNS behavior, and outbound transports belong to callers. Every queue and state table needs clear ownership plus packet-count, entry-count, protocol-length, timeout, and generation bounds. Do not reintroduce smoltcp, a TCP byte bridge, an aggregate TUN byte budget, or a startup memory formula.
 
 The real adapter path exists only on Windows x86_64 through `ferrum2-platform-windows`. Other targets intentionally build a root that fails during preparation. Do not make unsupported targets appear functional. This crate forbids unsafe code; platform FFI remains isolated in `ferrum2-platform-windows`.
 
@@ -17,11 +17,15 @@ the same target predicate across individual packet items.
 
 Ordinary network-semantic changes perform a lightweight `ResetNetwork`: quiesce admission, publish
 the new network generation, run reset hooks, cancel current TCP/UDP owners, clear provisional and
-packet state, replace only the network runtime/stack, then reopen admission. Preserve the long-lived
-adapter, Wintun session, GUID/LUID, managed addresses/routes/DNS, WFP session, and ownership ledger.
-Confirmed managed-state damage or immutable TUN configuration changes use the separate full-rebuild
-path with reverse cleanup. Cleanup-integrity failures remain terminal. Wintun ring-full is an
-explicitly counted packet drop: do not retry it and do not reset or rebuild for it.
+packet state, stop and join the TCP listener epoch, and remove its exact dynamic TCP-ingress guard.
+Replace the network runtime/stack, bind fresh listener identities, verify peer routes, and install
+and read back the new ingress guard before reopening admission. Preserve the long-lived adapter,
+Wintun session, GUID/LUID, managed addresses/routes/DNS, strict-route WFP session, and ownership ledger.
+Keep TCP identity quarantine in the supervisor across epochs and use its common monotonic clock;
+late packets or accepts must never attach to a new flow. Confirmed managed-state damage or immutable
+TUN configuration changes use the separate full-rebuild path with reverse cleanup.
+Cleanup-integrity failures remain terminal. Wintun ring-full is an explicitly counted packet drop:
+do not retry it and do not reset or rebuild for it.
 
 An adapter-creation cleanup failure takes precedence over a simultaneous stop, shutdown or expired
 readiness deadline. Invalidate the published underlay before reporting that terminal failure;
@@ -45,8 +49,8 @@ interface state. Such behavior belongs only in the explicitly acknowledged host 
 
 Keep `live-backend` selection at module boundaries. `process` and `network` each choose one live or
 hosted implementation; owner-only lifecycle, supervisor, TCP, and runtime code belongs in their
-focused runtime/live submodules. Shared packet, stack, cancellation, and bridge state must not grow
-per-item feature predicates. Platform configuration validity belongs to the platform constructors;
-the TUN process layer validates only its own flow, buffer, timeout, and mapping resource limits.
+focused runtime/live submodules. Shared packet, stack, cancellation, and socket-lease state must not
+grow per-item feature predicates. Platform configuration validity belongs to the platform
+constructors; the TUN process layer validates only its own flow, timeout, and mapping resource limits.
 
 The reviewed static packet contract lives in `tests/fixtures/packets/reassembly-v1.hex` with exact provenance in `tests/fixtures/packets/PROVENANCE.toml`. Keep it distinct from the seed sets under `fuzz/corpus/{packet_reassembly,udp_reset_races,config_legacy_fields,strict_route_rules}/`; the reviewed synthetic config and strict-route seeds are recorded in `fuzz/corpus/PROVENANCE.toml`. The fuzz crate has empty default features. Hosted Linux CI may format, check, compile, run the deterministic smoke corpus, and run sanitizer-backed libFuzzer campaigns only against these four pure in-memory targets. The required campaign budget is one hour total, divided equally across the targets, with evolved corpora, logs, and crash artifacts retained as workflow evidence. It must never open a real TUN adapter, start a virtualization workload, mutate host networking, or qualify the unsupported Linux adapter path.

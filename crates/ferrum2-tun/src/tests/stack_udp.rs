@@ -10,7 +10,6 @@ async fn fragmented_udp_reaches_admission_only_after_out_of_order_reassembly() {
         ),
         1420,
         1,
-        4096,
         Duration::from_secs(60),
         Arc::new(AtomicUsize::new(0)),
         OwnerRegistry::new(),
@@ -19,6 +18,7 @@ async fn fragmented_udp_reaches_admission_only_after_out_of_order_reassembly() {
         UdpFiltering::AddressDependent,
         0,
         OwnerWake::default(),
+        Arc::new(Mutex::new(Default::default())),
     )
     .expect("UDP stack");
 
@@ -53,7 +53,6 @@ async fn atomic_ipv6_fragment_normalization_emits_no_reassembly_lifecycle_events
         ),
         1420,
         1,
-        4096,
         Duration::from_secs(60),
         Arc::new(AtomicUsize::new(0)),
         OwnerRegistry::new(),
@@ -62,6 +61,7 @@ async fn atomic_ipv6_fragment_normalization_emits_no_reassembly_lifecycle_events
         UdpFiltering::AddressDependent,
         0,
         OwnerWake::default(),
+        Arc::new(Mutex::new(Default::default())),
     )
     .expect("UDP stack");
     let observed = Arc::new(Mutex::new(Vec::new()));
@@ -119,7 +119,6 @@ fn fragment_admission_reports_expiration_and_replacement_at_equal_active_count()
         ),
         1420,
         1,
-        4096,
         Duration::from_secs(60),
         Arc::new(AtomicUsize::new(0)),
         OwnerRegistry::new(),
@@ -128,6 +127,7 @@ fn fragment_admission_reports_expiration_and_replacement_at_equal_active_count()
         UdpFiltering::AddressDependent,
         0,
         OwnerWake::default(),
+        Arc::new(Mutex::new(Default::default())),
     )
     .expect("UDP stack");
     let observed = Arc::new(Mutex::new(Vec::new()));
@@ -158,7 +158,7 @@ async fn reassembled_udp_larger_than_mtu_reaches_one_eim_association() {
     let payload = vec![0x5a; 2_000];
     let cases = [
         (
-            fragment_ipv4_udp(&crate::packet::test_support::ipv4_udp(&payload, &[]), MTU),
+            fragment_ipv4_packet(&crate::packet::test_support::ipv4_udp(&payload, &[]), MTU),
             MTU - 28,
         ),
         (
@@ -176,7 +176,6 @@ async fn reassembled_udp_larger_than_mtu_reaches_one_eim_association() {
             ),
             MTU,
             1,
-            4096,
             Duration::from_secs(60),
             Arc::new(AtomicUsize::new(0)),
             OwnerRegistry::new(),
@@ -185,6 +184,7 @@ async fn reassembled_udp_larger_than_mtu_reaches_one_eim_association() {
             UdpFiltering::AddressDependent,
             0,
             OwnerWake::default(),
+            Arc::new(Mutex::new(Default::default())),
         )
         .expect("UDP stack");
 
@@ -218,7 +218,6 @@ async fn owner_control_stage_services_udp_lifecycle_while_forwarding() {
         ),
         1_420,
         1,
-        4_096,
         Duration::from_secs(60),
         Arc::new(AtomicUsize::new(0)),
         OwnerRegistry::new(),
@@ -227,6 +226,7 @@ async fn owner_control_stage_services_udp_lifecycle_while_forwarding() {
         UdpFiltering::AddressDependent,
         7,
         OwnerWake::default(),
+        Arc::new(Mutex::new(Default::default())),
     )
     .expect("UDP control-stage stack");
     assert!(stack.enqueue_at(&ipv4_udp(), true, 0));
@@ -272,7 +272,6 @@ async fn udp_ipv4_ipv6_candidates_commit_and_inject_through_the_real_stack() {
             ),
             1420,
             1,
-            4096,
             Duration::from_secs(60),
             Arc::new(AtomicUsize::new(0)),
             OwnerRegistry::new(),
@@ -281,6 +280,7 @@ async fn udp_ipv4_ipv6_candidates_commit_and_inject_through_the_real_stack() {
             UdpFiltering::AddressDependent,
             0,
             OwnerWake::default(),
+            Arc::new(Mutex::new(Default::default())),
         )
         .expect("UDP stack");
         assert!(stack.enqueue_at(&packet, true, 0));
@@ -331,14 +331,14 @@ async fn udp_ipv4_ipv6_candidates_commit_and_inject_through_the_real_stack() {
 #[tokio::test]
 async fn session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state() {
     let flow_count = Arc::new(AtomicUsize::new(0));
-    let (mut stack, _flows, mut candidates) = Stack::new_with_udp(
+    let quarantine = Arc::new(Mutex::new(Default::default()));
+    let (mut stack, mut flows, mut candidates) = Stack::new_with_udp(
         (
             Some((Ipv4Addr::new(198, 18, 0, 2), 30)),
-            Some((Ipv6Addr::LOCALHOST, 128)),
+            Some((Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2), 126)),
         ),
         1420,
         2,
-        4096,
         Duration::from_secs(60),
         Arc::clone(&flow_count),
         OwnerRegistry::new(),
@@ -347,16 +347,14 @@ async fn session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state() 
         UdpFiltering::AddressDependent,
         7,
         OwnerWake::default(),
+        Arc::clone(&quarantine),
     )
     .expect("restart test stack");
     assert!(stack.enqueue_at(&ipv4_tcp(), true, 0));
-    let mut old_flow = stack
-        .flows
-        .iter_mut()
-        .flatten()
-        .next()
-        .and_then(|entry| entry.pending.take())
-        .expect("old-generation TCP flow");
+    assert!(
+        flows.try_recv().is_err(),
+        "a mapped SYN cannot publish a flow before a matching accept"
+    );
     assert_eq!(flow_count.load(Ordering::Acquire), 1);
 
     let endpoints = UdpDatagramEndpoints::new(
@@ -399,14 +397,6 @@ async fn session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state() 
     assert_eq!(stack.live_udp_associations(), 0);
     assert_eq!(stack.pending(), 0);
     assert!(!stack.has_output());
-    assert_eq!(
-        old_flow
-            .write(b"stale")
-            .await
-            .expect_err("old flow is reset")
-            .kind(),
-        std::io::ErrorKind::ConnectionReset
-    );
     assert!(matches!(
         candidate.commit_association().await,
         Err(crate::UdpCommitError::Unavailable | crate::UdpCommitError::Rejected)
@@ -414,7 +404,7 @@ async fn session_quiesce_resets_tcp_invalidates_udp_and_discards_packet_state() 
 }
 
 #[test]
-fn stack_routes_are_exact_and_udp_candidates_bypass_foundation_drop() {
+fn udp_candidates_bypass_tcp_output() {
     let (mut stack, _flows, mut datagrams) = Stack::new_with_udp(
         (
             Some((Ipv4Addr::new(198, 18, 0, 2), 30)),
@@ -422,7 +412,6 @@ fn stack_routes_are_exact_and_udp_candidates_bypass_foundation_drop() {
         ),
         1420,
         8,
-        4096,
         Duration::from_secs(60),
         Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         OwnerRegistry::new(),
@@ -431,9 +420,9 @@ fn stack_routes_are_exact_and_udp_candidates_bypass_foundation_drop() {
         UdpFiltering::AddressDependent,
         0,
         OwnerWake::default(),
+        Arc::new(Mutex::new(Default::default())),
     )
     .expect("bounded stack");
-    assert!(stack.has_exact_routes());
     let packet = ipv4_udp();
     assert!(
         stack.enqueue(&packet, true),
@@ -448,29 +437,11 @@ fn stack_routes_are_exact_and_udp_candidates_bypass_foundation_drop() {
         datagrams.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
-    assert_eq!(stack.poll_quantum(Instant::ZERO), 0);
-    assert_eq!(stack.pending(), 0);
     assert_eq!(
-        stack.discarded_packets(),
+        stack.pending(),
         0,
-        "T05 UDP no longer reaches the foundation drop"
+        "UDP admission does not enter the TCP rewrite queue"
     );
-
-    let valid_foundation_drops = stack.discarded_packets();
-    let valid_egress = stack.validated_egress_packets();
-    let rejected_egress = stack.rejected_egress_packets();
-    stack
-        .device
-        .transmit(Instant::ZERO)
-        .expect("fixed TX slot")
-        .consume(1, |output| output[0] = 0);
-    assert_eq!(
-        stack.discarded_packets(),
-        valid_foundation_drops,
-        "invalid egress cannot be counted as a validated foundation packet"
-    );
-    assert_eq!(stack.validated_egress_packets(), valid_egress);
-    assert_eq!(stack.rejected_egress_packets(), rejected_egress + 1);
 }
 
 #[test]

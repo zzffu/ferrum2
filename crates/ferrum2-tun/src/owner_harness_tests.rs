@@ -13,7 +13,7 @@ use crate::scheduler::{BudgetOutcome, FairScheduler, StepOutcome, WorkStage};
 use crate::supervisor::runtime::{NETWORK_DEBOUNCE, NetworkDebounce};
 use crate::udp::ResponseProcessOutcome;
 use crate::{
-    OutputFlushOutcome, OutputSendOutcome, OwnerWake, Stack, TcpFlow, TunEvent, TunEventSink,
+    OutputFlushOutcome, OutputSendOutcome, OwnerWake, Stack, TunEvent, TunEventSink,
     TunRejectReason, UdpCandidate, UdpFiltering, UdpInjectOutcome, UdpResponseDropReason,
     UdpResponseSendOutcome,
 };
@@ -105,7 +105,6 @@ enum HarnessExit {
 
 struct OwnerSessionHarness {
     stack: Stack,
-    flows: mpsc::Receiver<TcpFlow>,
     candidates: mpsc::Receiver<UdpCandidate>,
     flow_count: Arc<AtomicUsize>,
     adapter: FakeAdapter,
@@ -129,14 +128,13 @@ impl OwnerSessionHarness {
 
     fn with_udp_capacity(max_udp_associations: usize) -> Self {
         let flow_count = Arc::new(AtomicUsize::new(0));
-        let (mut stack, flows, candidates) = Stack::new_with_udp(
+        let (mut stack, _flows, candidates) = Stack::new_with_udp(
             (
                 Some((Ipv4Addr::new(198, 18, 0, 2), 30)),
                 Some((Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2), 126)),
             ),
             1_420,
             8,
-            4_096,
             Duration::from_secs(60),
             Arc::clone(&flow_count),
             OwnerRegistry::new(),
@@ -145,6 +143,7 @@ impl OwnerSessionHarness {
             UdpFiltering::EndpointIndependent,
             1,
             OwnerWake::default(),
+            Arc::new(Mutex::new(Default::default())),
         )
         .expect("deterministic owner stack");
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -154,7 +153,6 @@ impl OwnerSessionHarness {
         }));
         Self {
             stack,
-            flows,
             candidates,
             flow_count,
             adapter: FakeAdapter::default(),
@@ -232,14 +230,7 @@ impl OwnerSessionHarness {
                         OutputFlushOutcome::Fatal => StepOutcome::Fatal,
                     }
                 }
-                WorkStage::Stack => {
-                    let outcome =
-                        stack.poll_stack_once(smoltcp::time::Instant::from_millis(now_millis));
-                    for _ in 0..outcome.foundation_dropped {
-                        emit(events, TunEvent::PacketFoundationDropped);
-                    }
-                    StepOutcome::from_work(outcome.worked)
-                }
+                WorkStage::Stack => StepOutcome::from_work(stack.process_one_tcp_packet()),
                 WorkStage::Receive if stack.ingress_available() != 0 => match adapter.receive() {
                     Ok(Some(packet)) => {
                         emit(events, TunEvent::PacketIngress);
@@ -562,7 +553,6 @@ fn burst_rx_rotates_all_work_stages_without_structural_loss() {
         harness.adapter.wait_durations.iter().any(Duration::is_zero),
         "queued owner work must not wait for a polling tick"
     );
-    let _ = harness.flows.try_recv();
 }
 
 #[tokio::test]

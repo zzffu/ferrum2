@@ -15,26 +15,19 @@ impl Stack {
         if next_generation <= self.session_generation {
             return Err(());
         }
-        self.fence_owners(next_generation);
-        Ok(())
-    }
-
-    fn fence_owners(&mut self, next_generation: u64) {
+        self.system_tcp.fence(next_generation)?;
         self.fenced_generation = Some(next_generation);
         self.udp.fence_session(next_generation);
-        let mut active = self.active_flow_head;
-        while let Some(slot) = active {
-            let entry = self.flows[slot].as_mut().expect("active TCP flow");
-            entry.owner.fence_generation();
-            active = entry.active_next;
-        }
+        Ok(())
     }
 
     /// Final shutdown/full rebuild may also close the last representable generation.
     pub(crate) fn quiesce(&mut self, next_generation: u64, reason: UdpResponseDropReason) -> usize {
         if self.fenced_generation.is_none() && self.fence_generation(next_generation).is_err() {
-            // This epoch is used only to invalidate a terminal stack, never for reopening.
-            self.fence_owners(self.session_generation.wrapping_add(1));
+            let terminal_generation = self.session_generation.wrapping_add(1);
+            let _ = self.system_tcp.fence(terminal_generation);
+            self.fenced_generation = Some(terminal_generation);
+            self.udp.fence_session(terminal_generation);
         }
         let generation = self.fenced_generation.expect("quiescent stack is fenced");
         self.retire_generation(generation, reason)
@@ -49,27 +42,9 @@ impl Stack {
         if self.fenced_generation != Some(next_generation) {
             return Err(());
         }
-        let mut sockets = Vec::new();
-        let mut reset = 0_usize;
-        while let Some(slot) = self.active_flow_head {
-            self.flows[slot]
-                .as_mut()
-                .expect("TCP active-list head is live")
-                .owner
-                .mark_reset();
-            let entry = self
-                .take_tcp_flow(slot)
-                .expect("TCP active-list head remains removable");
-            sockets.push(entry.socket);
-            reset += 1;
-        }
-        for socket in sockets {
-            self.sockets.remove(socket);
-        }
-        if reset != 0 {
-            for _ in 0..reset {
-                self.events.emit(TunEvent::TcpFlowResetRestart);
-            }
+        let reset = self.system_tcp.retire(next_generation);
+        for _ in 0..reset {
+            self.events.emit(TunEvent::TcpFlowResetRestart);
         }
         self.udp
             .invalidate_session(next_generation, udp_response_drop_reason);

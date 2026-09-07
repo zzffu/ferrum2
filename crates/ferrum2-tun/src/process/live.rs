@@ -52,6 +52,7 @@ where
     let (datagram_sender, datagrams) = tokio::sync::mpsc::channel(max_udp_associations);
     let control = OwnerControl::new();
     let owner_registry = registry.clone();
+    let runtime_handle = tokio::runtime::Handle::current();
     let (mut owner, done) = NativeLifecycleOwner::spawn(
         control.clone(),
         Box::new(move |link, control| {
@@ -62,6 +63,7 @@ where
                 deadline,
                 OwnerSessionServices {
                     registry: owner_registry,
+                    runtime: runtime_handle,
                     network_catalog,
                     events,
                     underlay,

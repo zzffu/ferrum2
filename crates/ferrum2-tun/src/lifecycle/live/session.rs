@@ -1,8 +1,6 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use smoltcp::time::Instant;
-
 use super::prepare::forward_session_item;
 use super::rebuild::adapter_underlay_is_current;
 use super::reset::{
@@ -45,7 +43,6 @@ pub(crate) enum SessionExit {
 
 pub(crate) fn run_active_session(session: &mut ActiveSession<'_>) -> SessionExit {
     let mut scheduler = FairScheduler::default();
-    let clock_origin = std::time::Instant::now();
     let mut next_dns_audit = session.audit_managed_dns.then(|| {
         i64::try_from(session.supervisor_origin.elapsed().as_millis())
             .unwrap_or(i64::MAX)
@@ -56,6 +53,9 @@ pub(crate) fn run_active_session(session: &mut ActiveSession<'_>) -> SessionExit
     while !session.control.stop.load(Ordering::Acquire) {
         let supervisor_now =
             i64::try_from(session.supervisor_origin.elapsed().as_millis()).unwrap_or(i64::MAX);
+        if !session.control.shutdown.load(Ordering::Acquire) && session.stack.tcp_failed() {
+            return SessionExit::Terminal(OwnerExit::RuntimeFailed);
+        }
         let underlay_stale = !adapter_underlay_is_current(session.adapter);
         let debounced = session.debounce.take_ready(supervisor_now).is_some();
         let periodic_audit = !underlay_stale
@@ -110,7 +110,6 @@ pub(crate) fn run_active_session(session: &mut ActiveSession<'_>) -> SessionExit
             continue;
         }
 
-        let elapsed = i64::try_from(clock_origin.elapsed().as_millis()).unwrap_or(i64::MAX);
         let admitting = session.control.admitting.load(Ordering::Acquire);
         let mut adapter_failure = None;
         let budget = scheduler.run_budget(OWNER_WORK_BUDGET, |stage| match stage {
@@ -128,7 +127,7 @@ pub(crate) fn run_active_session(session: &mut ActiveSession<'_>) -> SessionExit
                     session.cancellation,
                 );
                 StepOutcome::from_work(session.stack.process_owner_control_stage(
-                    elapsed,
+                    supervisor_now,
                     admitting,
                     forwarded_flow || forwarded_datagram,
                 ))
@@ -166,13 +165,7 @@ pub(crate) fn run_active_session(session: &mut ActiveSession<'_>) -> SessionExit
                     OutputFlushOutcome::Fatal => StepOutcome::Fatal,
                 }
             }
-            WorkStage::Stack => {
-                let outcome = session.stack.poll_stack_once(Instant::from_millis(elapsed));
-                for _ in 0..outcome.foundation_dropped {
-                    session.events.emit(TunEvent::PacketFoundationDropped);
-                }
-                StepOutcome::from_work(outcome.worked)
-            }
+            WorkStage::Stack => StepOutcome::from_work(session.stack.process_one_tcp_packet()),
             WorkStage::Receive if session.stack.ingress_available() != 0 => {
                 let received = match session.adapter.receive() {
                     Ok(Some(packet)) => packet,
@@ -183,22 +176,29 @@ pub(crate) fn run_active_session(session: &mut ActiveSession<'_>) -> SessionExit
                     }
                 };
                 session.events.emit(TunEvent::PacketIngress);
-                if session.stack.enqueue_at(&received, admitting, elapsed) {
+                if session
+                    .stack
+                    .enqueue_at(&received, admitting, supervisor_now)
+                {
                     session.events.emit(TunEvent::PacketAccepted);
                 }
                 StepOutcome::Worked
             }
             WorkStage::Receive => StepOutcome::Idle,
-            WorkStage::UdpResponse => match session.stack.process_one_udp_response(elapsed) {
-                crate::udp::ResponseProcessOutcome::Idle => StepOutcome::Idle,
-                crate::udp::ResponseProcessOutcome::Deferred => {
-                    session.events.emit(TunEvent::InternalEgressBackpressured);
-                    StepOutcome::Worked
+            WorkStage::UdpResponse => {
+                match session.stack.process_one_udp_response(supervisor_now) {
+                    crate::udp::ResponseProcessOutcome::Idle => StepOutcome::Idle,
+                    crate::udp::ResponseProcessOutcome::Deferred => {
+                        session.events.emit(TunEvent::InternalEgressBackpressured);
+                        StepOutcome::Worked
+                    }
+                    crate::udp::ResponseProcessOutcome::Injected
+                    | crate::udp::ResponseProcessOutcome::Dropped(_) => StepOutcome::Worked,
                 }
-                crate::udp::ResponseProcessOutcome::Injected
-                | crate::udp::ResponseProcessOutcome::Dropped(_) => StepOutcome::Worked,
-            },
-            WorkStage::Expire => StepOutcome::from_work(session.stack.expire_deadlines(elapsed)),
+            }
+            WorkStage::Expire => {
+                StepOutcome::from_work(session.stack.expire_deadlines(supervisor_now))
+            }
         });
         if budget.fatal {
             return match adapter_failure.unwrap_or(AdapterErrorDisposition::RuntimeFailed) {
@@ -220,7 +220,7 @@ pub(crate) fn run_active_session(session: &mut ActiveSession<'_>) -> SessionExit
         let wait = owner_wait_after_budget(
             budget,
             bounded_network_wait(
-                session.stack.next_wait_duration(elapsed),
+                session.stack.next_wait_duration(supervisor_now),
                 supervisor_now,
                 debounce_deadline,
                 audit_deadline,

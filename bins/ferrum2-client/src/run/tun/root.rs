@@ -73,7 +73,6 @@ pub(in crate::run) fn process_root(
             ring_capacity: config.ring_capacity,
             ready_timeout: config.ready_timeout,
             max_tcp_flows: config.max_tcp_flows,
-            tcp_buffer_bytes: config.tcp_buffer_bytes,
             tcp_timeout: context.runtime.idle_timeout,
             udp_timeout: udp_idle_timeout,
             max_udp_mappings: config.max_udp_mappings,

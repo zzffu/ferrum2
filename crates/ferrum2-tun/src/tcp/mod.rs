@@ -1,24 +1,21 @@
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Shutdown, SocketAddr};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+use ferrum2_runtime::{OwnerRegistry, TunTcpFlowOwner};
+use socket2::SockRef;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
 
-use crate::{OwnerWake, TunEvent, TunEventSink};
-
-#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
-mod owner;
-#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
-pub(crate) use owner::{FlowOwner, tcp_flow_pair_with_events};
-#[cfg(test)]
-pub(crate) use owner::{tcp_flow_pair, tcp_flow_pair_with_wake};
+use crate::OwnerWake;
 
 /// One non-cloneable application-side TUN TCP stream with an immutable original target.
 pub struct TcpFlow {
     target: SocketAddr,
-    bridge: Arc<Mutex<Bridge>>,
+    shared: Arc<FlowShared>,
 }
 
 impl TcpFlow {
@@ -34,26 +31,47 @@ impl AsyncRead for TcpFlow {
         context: &mut Context<'_>,
         destination: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let mut bridge = self.bridge.lock().expect("TUN TCP bridge");
-        if !bridge.generation_valid {
+        let shared = &self.shared;
+        if !shared.valid.load(Ordering::Acquire) {
             return Poll::Ready(Err(connection_reset()));
         }
-        let copied = bridge.to_application.pop(destination.initialize_unfilled());
-        if copied != 0 {
-            destination.advance(copied);
-            let wake = bridge.owner_wake.clone();
-            drop(bridge);
-            wake.signal();
+        if destination.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        if bridge.reset {
+        let socket = shared.stream.lock().expect("TUN TCP flow socket");
+        let Some(stream) = socket.as_ref() else {
             return Poll::Ready(Err(connection_reset()));
+        };
+
+        match stream.poll_read_ready(context) {
+            Poll::Ready(Ok(())) => {
+                shared.clear_read_waker();
+                match stream.try_read_buf(destination) {
+                    Ok(_) => Poll::Ready(Ok(())),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        shared.register_read_waker(context.waker());
+                        if shared.valid.load(Ordering::Acquire) {
+                            Poll::Pending
+                        } else {
+                            Poll::Ready(Err(connection_reset()))
+                        }
+                    }
+                    Err(error) => Poll::Ready(Err(shared.map_io_error(error))),
+                }
+            }
+            Poll::Ready(Err(error)) => {
+                shared.clear_read_waker();
+                Poll::Ready(Err(shared.map_io_error(error)))
+            }
+            Poll::Pending => {
+                shared.register_read_waker(context.waker());
+                if shared.valid.load(Ordering::Acquire) {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Err(connection_reset()))
+                }
+            }
         }
-        if bridge.remote_closed {
-            return Poll::Ready(Ok(()));
-        }
-        set_waker(&mut bridge.read_waker, context.waker());
-        Poll::Pending
     }
 }
 
@@ -63,145 +81,233 @@ impl AsyncWrite for TcpFlow {
         context: &mut Context<'_>,
         source: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let mut bridge = self.bridge.lock().expect("TUN TCP bridge");
-        if bridge.reset || !bridge.generation_valid {
+        let shared = &self.shared;
+        if !shared.valid.load(Ordering::Acquire) {
             return Poll::Ready(Err(connection_reset()));
         }
-        if bridge.shutdown_requested {
+        if shared.write_shutdown.load(Ordering::Acquire) {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "TUN TCP write half is closed",
             )));
         }
-        let copied = bridge.to_stack.push(source);
-        if copied == 0 && !source.is_empty() {
-            bridge.events.emit(TunEvent::TcpBridgeBlocked);
+        if source.is_empty() {
+            return Poll::Ready(Ok(0));
         }
-        if copied != 0 || source.is_empty() {
-            let wake = (copied != 0).then(|| bridge.owner_wake.clone());
-            drop(bridge);
-            if let Some(wake) = wake {
-                wake.signal();
-            }
-            Poll::Ready(Ok(copied))
-        } else {
-            set_waker(&mut bridge.write_waker, context.waker());
-            Poll::Pending
-        }
-    }
 
-    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut bridge = self.bridge.lock().expect("TUN TCP bridge");
-        if bridge.reset || !bridge.generation_valid {
+        let socket = shared.stream.lock().expect("TUN TCP flow socket");
+        let Some(stream) = socket.as_ref() else {
             return Poll::Ready(Err(connection_reset()));
-        }
-        if bridge.to_stack.is_empty() {
-            Poll::Ready(Ok(()))
-        } else {
-            set_waker(&mut bridge.write_waker, context.waker());
-            Poll::Pending
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut bridge = self.bridge.lock().expect("TUN TCP bridge");
-        if bridge.reset || !bridge.generation_valid {
-            return Poll::Ready(Err(connection_reset()));
-        }
-        let changed = !bridge.shutdown_requested;
-        bridge.shutdown_requested = true;
-        let result = if bridge.fin_sent {
-            Poll::Ready(Ok(()))
-        } else {
-            set_waker(&mut bridge.shutdown_waker, context.waker());
-            Poll::Pending
         };
-        let wake = changed.then(|| bridge.owner_wake.clone());
-        drop(bridge);
-        if let Some(wake) = wake {
-            wake.signal();
+        match stream.poll_write_ready(context) {
+            Poll::Ready(Ok(())) => {
+                shared.clear_write_waker();
+                match stream.try_write(source) {
+                    Ok(written) => Poll::Ready(Ok(written)),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        shared.register_write_waker(context.waker());
+                        if shared.valid.load(Ordering::Acquire) {
+                            Poll::Pending
+                        } else {
+                            Poll::Ready(Err(connection_reset()))
+                        }
+                    }
+                    Err(error) => Poll::Ready(Err(shared.map_io_error(error))),
+                }
+            }
+            Poll::Ready(Err(error)) => {
+                shared.clear_write_waker();
+                Poll::Ready(Err(shared.map_io_error(error)))
+            }
+            Poll::Pending => {
+                shared.register_write_waker(context.waker());
+                if shared.valid.load(Ordering::Acquire) {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Err(connection_reset()))
+                }
+            }
         }
-        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.shared.valid.load(Ordering::Acquire) {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Ready(Err(connection_reset()))
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let shared = &self.shared;
+        if !shared.valid.load(Ordering::Acquire) {
+            return Poll::Ready(Err(connection_reset()));
+        }
+        if shared.write_shutdown.swap(true, Ordering::AcqRel) {
+            return Poll::Ready(Ok(()));
+        }
+        let socket = shared.stream.lock().expect("TUN TCP flow socket");
+        let Some(stream) = socket.as_ref() else {
+            return Poll::Ready(Err(connection_reset()));
+        };
+        let result = SockRef::from(stream).shutdown(Shutdown::Write);
+        if shared.valid.load(Ordering::Acquire) {
+            Poll::Ready(result)
+        } else {
+            Poll::Ready(Err(connection_reset()))
+        }
     }
 }
 
 impl Drop for TcpFlow {
     fn drop(&mut self) {
-        let mut bridge = self.bridge.lock().expect("TUN TCP bridge");
-        if !bridge.fin_sent {
-            let changed = !bridge.aborted;
-            bridge.aborted = true;
-            let wake = changed.then(|| bridge.owner_wake.clone());
-            drop(bridge);
-            if let Some(wake) = wake {
-                wake.signal();
-            }
-        }
+        self.shared.flow_present.store(false, Ordering::Release);
+        self.shared.clear_wakers();
+        self.shared.close_socket();
+        self.shared.owner_wake.signal();
     }
 }
 
-struct Bridge {
-    to_application: ByteQueue,
-    to_stack: ByteQueue,
-    remote_closed: bool,
-    reset: bool,
-    generation_valid: bool,
-    shutdown_requested: bool,
-    fin_sent: bool,
-    aborted: bool,
-    read_waker: Option<Waker>,
-    write_waker: Option<Waker>,
-    shutdown_waker: Option<Waker>,
+/// Owner-side lease for fencing and closing the real system socket.
+pub(crate) struct TcpSocketLease {
+    shared: Arc<FlowShared>,
+}
+
+impl TcpSocketLease {
+    pub(crate) fn fence(&self) {
+        self.shared.invalidate();
+    }
+
+    pub(crate) fn flow_dropped(&self) -> bool {
+        !self.shared.flow_present.load(Ordering::Acquire)
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.shared.generation
+    }
+}
+
+struct FlowShared {
+    stream: Mutex<Option<TcpStream>>,
+    generation: u64,
+    valid: AtomicBool,
+    write_shutdown: AtomicBool,
+    flow_present: AtomicBool,
+    wakers: Mutex<FlowWakers>,
     owner_wake: OwnerWake,
-    events: TunEventSink,
+    registry_owner: Mutex<Option<TunTcpFlowOwner>>,
 }
 
-struct ByteQueue {
-    bytes: Box<[u8]>,
-    head: usize,
-    len: usize,
-}
-
-impl ByteQueue {
-    fn is_empty(&self) -> bool {
-        self.len == 0
+impl FlowShared {
+    fn register_read_waker(&self, waker: &Waker) {
+        set_waker(
+            &mut self.wakers.lock().expect("TUN TCP flow wakers").read,
+            waker,
+        );
     }
 
-    fn remaining(&self) -> usize {
-        self.bytes.len() - self.len
+    fn register_write_waker(&self, waker: &Waker) {
+        set_waker(
+            &mut self.wakers.lock().expect("TUN TCP flow wakers").write,
+            waker,
+        );
+    }
+    fn clear_read_waker(&self) {
+        self.wakers.lock().expect("TUN TCP flow wakers").read.take();
     }
 
-    fn push(&mut self, source: &[u8]) -> usize {
-        let count = source.len().min(self.remaining());
-        if count == 0 {
-            return 0;
+    fn clear_write_waker(&self) {
+        self.wakers
+            .lock()
+            .expect("TUN TCP flow wakers")
+            .write
+            .take();
+    }
+
+    fn clear_wakers(&self) {
+        let mut wakers = self.wakers.lock().expect("TUN TCP flow wakers");
+        wakers.read.take();
+        wakers.write.take();
+    }
+
+    fn close_socket(&self) {
+        if let Some(stream) = self.stream.lock().expect("TUN TCP flow socket").take() {
+            let _ = SockRef::from(&stream).shutdown(Shutdown::Both);
         }
-        let tail = (self.head + self.len) % self.bytes.len();
-        let first = count.min(self.bytes.len() - tail);
-        self.bytes[tail..tail + first].copy_from_slice(&source[..first]);
-        let second = count - first;
-        self.bytes[..second].copy_from_slice(&source[first..count]);
-        self.len += count;
-        count
+        self.registry_owner
+            .lock()
+            .expect("TUN TCP flow registry owner")
+            .take();
     }
-
-    fn pop(&mut self, destination: &mut [u8]) -> usize {
-        let count = destination.len().min(self.len);
-        if count == 0 {
-            return 0;
-        }
-        let first = count.min(self.bytes.len() - self.head);
-        destination[..first].copy_from_slice(&self.bytes[self.head..self.head + first]);
-        let second = count - first;
-        destination[first..count].copy_from_slice(&self.bytes[..second]);
-        self.head = if count == self.bytes.len() {
-            0
-        } else {
-            (self.head + count) % self.bytes.len()
+    fn invalidate(&self) {
+        self.valid.store(false, Ordering::Release);
+        self.close_socket();
+        let wakers = {
+            let mut wakers = self.wakers.lock().expect("TUN TCP flow wakers");
+            [wakers.read.take(), wakers.write.take()]
         };
-        self.len -= count;
-        count
+        for waker in wakers.into_iter().flatten() {
+            waker.wake();
+        }
+        self.owner_wake.signal();
     }
+
+    fn map_io_error(&self, error: io::Error) -> io::Error {
+        if self.valid.load(Ordering::Acquire) {
+            error
+        } else {
+            connection_reset()
+        }
+    }
+}
+
+impl Drop for FlowShared {
+    fn drop(&mut self) {
+        self.valid.store(false, Ordering::Release);
+        if let Some(stream) = self
+            .stream
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let _ = SockRef::from(&stream).shutdown(Shutdown::Both);
+        }
+        self.registry_owner
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
+#[derive(Default)]
+struct FlowWakers {
+    read: Option<Waker>,
+    write: Option<Waker>,
+}
+
+pub(crate) fn tcp_flow_from_stream(
+    stream: TcpStream,
+    target: SocketAddr,
+    generation: u64,
+    registry: &OwnerRegistry,
+    owner_wake: OwnerWake,
+) -> (TcpFlow, TcpSocketLease) {
+    let shared = Arc::new(FlowShared {
+        stream: Mutex::new(Some(stream)),
+        generation,
+        valid: AtomicBool::new(true),
+        write_shutdown: AtomicBool::new(false),
+        flow_present: AtomicBool::new(true),
+        wakers: Mutex::new(FlowWakers::default()),
+        owner_wake,
+        registry_owner: Mutex::new(Some(registry.track_tun_tcp_flow())),
+    });
+    (
+        TcpFlow {
+            target,
+            shared: Arc::clone(&shared),
+        },
+        TcpSocketLease { shared },
+    )
 }
 
 fn set_waker(slot: &mut Option<Waker>, waker: &Waker) {
@@ -218,91 +324,127 @@ fn connection_reset() -> io::Error {
 }
 
 #[cfg(test)]
+pub(crate) async fn tcp_flow_for_test(
+    target: SocketAddr,
+) -> io::Result<(TcpFlow, TcpStream, TcpSocketLease)> {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+    let local = listener.local_addr()?;
+    let connect = TcpStream::connect(local);
+    let accept = listener.accept();
+    let (peer, accepted) = tokio::join!(connect, accept);
+    let peer = peer?;
+    let (accepted, _) = accepted?;
+    let (flow, lease) = tcp_flow_from_stream(
+        accepted,
+        target,
+        1,
+        &OwnerRegistry::new(),
+        OwnerWake::default(),
+    );
+    Ok((flow, peer, lease))
+}
+
+#[cfg(test)]
 mod tests {
+    use std::io;
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Waker};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
-    use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 
-    use super::{ByteQueue, tcp_flow_pair_with_wake};
-    use crate::OwnerWake;
+    use super::tcp_flow_for_test;
 
-    #[test]
-    fn byte_queue_wraparound_uses_bounded_two_segment_copies() {
-        let mut queue = ByteQueue::new(8);
-        assert_eq!(queue.push(b"abcdef"), 6);
-        let mut prefix = [0_u8; 5];
-        assert_eq!(queue.pop(&mut prefix), 5);
-        assert_eq!(&prefix, b"abcde");
+    #[tokio::test]
+    async fn system_stream_preserves_bidirectional_io_and_half_close() {
+        let target = "192.0.2.1:443".parse().expect("target");
+        let (mut flow, mut peer, _lease) = tcp_flow_for_test(target).await.expect("flow");
+        assert_eq!(flow.target(), target);
 
-        assert_eq!(queue.push(b"ghijklmn"), 7);
-        assert_eq!(queue.remaining(), 0);
-        assert_eq!(queue.first(), b"fgh");
+        flow.write_all(b"request").await.expect("flow write");
+        let mut request = [0_u8; 7];
+        peer.read_exact(&mut request).await.expect("peer read");
+        assert_eq!(&request, b"request");
 
-        let mut output = [0_u8; 8];
-        assert_eq!(queue.pop(&mut output), 8);
-        assert_eq!(&output, b"fghijklm");
-        assert!(queue.is_empty());
-        assert_eq!(queue.push(b"n"), 1);
-        assert_eq!(queue.pop(&mut output[..1]), 1);
-        assert_eq!(output[0], b'n');
-    }
+        peer.write_all(b"response").await.expect("peer write");
+        peer.shutdown().await.expect("peer half close");
+        let mut response = Vec::new();
+        flow.read_to_end(&mut response).await.expect("flow read");
+        assert_eq!(response, b"response");
 
-    #[test]
-    fn byte_queue_empty_io_is_explicit_and_full_input_is_truncated() {
-        let mut queue = ByteQueue::new(3);
-        assert_eq!(queue.push(&[]), 0);
-        assert_eq!(queue.pop(&mut []), 0);
-        assert_eq!(queue.push(b"abcd"), 3);
-        assert_eq!(queue.push(b"z"), 0);
-        let mut output = [0_u8; 4];
-        assert_eq!(queue.pop(&mut output), 3);
-        assert_eq!(&output[..3], b"abc");
-    }
-
-    #[test]
-    #[should_panic(expected = "capacity must be non-zero")]
-    fn byte_queue_rejects_zero_capacity() {
-        let _ = ByteQueue::new(0);
+        flow.write_all(b"after-fin")
+            .await
+            .expect("write after peer FIN");
+        let mut after_fin = [0_u8; 9];
+        peer.read_exact(&mut after_fin).await.expect("peer read");
+        assert_eq!(&after_fin, b"after-fin");
     }
 
     #[tokio::test]
-    async fn application_state_transitions_wake_the_idle_owner_once() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::clone(&calls);
-        let wake = OwnerWake::new(move || {
-            observed.fetch_add(1, Ordering::SeqCst);
-        });
-        let (mut flow, mut owner) =
-            tcp_flow_pair_with_wake("192.0.2.1:443".parse().expect("target"), 8, wake);
+    async fn local_shutdown_preserves_the_read_half() {
+        let (mut flow, mut peer, _lease) =
+            tcp_flow_for_test("192.0.2.1:443".parse().expect("target"))
+                .await
+                .expect("flow");
+        flow.shutdown().await.expect("flow write half close");
+        let mut end = [0_u8; 1];
+        assert_eq!(peer.read(&mut end).await.expect("peer EOF"), 0);
 
-        flow.write_all(b"x").await.expect("application write");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let mut outbound = [0_u8; 1];
-        assert_eq!(owner.read_to_stack(&mut outbound), 1);
+        peer.write_all(b"still-readable").await.expect("peer write");
+        let mut response = [0_u8; 14];
+        flow.read_exact(&mut response).await.expect("flow read");
+        assert_eq!(&response, b"still-readable");
+    }
 
-        assert_eq!(owner.write_from_stack(b"y"), 1);
-        let mut inbound = [0_u8; 1];
-        flow.read_exact(&mut inbound)
+    #[tokio::test]
+    async fn dropping_flow_closes_the_real_socket_even_while_owner_lease_exists() {
+        let (flow, mut peer, _lease) = tcp_flow_for_test("192.0.2.1:443".parse().expect("target"))
             .await
-            .expect("application read");
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(matches!(
-            AsyncWrite::poll_shutdown(Pin::new(&mut flow), &mut context),
-            Poll::Pending
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
-        assert!(matches!(
-            AsyncWrite::poll_shutdown(Pin::new(&mut flow), &mut context),
-            Poll::Pending
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
-
+            .expect("flow");
         drop(flow);
-        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        let mut byte = [0_u8; 1];
+        assert_eq!(peer.read(&mut byte).await.expect("peer EOF"), 0);
+    }
+
+    #[tokio::test]
+    async fn generation_fence_wakes_pending_io_and_resets_every_operation() {
+        let (mut flow, mut peer, lease) =
+            tcp_flow_for_test("192.0.2.1:443".parse().expect("target"))
+                .await
+                .expect("flow");
+        let mut byte = [0_u8; 1];
+        let mut read = ReadBuf::new(&mut byte);
+        let wake = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&wake));
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(
+            AsyncRead::poll_read(Pin::new(&mut flow), &mut context, &mut read),
+            Poll::Pending
+        ));
+
+        lease.fence();
+        assert!(wake.0.load(Ordering::Acquire), "pending read was not woken");
+        assert_eq!(peer.read(&mut byte).await.expect("peer EOF after fence"), 0);
+        let error = flow.read(&mut byte).await.expect_err("fenced read");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        let error = flow.write(b"x").await.expect_err("fenced write");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        let error = flow.flush().await.expect_err("fenced flush");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        let error = flow.shutdown().await.expect_err("fenced shutdown");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+    }
+
+    struct WakeFlag(AtomicBool);
+
+    impl Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
     }
 }

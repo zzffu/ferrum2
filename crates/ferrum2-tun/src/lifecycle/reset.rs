@@ -126,6 +126,9 @@ pub(crate) const fn map_managed_state_damage(
         ferrum2_platform_windows::ManagedStateDamage::StrictRoute => {
             TunNetworkFullRebuildReason::StrictRouteDamage
         }
+        ferrum2_platform_windows::ManagedStateDamage::TcpIngress => {
+            TunNetworkFullRebuildReason::TcpIngressDamage
+        }
         ferrum2_platform_windows::ManagedStateDamage::OwnershipLedger => {
             TunNetworkFullRebuildReason::OwnershipLedgerDamage
         }

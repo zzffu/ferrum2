@@ -1,8 +1,3 @@
-use std::net::{IpAddr, SocketAddr};
-
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::time::Instant;
-
 use crate::packet::map_packet_reject;
 use crate::packet::{
     self, ControlContext, ControlRateLimiter, Families, IpFamily, LocalControlKind, PacketParser,
@@ -11,6 +6,7 @@ use crate::packet::{
 };
 use crate::udp::{InjectOutcome as UdpInjectOutcome, UdpDatagramEndpoints};
 use crate::{INGRESS_SLOTS, TunRejectReason};
+use std::net::{IpAddr, SocketAddr};
 
 #[derive(Clone, Copy)]
 pub(crate) struct PacketValidator {
@@ -31,6 +27,7 @@ impl PacketValidator {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn accepts(self, packet: &[u8]) -> bool {
         packet.len() <= self.mtu
             && matches!(self.parser.parse(packet), Ok(ParsedPacket::Complete(_)))
@@ -79,9 +76,9 @@ pub(crate) fn udp_datagram_from_parsed(
     ))
 }
 
-pub(crate) struct OutputSlot {
-    pub(crate) len: usize,
-    pub(crate) bytes: Vec<u8>,
+struct OutputSlot {
+    len: usize,
+    bytes: Vec<u8>,
 }
 
 pub(crate) struct MemoryDevice {
@@ -92,9 +89,6 @@ pub(crate) struct MemoryDevice {
     output_head: usize,
     pub(crate) output_count: usize,
     pub(crate) validator: PacketValidator,
-    pub(crate) validated_output: usize,
-    pub(crate) rejected_output: usize,
-    pub(crate) foundation_input: usize,
 }
 
 impl MemoryDevice {
@@ -108,15 +102,13 @@ impl MemoryDevice {
         Self {
             ingress: std::array::from_fn(|_| PacketSlot {
                 len: 0,
-                foundation: false,
-                parsed: None,
                 bytes: Vec::with_capacity(mtu),
             }),
             ingress_head: 0,
             ingress_len: 0,
             output: std::iter::repeat_with(|| OutputSlot {
                 len: 0,
-                bytes: Vec::new(),
+                bytes: Vec::with_capacity(mtu),
             })
             .take(output_slots)
             .collect::<Vec<_>>()
@@ -124,24 +116,34 @@ impl MemoryDevice {
             output_head: 0,
             output_count: 0,
             validator: PacketValidator::with_families(mtu, families),
-            validated_output: 0,
-            rejected_output: 0,
-            foundation_input: 0,
         }
     }
 
-    pub(crate) fn enqueue_parsed(&mut self, packet: &[u8], parsed: ParsedIpPacket) -> bool {
+    pub(crate) fn enqueue_rewritten(
+        &mut self,
+        packet: &[u8],
+        parsed: ParsedIpPacket,
+        rewrite: impl FnOnce(&mut [u8], ParsedIpPacket) -> Result<(), TunRejectReason>,
+    ) -> Result<bool, TunRejectReason> {
         if self.ingress_len == INGRESS_SLOTS {
-            return false;
+            return Ok(false);
         }
         let tail = (self.ingress_head + self.ingress_len) % INGRESS_SLOTS;
-        self.ingress[tail].bytes.clear();
-        self.ingress[tail].bytes.extend_from_slice(packet);
-        self.ingress[tail].len = packet.len();
-        self.ingress[tail].foundation = matches!(parsed.transport, TransportMetadata::Udp(_));
-        self.ingress[tail].parsed = Some(parsed);
-        self.ingress_len += 1;
-        true
+        let slot = &mut self.ingress[tail];
+        slot.bytes.clear();
+        slot.bytes.extend_from_slice(packet);
+        match rewrite(&mut slot.bytes, parsed) {
+            Ok(()) => {
+                slot.len = packet.len();
+                self.ingress_len += 1;
+                Ok(true)
+            }
+            Err(reason) => {
+                slot.bytes.clear();
+                slot.len = 0;
+                Err(reason)
+            }
+        }
     }
 
     pub(crate) fn ingress_available(&self) -> usize {
@@ -184,8 +186,6 @@ impl MemoryDevice {
         for slot in &mut self.ingress {
             slot.bytes.clear();
             slot.len = 0;
-            slot.foundation = false;
-            slot.parsed = None;
         }
         self.ingress_head = 0;
         self.ingress_len = 0;
@@ -196,15 +196,24 @@ impl MemoryDevice {
         self.output_count = 0;
     }
 
-    pub(crate) fn dequeue_index(&mut self) -> Option<usize> {
-        if self.ingress_len == 0 || self.output_count != 0 {
-            return None;
+    pub(crate) fn promote_one_ingress(&mut self) -> bool {
+        let Some(output_index) = self.output_tail_index() else {
+            return false;
+        };
+        if self.ingress_len == 0 {
+            return false;
         }
-        let index = self.ingress_head;
-        self.foundation_input += usize::from(self.ingress[index].foundation);
+        let input_index = self.ingress_head;
+        let input = &mut self.ingress[input_index];
+        let output = &mut self.output[output_index];
+        std::mem::swap(&mut input.bytes, &mut output.bytes);
+        output.len = input.len;
+        input.len = 0;
+        input.bytes.clear();
         self.ingress_head = (self.ingress_head + 1) % INGRESS_SLOTS;
         self.ingress_len -= 1;
-        Some(index)
+        self.output_count += 1;
+        true
     }
 
     pub(crate) fn flush_output(
@@ -242,7 +251,6 @@ impl MemoryDevice {
         let length = match write_udp_response(&mut self.output[index].bytes, endpoints, payload) {
             Ok(length) => length,
             Err(reason) => {
-                self.rejected_output += 1;
                 return UdpInjectOutcome::Rejected(map_packet_reject(reason));
             }
         };
@@ -252,15 +260,12 @@ impl MemoryDevice {
         {
             Ok(ParsedPacket::Complete(_)) => {}
             Ok(ParsedPacket::Fragment(_)) => {
-                self.rejected_output += 1;
                 return UdpInjectOutcome::Rejected(TunRejectReason::FragmentMalformed);
             }
             Err(rejected) => {
-                self.rejected_output += 1;
                 return UdpInjectOutcome::Rejected(map_packet_reject(rejected.reason));
             }
         }
-        self.validated_output += 1;
         self.output[index].len = length;
         self.output_count = 1;
         UdpInjectOutcome::Injected
@@ -413,91 +418,5 @@ pub(crate) enum OutputFlushOutcome {
 
 struct PacketSlot {
     len: usize,
-    foundation: bool,
-    parsed: Option<ParsedIpPacket>,
     bytes: Vec<u8>,
-}
-
-pub(crate) struct MemoryRx<'a>(&'a PacketSlot);
-
-impl RxToken for MemoryRx<'_> {
-    fn consume<R, F>(self, f: F) -> R
-    where
-        F: FnOnce(&[u8]) -> R,
-    {
-        f(&self.0.bytes[..self.0.len])
-    }
-}
-
-pub(crate) struct MemoryTx<'a> {
-    pub(crate) validator: PacketValidator,
-    pub(crate) validated_output: &'a mut usize,
-    pub(crate) rejected_output: &'a mut usize,
-    pub(crate) output: &'a mut OutputSlot,
-    pub(crate) output_count: &'a mut usize,
-}
-
-impl TxToken for MemoryTx<'_> {
-    fn consume<R, F>(self, len: usize, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        assert!(
-            len <= self.output.bytes.len(),
-            "stack exceeded validated MTU"
-        );
-        self.output.bytes[..len].fill(0);
-        let result = f(&mut self.output.bytes[..len]);
-        if self.validator.accepts(&self.output.bytes[..len]) {
-            *self.validated_output += 1;
-            self.output.len = len;
-            *self.output_count += 1;
-        } else {
-            *self.rejected_output += 1;
-            self.output.len = 0;
-        }
-        result
-    }
-}
-
-impl Device for MemoryDevice {
-    type RxToken<'a> = MemoryRx<'a>;
-    type TxToken<'a> = MemoryTx<'a>;
-
-    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let index = self.dequeue_index()?;
-        let output_index = self
-            .output_tail_index()
-            .expect("ingress starts with an empty output queue");
-        self.prepare_output_slot(output_index);
-        Some((
-            MemoryRx(&self.ingress[index]),
-            MemoryTx {
-                validator: self.validator,
-                validated_output: &mut self.validated_output,
-                rejected_output: &mut self.rejected_output,
-                output: &mut self.output[output_index],
-                output_count: &mut self.output_count,
-            },
-        ))
-    }
-
-    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        let output_index = self.output_tail_index()?;
-        self.prepare_output_slot(output_index);
-        Some(MemoryTx {
-            validator: self.validator,
-            validated_output: &mut self.validated_output,
-            rejected_output: &mut self.rejected_output,
-            output: &mut self.output[output_index],
-            output_count: &mut self.output_count,
-        })
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut capabilities = DeviceCapabilities::default();
-        capabilities.medium = Medium::Ip;
-        capabilities.max_transmission_unit = self.validator.mtu;
-        capabilities
-    }
 }

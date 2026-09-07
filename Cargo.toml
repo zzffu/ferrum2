@@ -65,7 +65,6 @@ tokio-rustls = { version = "=0.26.4", default-features = false, features = ["rin
 tokio-util = { version = "=0.7.19", default-features = false, features = ["io"] }
 webpki-roots = "=1.0.9"
 httparse = { version = "=1.10.1", default-features = false }
-smoltcp = { version = "=0.13.1", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-tcp-reno", "socket-udp", "iface-max-addr-count-2", "iface-max-route-count-2", "assembler-max-segment-count-4"] }
 
 tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "sync", "time", "signal"] }
 bytes = "=1.12.1"

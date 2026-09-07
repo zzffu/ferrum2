@@ -6,6 +6,7 @@ mod managed_dns;
 pub(super) mod network;
 mod notification;
 mod strict_route;
+mod tcp_ingress;
 mod wintun;
 
 pub use network::{WindowsResolvedSocketBinder, bind_resolved_socket};

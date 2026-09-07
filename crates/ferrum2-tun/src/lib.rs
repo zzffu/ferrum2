@@ -26,6 +26,8 @@ mod scheduler;
 #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
 mod stack;
 mod supervisor;
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+mod system_tcp;
 mod tcp;
 mod udp;
 mod wake;
@@ -66,8 +68,7 @@ use packet::{Families, PacketParser, ParsedPacket};
 use scheduler::{FairScheduler, WorkStage};
 #[cfg(test)]
 use stack::{
-    MemoryDevice, MemoryTx, OutputFlushOutcome, OutputSendOutcome, OutputSlot, PacketValidator,
-    Stack, TcpTuple, udp_datagram,
+    MemoryDevice, OutputFlushOutcome, OutputSendOutcome, PacketValidator, Stack, udp_datagram,
 };
 #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
 mod runtime;
