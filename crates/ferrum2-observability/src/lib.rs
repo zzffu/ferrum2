@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod dimension;
 mod metrics;
 mod trace;
 

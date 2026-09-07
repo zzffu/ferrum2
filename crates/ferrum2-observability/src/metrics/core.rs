@@ -1,3 +1,5 @@
+use crate::dimension::closed_dimension;
+
 use std::fmt;
 use std::fmt::Write as _;
 
@@ -14,41 +16,21 @@ use crate::trace::{
     Outcome, Reason, Role, SniffOutcome, SniffProtocol, Stage, Transport, emit_sniff,
 };
 
-/// Closed inbound protocol labels.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Inbound {
-    Socks5,
-    Shadowsocks,
-}
-
-impl Inbound {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Socks5 => "socks5",
-            Self::Shadowsocks => "shadowsocks",
-        }
+closed_dimension! {
+    /// Closed inbound protocol labels.
+    pub enum Inbound {
+        Socks5 => "socks5",
+        Shadowsocks => "shadowsocks",
     }
 }
 
-/// Closed byte-flow directions.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Direction {
-    InboundToOutbound,
-    OutboundToInbound,
-    ClientToTarget,
-    TargetToClient,
-}
-
-impl Direction {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::InboundToOutbound => "inbound_to_outbound",
-            Self::OutboundToInbound => "outbound_to_inbound",
-            Self::ClientToTarget => "client_to_target",
-            Self::TargetToClient => "target_to_client",
-        }
+closed_dimension! {
+    /// Closed byte-flow directions.
+    pub enum Direction {
+        InboundToOutbound => "inbound_to_outbound",
+        OutboundToInbound => "outbound_to_inbound",
+        ClientToTarget => "client_to_target",
+        TargetToClient => "target_to_client",
     }
 }
 
@@ -148,108 +130,17 @@ struct SniffLabels {
     protocol: SniffProtocol,
 }
 
-const ROLES: &[Role] = &[Role::Client, Role::Server];
-pub(super) const TRANSPORTS: &[Transport] = &[Transport::Tcp, Transport::Udp];
-const INBOUNDS: &[Inbound] = &[Inbound::Socks5, Inbound::Shadowsocks];
-const OUTCOMES: &[Outcome] = &[
-    Outcome::Accepted,
-    Outcome::Completed,
-    Outcome::Rejected,
-    Outcome::Failed,
-    Outcome::Cancelled,
-    Outcome::Timeout,
-];
-const STAGES: &[Stage] = &[
-    Stage::Config,
-    Stage::Listen,
-    Stage::Socks5,
-    Stage::Shadowsocks,
-    Stage::Sniff,
-    Stage::Direct,
-    Stage::Relay,
-    Stage::Metrics,
-    Stage::Shutdown,
-];
-const REASONS: &[Reason] = &[
-    Reason::ConfigIo,
-    Reason::ConfigTooLarge,
-    Reason::ConfigSyntax,
-    Reason::ConfigSemantic,
-    Reason::SocksProtocol,
-    Reason::SocksUnsupported,
-    Reason::Authentication,
-    Reason::InvalidType,
-    Reason::TimestampSkew,
-    Reason::Replay,
-    Reason::ReplayCapacity,
-    Reason::FrameBounds,
-    Reason::AddressBounds,
-    Reason::ResponseBinding,
-    Reason::NonceExhausted,
-    Reason::RandomUnavailable,
-    Reason::ClockUnavailable,
-    Reason::HandshakeTimeout,
-    Reason::ConnectTimeout,
-    Reason::NetworkUnreachable,
-    Reason::HostUnreachable,
-    Reason::ConnectionRefused,
-    Reason::RelayIo,
-    Reason::IdleTimeout,
-    Reason::Cancelled,
-    Reason::Shutdown,
-    Reason::ListenerFailure,
-    Reason::Bounds,
-    Reason::Type,
-    Reason::Timestamp,
-    Reason::Address,
-    Reason::Padding,
-    Reason::Binding,
-    Reason::Duplicate,
-    Reason::TooOld,
-    Reason::SessionLimit,
-    Reason::BufferLimit,
-    Reason::QueueFull,
-    Reason::Clock,
-    Reason::Random,
-    Reason::Key,
-    Reason::Counter,
-    Reason::Resolve,
-    Reason::Send,
-    Reason::Receive,
-    Reason::Idle,
-];
-const DIRECTIONS: &[Direction] = &[
-    Direction::InboundToOutbound,
-    Direction::OutboundToInbound,
-    Direction::ClientToTarget,
-    Direction::TargetToClient,
-];
-const SNIFF_OUTCOMES: &[SniffOutcome] = &[
-    SniffOutcome::Matched,
-    SniffOutcome::Unknown,
-    SniffOutcome::Timeout,
-    SniffOutcome::Limit,
-    SniffOutcome::Invalid,
-    SniffOutcome::Unavailable,
-];
-const SNIFF_PROTOCOLS: &[SniffProtocol] = &[
-    SniffProtocol::Dns,
-    SniffProtocol::Tls,
-    SniffProtocol::Http,
-    SniffProtocol::None,
-];
-
-const CONNECTION_SERIES: usize = ROLES.len() * INBOUNDS.len() * OUTCOMES.len();
-const ACTIVE_SERIES: usize = ROLES.len() * INBOUNDS.len();
-const FAILURE_SERIES: usize = ROLES.len() * STAGES.len() * REASONS.len();
-const BYTE_SERIES: usize = ROLES.len() * DIRECTIONS.len();
-const REPLAY_REJECTION_SERIES: usize = REASONS.len();
-const FORCED_SHUTDOWN_SERIES: usize = ROLES.len();
-const UDP_ROLE_SERIES: usize = ROLES.len();
-const UDP_DATAGRAM_SERIES: usize = ROLES.len() * DIRECTIONS.len() * OUTCOMES.len();
-const UDP_REPLAY_SERIES: usize = ROLES.len() * DIRECTIONS.len() * REASONS.len();
+const CONNECTION_SERIES: usize = Role::ALL.len() * Inbound::ALL.len() * Outcome::ALL.len();
+const ACTIVE_SERIES: usize = Role::ALL.len() * Inbound::ALL.len();
+const FAILURE_SERIES: usize = Role::ALL.len() * Stage::ALL.len() * Reason::ALL.len();
+const BYTE_SERIES: usize = Role::ALL.len() * Direction::ALL.len();
+const REPLAY_REJECTION_SERIES: usize = Reason::ALL.len();
+const FORCED_SHUTDOWN_SERIES: usize = Role::ALL.len();
+const UDP_ROLE_SERIES: usize = Role::ALL.len();
+const UDP_DATAGRAM_SERIES: usize = Role::ALL.len() * Direction::ALL.len() * Outcome::ALL.len();
+const UDP_REPLAY_SERIES: usize = Role::ALL.len() * Direction::ALL.len() * Reason::ALL.len();
 const SNIFF_SERIES: usize =
-    ROLES.len() * TRANSPORTS.len() * SNIFF_OUTCOMES.len() * SNIFF_PROTOCOLS.len();
+    Role::ALL.len() * Transport::ALL.len() * SniffOutcome::ALL.len() * SniffProtocol::ALL.len();
 
 type ConnectionFamily = SharedClosedFamily<ConnectionLabels, CachedCounter, CONNECTION_SERIES>;
 type ActiveFamily = SharedClosedFamily<ActiveLabels, CachedGauge, ACTIVE_SERIES>;
@@ -286,43 +177,44 @@ pub(super) struct CoreMetrics {
 impl CoreMetrics {
     pub(super) fn register(registry: &mut Registry) -> Self {
         let connections = ConnectionFamily::new(triple_labels(
-            ROLES,
-            INBOUNDS,
-            OUTCOMES,
+            Role::ALL,
+            Inbound::ALL,
+            Outcome::ALL,
             |role, inbound, outcome| ConnectionLabels {
                 role,
                 inbound,
                 outcome,
             },
         ));
-        let active = ActiveFamily::new(pair_labels(ROLES, INBOUNDS, |role, inbound| {
+        let active = ActiveFamily::new(pair_labels(Role::ALL, Inbound::ALL, |role, inbound| {
             ActiveLabels { role, inbound }
         }));
         let failures = FailureFamily::new(triple_labels(
-            ROLES,
-            STAGES,
-            REASONS,
+            Role::ALL,
+            Stage::ALL,
+            Reason::ALL,
             |role, stage, reason| FailureLabels {
                 role,
                 stage,
                 reason,
             },
         ));
-        let bytes = ByteFamily::new(pair_labels(ROLES, DIRECTIONS, |role, direction| {
+        let bytes = ByteFamily::new(pair_labels(Role::ALL, Direction::ALL, |role, direction| {
             ByteLabels { role, direction }
         }));
         let replay_entries = Gauge::default();
-        let replay_rejections = ReplayRejectionFamily::new(single_labels(REASONS, |reason| {
+        let replay_rejections = ReplayRejectionFamily::new(single_labels(Reason::ALL, |reason| {
             ReplayRejectionLabels { reason }
         }));
-        let forced_shutdowns =
-            ForcedShutdownFamily::new(single_labels(ROLES, |role| ForcedShutdownLabels { role }));
+        let forced_shutdowns = ForcedShutdownFamily::new(single_labels(Role::ALL, |role| {
+            ForcedShutdownLabels { role }
+        }));
         let udp_sessions_active =
-            UdpRoleGaugeFamily::new(single_labels(ROLES, |role| UdpRoleLabels { role }));
+            UdpRoleGaugeFamily::new(single_labels(Role::ALL, |role| UdpRoleLabels { role }));
         let udp_datagrams = UdpDatagramFamily::new(triple_labels(
-            ROLES,
-            DIRECTIONS,
-            OUTCOMES,
+            Role::ALL,
+            Direction::ALL,
+            Outcome::ALL,
             |role, direction, outcome| UdpDatagramLabels {
                 role,
                 direction,
@@ -330,24 +222,25 @@ impl CoreMetrics {
             },
         ));
         let udp_failures = FailureFamily::new(triple_labels(
-            ROLES,
-            STAGES,
-            REASONS,
+            Role::ALL,
+            Stage::ALL,
+            Reason::ALL,
             |role, stage, reason| FailureLabels {
                 role,
                 stage,
                 reason,
             },
         ));
-        let udp_bytes = ByteFamily::new(pair_labels(ROLES, DIRECTIONS, |role, direction| {
-            ByteLabels { role, direction }
-        }));
+        let udp_bytes =
+            ByteFamily::new(pair_labels(Role::ALL, Direction::ALL, |role, direction| {
+                ByteLabels { role, direction }
+            }));
         let udp_buffered_bytes =
-            UdpRoleGaugeFamily::new(single_labels(ROLES, |role| UdpRoleLabels { role }));
+            UdpRoleGaugeFamily::new(single_labels(Role::ALL, |role| UdpRoleLabels { role }));
         let udp_replay_rejections = UdpReplayFamily::new(triple_labels(
-            ROLES,
-            DIRECTIONS,
-            REASONS,
+            Role::ALL,
+            Direction::ALL,
+            Reason::ALL,
             |role, direction, reason| UdpReplayLabels {
                 role,
                 direction,
@@ -355,12 +248,12 @@ impl CoreMetrics {
             },
         ));
         let udp_forced_shutdown =
-            UdpRoleCounterFamily::new(single_labels(ROLES, |role| UdpRoleLabels { role }));
+            UdpRoleCounterFamily::new(single_labels(Role::ALL, |role| UdpRoleLabels { role }));
         let sniff = SniffFamily::new(quadruple_labels(
-            ROLES,
-            TRANSPORTS,
-            SNIFF_OUTCOMES,
-            SNIFF_PROTOCOLS,
+            Role::ALL,
+            Transport::ALL,
+            SniffOutcome::ALL,
+            SniffProtocol::ALL,
             |role, transport, outcome, protocol| SniffLabels {
                 role,
                 transport,
@@ -469,11 +362,11 @@ impl Metrics {
         self.core
             .connections
             .metric(triple_index(
-                role as usize,
-                inbound as usize,
-                outcome as usize,
-                INBOUNDS.len(),
-                OUTCOMES.len(),
+                role.index(),
+                inbound.index(),
+                outcome.index(),
+                Inbound::ALL.len(),
+                Outcome::ALL.len(),
             ))
             .inc();
     }
@@ -481,14 +374,22 @@ impl Metrics {
     pub fn active_connections_inc(&self, role: Role, inbound: Inbound) {
         self.core
             .active
-            .metric(pair_index(role as usize, inbound as usize, INBOUNDS.len()))
+            .metric(pair_index(
+                role.index(),
+                inbound.index(),
+                Inbound::ALL.len(),
+            ))
             .inc();
     }
 
     pub fn active_connections_dec(&self, role: Role, inbound: Inbound) {
         self.core
             .active
-            .metric(pair_index(role as usize, inbound as usize, INBOUNDS.len()))
+            .metric(pair_index(
+                role.index(),
+                inbound.index(),
+                Inbound::ALL.len(),
+            ))
             .dec();
     }
 
@@ -496,11 +397,11 @@ impl Metrics {
         self.core
             .failures
             .metric(triple_index(
-                role as usize,
-                stage as usize,
-                reason as usize,
-                STAGES.len(),
-                REASONS.len(),
+                role.index(),
+                stage.index(),
+                reason.index(),
+                Stage::ALL.len(),
+                Reason::ALL.len(),
             ))
             .inc();
     }
@@ -509,9 +410,9 @@ impl Metrics {
         self.core
             .bytes
             .metric(pair_index(
-                role as usize,
-                direction as usize,
-                DIRECTIONS.len(),
+                role.index(),
+                direction.index(),
+                Direction::ALL.len(),
             ))
             .inc_by(bytes);
     }
@@ -521,26 +422,26 @@ impl Metrics {
     }
 
     pub fn replay_rejection(&self, reason: Reason) {
-        self.core.replay_rejections.metric(reason as usize).inc();
+        self.core.replay_rejections.metric(reason.index()).inc();
     }
 
     pub fn forced_shutdown(&self, role: Role) {
-        self.core.forced_shutdowns.metric(role as usize).inc();
+        self.core.forced_shutdowns.metric(role.index()).inc();
     }
 
     pub fn udp_sessions_active_inc(&self, role: Role) {
-        self.core.udp_sessions_active.metric(role as usize).inc();
+        self.core.udp_sessions_active.metric(role.index()).inc();
     }
 
     pub fn udp_sessions_active_dec(&self, role: Role) {
-        self.core.udp_sessions_active.metric(role as usize).dec();
+        self.core.udp_sessions_active.metric(role.index()).dec();
     }
 
     pub fn set_udp_sessions_active(&self, role: Role, sessions: usize) {
         let value = i64::try_from(sessions).unwrap_or(i64::MAX);
         self.core
             .udp_sessions_active
-            .metric(role as usize)
+            .metric(role.index())
             .set(value);
     }
 
@@ -548,11 +449,11 @@ impl Metrics {
         self.core
             .udp_datagrams
             .metric(triple_index(
-                role as usize,
-                direction as usize,
-                outcome as usize,
-                DIRECTIONS.len(),
-                OUTCOMES.len(),
+                role.index(),
+                direction.index(),
+                outcome.index(),
+                Direction::ALL.len(),
+                Outcome::ALL.len(),
             ))
             .inc();
     }
@@ -561,11 +462,11 @@ impl Metrics {
         self.core
             .udp_failures
             .metric(triple_index(
-                role as usize,
-                stage as usize,
-                reason as usize,
-                STAGES.len(),
-                REASONS.len(),
+                role.index(),
+                stage.index(),
+                reason.index(),
+                Stage::ALL.len(),
+                Reason::ALL.len(),
             ))
             .inc();
     }
@@ -574,36 +475,33 @@ impl Metrics {
         self.core
             .udp_bytes
             .metric(pair_index(
-                role as usize,
-                direction as usize,
-                DIRECTIONS.len(),
+                role.index(),
+                direction.index(),
+                Direction::ALL.len(),
             ))
             .inc_by(bytes);
     }
 
     pub fn set_udp_buffered_bytes(&self, role: Role, bytes: usize) {
         let value = i64::try_from(bytes).unwrap_or(i64::MAX);
-        self.core
-            .udp_buffered_bytes
-            .metric(role as usize)
-            .set(value);
+        self.core.udp_buffered_bytes.metric(role.index()).set(value);
     }
 
     pub fn udp_replay_rejection(&self, role: Role, direction: Direction, reason: Reason) {
         self.core
             .udp_replay_rejections
             .metric(triple_index(
-                role as usize,
-                direction as usize,
-                reason as usize,
-                DIRECTIONS.len(),
-                REASONS.len(),
+                role.index(),
+                direction.index(),
+                reason.index(),
+                Direction::ALL.len(),
+                Reason::ALL.len(),
             ))
             .inc();
     }
 
     pub fn udp_forced_shutdown(&self, role: Role) {
-        self.core.udp_forced_shutdown.metric(role as usize).inc();
+        self.core.udp_forced_shutdown.metric(role.index()).inc();
     }
 
     /// Records and traces exactly one closed tuple for an authenticated sniff.
@@ -617,13 +515,13 @@ impl Metrics {
         self.core
             .sniff
             .metric(quadruple_index(
-                role as usize,
-                transport as usize,
-                outcome as usize,
-                protocol as usize,
-                TRANSPORTS.len(),
-                SNIFF_OUTCOMES.len(),
-                SNIFF_PROTOCOLS.len(),
+                role.index(),
+                transport.index(),
+                outcome.index(),
+                protocol.index(),
+                Transport::ALL.len(),
+                SniffOutcome::ALL.len(),
+                SniffProtocol::ALL.len(),
             ))
             .inc();
         emit_sniff(role, transport, outcome, protocol);

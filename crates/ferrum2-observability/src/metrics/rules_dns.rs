@@ -1,3 +1,5 @@
+use crate::dimension::closed_dimension;
+
 use std::fmt;
 use std::fmt::Write as _;
 
@@ -12,247 +14,119 @@ use super::family::{
     single_labels, triple_index, triple_labels, u64_gauge, usize_gauge,
 };
 
-/// Closed outcomes for loading or refreshing a RuleSet.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RuleSetResult {
-    Success,
-    Failure,
-    Unchanged,
-}
-
-impl RuleSetResult {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Failure => "failure",
-            Self::Unchanged => "unchanged",
-        }
+closed_dimension! {
+    /// Closed outcomes for loading or refreshing a RuleSet.
+    pub enum RuleSetResult {
+        Success => "success",
+        Failure => "failure",
+        Unchanged => "unchanged",
     }
 }
 
-/// Closed matcher categories used by compiled RuleSet entry gauges.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum CompiledMatchType {
-    Domain,
-    DomainSuffix,
-    DomainKeyword,
-    IpCidr,
-}
-
-impl CompiledMatchType {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Domain => "domain",
-            Self::DomainSuffix => "domain_suffix",
-            Self::DomainKeyword => "domain_keyword",
-            Self::IpCidr => "ip_cidr",
-        }
+closed_dimension! {
+    /// Closed matcher categories used by compiled RuleSet entry gauges.
+    pub enum CompiledMatchType {
+        Domain => "domain",
+        DomainSuffix => "domain_suffix",
+        DomainKeyword => "domain_keyword",
+        IpCidr => "ip_cidr",
     }
 }
 
-/// Closed rule programs which share the matching engine.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RuleProgram {
-    Route,
-    DnsQuery,
-    DnsResponse,
-}
-
-impl RuleProgram {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Route => "route",
-            Self::DnsQuery => "dns_query",
-            Self::DnsResponse => "dns_response",
-        }
+closed_dimension! {
+    /// Closed rule programs which share the matching engine.
+    pub enum RuleProgram {
+        Route => "route",
+        DnsQuery => "dns_query",
+        DnsResponse => "dns_response",
     }
 }
 
-/// Closed implementations available to a compiled rule program.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RuleProgramMode {
-    SmallLinear,
-    Indexed,
-}
-
-impl RuleProgramMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::SmallLinear => "small_linear",
-            Self::Indexed => "indexed",
-        }
+closed_dimension! {
+    /// Closed implementations available to a compiled rule program.
+    pub enum RuleProgramMode {
+        SmallLinear => "small_linear",
+        Indexed => "indexed",
     }
 }
 
-/// Closed origins for route and DNS rule matchers.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RuleSource {
-    Inline,
-    RuleSet,
-}
-
-impl RuleSource {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Inline => "inline",
-            Self::RuleSet => "rule_set",
-        }
+closed_dimension! {
+    /// Closed origins for route and DNS rule matchers.
+    pub enum RuleSource {
+        Inline => "inline",
+        RuleSet => "rule_set",
     }
 }
 
-/// Closed rule matcher categories. No concrete value is accepted as a label.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RuleMatchType {
-    Domain,
-    DomainSuffix,
-    DomainKeyword,
-    IpCidr,
-    Scalar,
-}
-
-impl RuleMatchType {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Domain => "domain",
-            Self::DomainSuffix => "domain_suffix",
-            Self::DomainKeyword => "domain_keyword",
-            Self::IpCidr => "ip_cidr",
-            Self::Scalar => "scalar",
-        }
+closed_dimension! {
+    /// Closed rule matcher categories. No concrete value is accepted as a label.
+    pub enum RuleMatchType {
+        Domain => "domain",
+        DomainSuffix => "domain_suffix",
+        DomainKeyword => "domain_keyword",
+        IpCidr => "ip_cidr",
+        Scalar => "scalar",
     }
 }
 
-/// Closed results for one rule-matching source and category.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RuleMatchResult {
-    Matched,
-    Missed,
-}
-
-impl RuleMatchResult {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Matched => "matched",
-            Self::Missed => "missed",
-        }
+closed_dimension! {
+    /// Closed results for one rule-matching source and category.
+    pub enum RuleMatchResult {
+        Matched => "matched",
+        Missed => "missed",
     }
 }
 
-/// Closed resolver classes. Configured resolver tags are deliberately excluded.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum DnsResolverKind {
-    System,
-    Configured,
-}
-
-impl DnsResolverKind {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::Configured => "configured",
-        }
+closed_dimension! {
+    /// Closed resolver classes. Configured resolver tags are deliberately excluded.
+    pub enum DnsResolverKind {
+        System => "system",
+        Configured => "configured",
     }
 }
 
-/// Closed purposes for DNS resolution.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum DnsResolvePurpose {
-    Application,
-    FixedEndpoint,
-    RuleSetDownload,
-}
-
-impl DnsResolvePurpose {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Application => "application",
-            Self::FixedEndpoint => "fixed_endpoint",
-            Self::RuleSetDownload => "ruleset_download",
-        }
+closed_dimension! {
+    /// Closed purposes for DNS resolution.
+    pub enum DnsResolvePurpose {
+        Application => "application",
+        FixedEndpoint => "fixed_endpoint",
+        RuleSetDownload => "ruleset_download",
     }
 }
 
-/// Closed DNS resolution results.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum DnsResolveResult {
-    Success,
-    Failure,
-}
-
-impl DnsResolveResult {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Failure => "failure",
-        }
+closed_dimension! {
+    /// Closed DNS resolution results.
+    pub enum DnsResolveResult {
+        Success => "success",
+        Failure => "failure",
     }
 }
 
-/// Closed DNS query types used by the shared cache metrics.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum DnsQueryType {
-    A,
-    Aaaa,
-    Other,
-}
-
-impl DnsQueryType {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::A => "a",
-            Self::Aaaa => "aaaa",
-            Self::Other => "other",
-        }
+closed_dimension! {
+    /// Closed DNS query types used by the shared cache metrics.
+    pub enum DnsQueryType {
+        A => "a",
+        Aaaa => "aaaa",
+        Other => "other",
     }
 }
 
-/// Closed components whose dial targets may be resolved in different places.
-/// Concrete DNS server, RuleSet, domain, and URL identities are excluded.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum TargetResolutionComponent {
-    DnsUpstream,
-    RuleSetDownload,
-}
-
-impl TargetResolutionComponent {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::DnsUpstream => "dns_upstream",
-            Self::RuleSetDownload => "ruleset_download",
-        }
+closed_dimension! {
+    /// Closed components whose dial targets may be resolved in different places.
+    /// Concrete DNS server, RuleSet, domain, and URL identities are excluded.
+    pub enum TargetResolutionComponent {
+        DnsUpstream => "dns_upstream",
+        RuleSetDownload => "ruleset_download",
     }
 }
 
-/// Closed locations at which a DNS upstream or RuleSet target is resolved.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum TargetResolutionMode {
-    Numeric,
-    ClientResolvedSystem,
-    ClientResolvedConfigured,
-    DeferredToDetour,
-}
-
-impl TargetResolutionMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Numeric => "numeric",
-            Self::ClientResolvedSystem => "client_resolved_system",
-            Self::ClientResolvedConfigured => "client_resolved_configured",
-            Self::DeferredToDetour => "deferred_to_detour",
-        }
+closed_dimension! {
+    /// Closed locations at which a DNS upstream or RuleSet target is resolved.
+    pub enum TargetResolutionMode {
+        Numeric => "numeric",
+        ClientResolvedSystem => "client_resolved_system",
+        ClientResolvedConfigured => "client_resolved_configured",
+        DeferredToDetour => "deferred_to_detour",
     }
 }
 
@@ -354,55 +228,6 @@ struct TargetResolutionLabels {
     mode: TargetResolutionMode,
 }
 
-const RULESET_RESULTS: &[RuleSetResult] = &[
-    RuleSetResult::Success,
-    RuleSetResult::Failure,
-    RuleSetResult::Unchanged,
-];
-const COMPILED_MATCH_TYPES: &[CompiledMatchType] = &[
-    CompiledMatchType::Domain,
-    CompiledMatchType::DomainSuffix,
-    CompiledMatchType::DomainKeyword,
-    CompiledMatchType::IpCidr,
-];
-const RULE_PROGRAMS: &[RuleProgram] = &[
-    RuleProgram::Route,
-    RuleProgram::DnsQuery,
-    RuleProgram::DnsResponse,
-];
-const RULE_PROGRAM_MODES: &[RuleProgramMode] =
-    &[RuleProgramMode::SmallLinear, RuleProgramMode::Indexed];
-const RULE_SOURCES: &[RuleSource] = &[RuleSource::Inline, RuleSource::RuleSet];
-const RULE_MATCH_TYPES: &[RuleMatchType] = &[
-    RuleMatchType::Domain,
-    RuleMatchType::DomainSuffix,
-    RuleMatchType::DomainKeyword,
-    RuleMatchType::IpCidr,
-    RuleMatchType::Scalar,
-];
-const RULE_MATCH_RESULTS: &[RuleMatchResult] = &[RuleMatchResult::Matched, RuleMatchResult::Missed];
-const DNS_RESOLVER_KINDS: &[DnsResolverKind] =
-    &[DnsResolverKind::System, DnsResolverKind::Configured];
-const DNS_RESOLVE_PURPOSES: &[DnsResolvePurpose] = &[
-    DnsResolvePurpose::Application,
-    DnsResolvePurpose::FixedEndpoint,
-    DnsResolvePurpose::RuleSetDownload,
-];
-const DNS_RESOLVE_RESULTS: &[DnsResolveResult] =
-    &[DnsResolveResult::Success, DnsResolveResult::Failure];
-const DNS_QUERY_TYPES: &[DnsQueryType] =
-    &[DnsQueryType::A, DnsQueryType::Aaaa, DnsQueryType::Other];
-const TARGET_RESOLUTION_COMPONENTS: &[TargetResolutionComponent] = &[
-    TargetResolutionComponent::DnsUpstream,
-    TargetResolutionComponent::RuleSetDownload,
-];
-const TARGET_RESOLUTION_MODES: &[TargetResolutionMode] = &[
-    TargetResolutionMode::Numeric,
-    TargetResolutionMode::ClientResolvedSystem,
-    TargetResolutionMode::ClientResolvedConfigured,
-    TargetResolutionMode::DeferredToDetour,
-];
-
 const RULE_PROGRAM_CANDIDATE_BUCKETS: &[f64] = &[
     0.0, 1.0, 4.0, 16.0, 64.0, 256.0, 1_024.0, 4_096.0, 16_384.0, 65_536.0,
 ];
@@ -420,18 +245,18 @@ const RULE_PROGRAM_MATCH_NS_BUCKETS: &[f64] = &[
     10_000_000.0,
 ];
 
-const RULESET_RESULT_SERIES: usize = RULESET_RESULTS.len();
-const COMPILED_MATCH_SERIES: usize = COMPILED_MATCH_TYPES.len();
-const RULE_PROGRAM_SERIES: usize = RULE_PROGRAMS.len();
-const RULE_PROGRAM_MODE_SERIES: usize = RULE_PROGRAMS.len() * RULE_PROGRAM_MODES.len();
+const RULESET_RESULT_SERIES: usize = RuleSetResult::ALL.len();
+const COMPILED_MATCH_SERIES: usize = CompiledMatchType::ALL.len();
+const RULE_PROGRAM_SERIES: usize = RuleProgram::ALL.len();
+const RULE_PROGRAM_MODE_SERIES: usize = RuleProgram::ALL.len() * RuleProgramMode::ALL.len();
 const RULE_MATCH_SERIES: usize =
-    RULE_SOURCES.len() * RULE_MATCH_TYPES.len() * RULE_MATCH_RESULTS.len();
+    RuleSource::ALL.len() * RuleMatchType::ALL.len() * RuleMatchResult::ALL.len();
 const DNS_RESOLVE_SERIES: usize =
-    DNS_RESOLVER_KINDS.len() * DNS_RESOLVE_PURPOSES.len() * DNS_RESOLVE_RESULTS.len();
-const DNS_QUERY_TYPE_SERIES: usize = DNS_QUERY_TYPES.len();
-const DNS_RESOLVE_PURPOSE_SERIES: usize = DNS_RESOLVE_PURPOSES.len();
+    DnsResolverKind::ALL.len() * DnsResolvePurpose::ALL.len() * DnsResolveResult::ALL.len();
+const DNS_QUERY_TYPE_SERIES: usize = DnsQueryType::ALL.len();
+const DNS_RESOLVE_PURPOSE_SERIES: usize = DnsResolvePurpose::ALL.len();
 const TARGET_RESOLUTION_SERIES: usize =
-    TARGET_RESOLUTION_COMPONENTS.len() * TARGET_RESOLUTION_MODES.len();
+    TargetResolutionComponent::ALL.len() * TargetResolutionMode::ALL.len();
 
 type RuleSetResultFamily =
     SharedClosedFamily<RuleSetResultLabels, CachedCounter, RULESET_RESULT_SERIES>;
@@ -475,41 +300,41 @@ pub(super) struct RulesDnsMetrics {
 
 impl RulesDnsMetrics {
     pub(super) fn register(registry: &mut Registry) -> Self {
-        let ruleset_loads = RuleSetResultFamily::new(single_labels(RULESET_RESULTS, |result| {
+        let ruleset_loads = RuleSetResultFamily::new(single_labels(RuleSetResult::ALL, |result| {
             RuleSetResultLabels { result }
         }));
         let ruleset_refreshes =
-            RuleSetResultFamily::new(single_labels(RULESET_RESULTS, |result| {
+            RuleSetResultFamily::new(single_labels(RuleSetResult::ALL, |result| {
                 RuleSetResultLabels { result }
             }));
         let ruleset_generation = Gauge::default();
         let ruleset_compiled_entries =
-            CompiledMatchFamily::new(single_labels(COMPILED_MATCH_TYPES, |r#type| {
+            CompiledMatchFamily::new(single_labels(CompiledMatchType::ALL, |r#type| {
                 CompiledMatchLabels { r#type }
             }));
         let ruleset_last_success_timestamp = Gauge::default();
         let rule_program_mode = RuleProgramModeFamily::new(pair_labels(
-            RULE_PROGRAMS,
-            RULE_PROGRAM_MODES,
+            RuleProgram::ALL,
+            RuleProgramMode::ALL,
             |program, mode| RuleProgramModeLabels { program, mode },
         ));
         let rule_program_rules =
-            RuleProgramGaugeFamily::new(single_labels(RULE_PROGRAMS, |program| {
+            RuleProgramGaugeFamily::new(single_labels(RuleProgram::ALL, |program| {
                 RuleProgramLabels { program }
             }));
         let rule_program_candidate_count = RuleProgramHistogramFamily::new_with(
-            single_labels(RULE_PROGRAMS, |program| RuleProgramLabels { program }),
+            single_labels(RuleProgram::ALL, |program| RuleProgramLabels { program }),
             || CachedHistogram::new(RULE_PROGRAM_CANDIDATE_BUCKETS.iter().copied()),
         );
         let rule_program_match_ns = RuleProgramHistogramFamily::new_with(
-            single_labels(RULE_PROGRAMS, |program| RuleProgramLabels { program }),
+            single_labels(RuleProgram::ALL, |program| RuleProgramLabels { program }),
             || CachedHistogram::new(RULE_PROGRAM_MATCH_NS_BUCKETS.iter().copied()),
         );
         let make_rule_match_labels = || {
             triple_labels(
-                RULE_SOURCES,
-                RULE_MATCH_TYPES,
-                RULE_MATCH_RESULTS,
+                RuleSource::ALL,
+                RuleMatchType::ALL,
+                RuleMatchResult::ALL,
                 |source, r#type, result| RuleMatchLabels {
                     source,
                     r#type,
@@ -521,29 +346,29 @@ impl RulesDnsMetrics {
         let dns_rule_query_matches = RuleMatchFamily::new(make_rule_match_labels());
         let dns_rule_response_matches = RuleMatchFamily::new(make_rule_match_labels());
         let dns_resolves = DnsResolveFamily::new(triple_labels(
-            DNS_RESOLVER_KINDS,
-            DNS_RESOLVE_PURPOSES,
-            DNS_RESOLVE_RESULTS,
+            DnsResolverKind::ALL,
+            DnsResolvePurpose::ALL,
+            DnsResolveResult::ALL,
             |resolver, purpose, result| DnsResolveLabels {
                 resolver,
                 purpose,
                 result,
             },
         ));
-        let dns_cache_hits = DnsQueryTypeFamily::new(single_labels(DNS_QUERY_TYPES, |qtype| {
+        let dns_cache_hits = DnsQueryTypeFamily::new(single_labels(DnsQueryType::ALL, |qtype| {
             DnsQueryTypeLabels { qtype }
         }));
-        let dns_cache_misses = DnsQueryTypeFamily::new(single_labels(DNS_QUERY_TYPES, |qtype| {
+        let dns_cache_misses = DnsQueryTypeFamily::new(single_labels(DnsQueryType::ALL, |qtype| {
             DnsQueryTypeLabels { qtype }
         }));
         let dns_explicit_system_resolves =
-            DnsResolvePurposeFamily::new(single_labels(DNS_RESOLVE_PURPOSES, |purpose| {
+            DnsResolvePurposeFamily::new(single_labels(DnsResolvePurpose::ALL, |purpose| {
                 DnsResolvePurposeLabels { purpose }
             }));
         let dns_implicit_system_fallbacks = Counter::default();
         let target_resolutions = TargetResolutionFamily::new(pair_labels(
-            TARGET_RESOLUTION_COMPONENTS,
-            TARGET_RESOLUTION_MODES,
+            TargetResolutionComponent::ALL,
+            TargetResolutionMode::ALL,
             |component, mode| TargetResolutionLabels { component, mode },
         ));
 
@@ -681,11 +506,11 @@ fn record_rule_matches(
     }
     family
         .metric(triple_index(
-            source as usize,
-            r#type as usize,
-            result as usize,
-            RULE_MATCH_TYPES.len(),
-            RULE_MATCH_RESULTS.len(),
+            source.index(),
+            r#type.index(),
+            result.index(),
+            RuleMatchType::ALL.len(),
+            RuleMatchResult::ALL.len(),
         ))
         .inc_by(count);
 }
@@ -693,14 +518,14 @@ fn record_rule_matches(
 impl Metrics {
     /// Records an initial RuleSet load without exposing its tag or source URL.
     pub fn ruleset_load(&self, result: RuleSetResult) {
-        self.rules_dns.ruleset_loads.metric(result as usize).inc();
+        self.rules_dns.ruleset_loads.metric(result.index()).inc();
     }
 
     /// Records a RuleSet refresh without exposing its tag or source URL.
     pub fn ruleset_refresh(&self, result: RuleSetResult) {
         self.rules_dns
             .ruleset_refreshes
-            .metric(result as usize)
+            .metric(result.index())
             .inc();
     }
 
@@ -713,7 +538,7 @@ impl Metrics {
     pub fn set_ruleset_compiled_entries(&self, r#type: CompiledMatchType, entries: usize) {
         self.rules_dns
             .ruleset_compiled_entries
-            .metric(r#type as usize)
+            .metric(r#type.index())
             .set(usize_gauge(entries));
     }
 
@@ -729,13 +554,13 @@ impl Metrics {
     /// Both mode series are updated as a one-hot pair, so a later mode change
     /// cannot leave the prior mode reporting `1`.
     pub fn set_rule_program_mode(&self, program: RuleProgram, selected: RuleProgramMode) {
-        for mode in RULE_PROGRAM_MODES {
+        for mode in RuleProgramMode::ALL {
             self.rules_dns
                 .rule_program_mode
                 .metric(pair_index(
-                    program as usize,
-                    *mode as usize,
-                    RULE_PROGRAM_MODES.len(),
+                    program.index(),
+                    mode.index(),
+                    RuleProgramMode::ALL.len(),
                 ))
                 .set(i64::from(*mode == selected));
         }
@@ -745,7 +570,7 @@ impl Metrics {
     pub fn set_rule_program_rules(&self, program: RuleProgram, rules: usize) {
         self.rules_dns
             .rule_program_rules
-            .metric(program as usize)
+            .metric(program.index())
             .set(usize_gauge(rules));
     }
 
@@ -753,7 +578,7 @@ impl Metrics {
     pub fn observe_rule_program_candidate_count(&self, program: RuleProgram, candidates: usize) {
         self.rules_dns
             .rule_program_candidate_count
-            .metric(program as usize)
+            .metric(program.index())
             .observe(candidates as f64);
     }
 
@@ -761,7 +586,7 @@ impl Metrics {
     pub fn observe_rule_program_match_ns(&self, program: RuleProgram, match_ns: u64) {
         self.rules_dns
             .rule_program_match_ns
-            .metric(program as usize)
+            .metric(program.index())
             .observe(match_ns as f64);
     }
 
@@ -844,23 +669,23 @@ impl Metrics {
         self.rules_dns
             .dns_resolves
             .metric(triple_index(
-                resolver as usize,
-                purpose as usize,
-                result as usize,
-                DNS_RESOLVE_PURPOSES.len(),
-                DNS_RESOLVE_RESULTS.len(),
+                resolver.index(),
+                purpose.index(),
+                result.index(),
+                DnsResolvePurpose::ALL.len(),
+                DnsResolveResult::ALL.len(),
             ))
             .inc();
     }
 
     /// Records a shared DNS cache hit without accepting a server identity.
     pub fn dns_cache_hit(&self, qtype: DnsQueryType) {
-        self.rules_dns.dns_cache_hits.metric(qtype as usize).inc();
+        self.rules_dns.dns_cache_hits.metric(qtype.index()).inc();
     }
 
     /// Records a shared DNS cache miss without accepting a server identity.
     pub fn dns_cache_miss(&self, qtype: DnsQueryType) {
-        self.rules_dns.dns_cache_misses.metric(qtype as usize).inc();
+        self.rules_dns.dns_cache_misses.metric(qtype.index()).inc();
     }
 
     /// Records an authorized use of the system resolver.
@@ -870,7 +695,7 @@ impl Metrics {
     pub fn dns_explicit_system_resolve(&self, purpose: DnsResolvePurpose) {
         self.rules_dns
             .dns_explicit_system_resolves
-            .metric(purpose as usize)
+            .metric(purpose.index())
             .inc();
     }
 
@@ -894,9 +719,9 @@ impl Metrics {
         self.rules_dns
             .target_resolutions
             .metric(pair_index(
-                component as usize,
-                mode as usize,
-                TARGET_RESOLUTION_MODES.len(),
+                component.index(),
+                mode.index(),
+                TargetResolutionMode::ALL.len(),
             ))
             .inc();
     }

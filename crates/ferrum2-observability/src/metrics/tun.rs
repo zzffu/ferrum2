@@ -7,7 +7,6 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 
 use super::Metrics;
-use super::core::TRANSPORTS;
 use super::family::{
     CachedCounter, SharedClosedFamily, pair_index, pair_labels, single_labels, u64_gauge,
     usize_counter, usize_gauge,
@@ -84,96 +83,18 @@ struct TunUdpAssociationRouteLabels {
     result: TunUdpAssociationRouteResult,
 }
 
-const TUN_PACKET_REJECT_REASONS: &[TunPacketRejectReason] = &[
-    TunPacketRejectReason::InvalidIpVersion,
-    TunPacketRejectReason::FamilyDisabled,
-    TunPacketRejectReason::InvalidIpLength,
-    TunPacketRejectReason::InvalidIpChecksum,
-    TunPacketRejectReason::InvalidExtensionHeader,
-    TunPacketRejectReason::UnsupportedIpProtocol,
-    TunPacketRejectReason::IcmpEchoUnsupported,
-    TunPacketRejectReason::FragmentMalformed,
-    TunPacketRejectReason::FragmentOverlap,
-    TunPacketRejectReason::FragmentTimeout,
-    TunPacketRejectReason::FragmentLimit,
-    TunPacketRejectReason::InvalidTransportLength,
-    TunPacketRejectReason::InvalidTransportChecksum,
-    TunPacketRejectReason::InvalidSource,
-    TunPacketRejectReason::InvalidDestination,
-    TunPacketRejectReason::IngressFull,
-    TunPacketRejectReason::TcpFlowLimit,
-    TunPacketRejectReason::UdpAssociationLimit,
-    TunPacketRejectReason::UdpCandidateTimeout,
-    TunPacketRejectReason::UdpQueueFull,
-    TunPacketRejectReason::UdpResponseFiltered,
-    TunPacketRejectReason::UdpResponseClosed,
-    TunPacketRejectReason::StaleGeneration,
-    TunPacketRejectReason::WintunRingFull,
-];
-const TUN_UDP_RESPONSE_DROP_REASONS: &[TunUdpResponseDropReason] = &[
-    TunUdpResponseDropReason::StaleGeneration,
-    TunUdpResponseDropReason::AssociationClosed,
-    TunUdpResponseDropReason::QueueFull,
-    TunUdpResponseDropReason::MalformedResponse,
-    TunUdpResponseDropReason::Filtered,
-    TunUdpResponseDropReason::InjectionRejected,
-    TunUdpResponseDropReason::SessionReset,
-    TunUdpResponseDropReason::Shutdown,
-    TunUdpResponseDropReason::OwnerFatal,
-];
-const NETWORK_LIFECYCLE_OPERATIONS: &[NetworkLifecycleOperation] = &[
-    NetworkLifecycleOperation::ResetNetwork,
-    NetworkLifecycleOperation::FullRebuild,
-];
-const NETWORK_LIFECYCLE_RESULTS: &[NetworkLifecycleResult] = &[
-    NetworkLifecycleResult::Started,
-    NetworkLifecycleResult::Succeeded,
-    NetworkLifecycleResult::Failed,
-];
-const NETWORK_RESET_REASONS: &[NetworkResetReason] =
-    &[NetworkResetReason::NetworkChange, NetworkResetReason::Retry];
-const NETWORK_FULL_REBUILD_REASONS: &[NetworkFullRebuildReason] = &[
-    NetworkFullRebuildReason::AdapterDamage,
-    NetworkFullRebuildReason::SessionDamage,
-    NetworkFullRebuildReason::AddressDamage,
-    NetworkFullRebuildReason::RouteDamage,
-    NetworkFullRebuildReason::DnsDamage,
-    NetworkFullRebuildReason::MtuDamage,
-    NetworkFullRebuildReason::StrictRouteDamage,
-    NetworkFullRebuildReason::OwnershipLedgerDamage,
-];
-const STRICT_ROUTE_FILTER_INSTALL_RESULTS: &[StrictRouteFilterInstallResult] = &[
-    StrictRouteFilterInstallResult::Success,
-    StrictRouteFilterInstallResult::Failure,
-];
-const INTERFACE_RESOLUTION_SOURCES: &[InterfaceResolutionSource] = &[
-    InterfaceResolutionSource::OutboundExplicit,
-    InterfaceResolutionSource::AutoDetected,
-    InterfaceResolutionSource::RouteDefault,
-    InterfaceResolutionSource::SystemBestRoute,
-];
-const INTERFACE_RESOLUTION_RESULTS: &[InterfaceResolutionResult] = &[
-    InterfaceResolutionResult::Success,
-    InterfaceResolutionResult::Failure,
-];
-const TUN_UDP_ASSOCIATION_ROUTE_RESULTS: &[TunUdpAssociationRouteResult] = &[
-    TunUdpAssociationRouteResult::Success,
-    TunUdpAssociationRouteResult::Rejected,
-    TunUdpAssociationRouteResult::Failure,
-    TunUdpAssociationRouteResult::StaleGeneration,
-];
-
-const TUN_PACKET_REJECT_SERIES: usize = TUN_PACKET_REJECT_REASONS.len();
-const TUN_UDP_RESPONSE_DROP_SERIES: usize = TUN_UDP_RESPONSE_DROP_REASONS.len();
-const NETWORK_RESET_SERIES: usize = NETWORK_RESET_REASONS.len() * NETWORK_LIFECYCLE_RESULTS.len();
+const TUN_PACKET_REJECT_SERIES: usize = TunPacketRejectReason::ALL.len();
+const TUN_UDP_RESPONSE_DROP_SERIES: usize = TunUdpResponseDropReason::ALL.len();
+const NETWORK_RESET_SERIES: usize =
+    NetworkResetReason::ALL.len() * NetworkLifecycleResult::ALL.len();
 const NETWORK_FULL_REBUILD_SERIES: usize =
-    NETWORK_FULL_REBUILD_REASONS.len() * NETWORK_LIFECYCLE_RESULTS.len();
+    NetworkFullRebuildReason::ALL.len() * NetworkLifecycleResult::ALL.len();
 const NETWORK_ASSOCIATIONS_RESET_SERIES: usize =
-    NETWORK_LIFECYCLE_OPERATIONS.len() * TRANSPORTS.len();
-const STRICT_ROUTE_FILTER_INSTALL_SERIES: usize = STRICT_ROUTE_FILTER_INSTALL_RESULTS.len();
+    NetworkLifecycleOperation::ALL.len() * Transport::ALL.len();
+const STRICT_ROUTE_FILTER_INSTALL_SERIES: usize = StrictRouteFilterInstallResult::ALL.len();
 const INTERFACE_RESOLUTION_SERIES: usize =
-    INTERFACE_RESOLUTION_SOURCES.len() * INTERFACE_RESOLUTION_RESULTS.len();
-const TUN_UDP_ASSOCIATION_ROUTE_SERIES: usize = TUN_UDP_ASSOCIATION_ROUTE_RESULTS.len();
+    InterfaceResolutionSource::ALL.len() * InterfaceResolutionResult::ALL.len();
+const TUN_UDP_ASSOCIATION_ROUTE_SERIES: usize = TunUdpAssociationRouteResult::ALL.len();
 
 type TunPacketRejectFamily =
     SharedClosedFamily<TunPacketRejectLabels, CachedCounter, TUN_PACKET_REJECT_SERIES>;
@@ -257,13 +178,13 @@ impl TunMetrics {
         let tun_packets_ingress = Counter::default();
         let tun_packets_egress = Counter::default();
         let tun_packets_rejected =
-            TunPacketRejectFamily::new(single_labels(TUN_PACKET_REJECT_REASONS, |reason| {
+            TunPacketRejectFamily::new(single_labels(TunPacketRejectReason::ALL, |reason| {
                 TunPacketRejectLabels { reason }
             }));
         let tun_internal_egress_backpressured = Counter::default();
         let tun_pending_udp_responses = Gauge::default();
         let tun_udp_response_dropped =
-            TunUdpResponseDropFamily::new(single_labels(TUN_UDP_RESPONSE_DROP_REASONS, |reason| {
+            TunUdpResponseDropFamily::new(single_labels(TunUdpResponseDropReason::ALL, |reason| {
                 TunUdpResponseDropLabels { reason }
             }));
         let tun_wintun_ring_full_dropped = Counter::default();
@@ -289,19 +210,19 @@ impl TunMetrics {
         let tun_network_change = Counter::default();
         let tun_underlay_bind_stale = Counter::default();
         let network_resets = NetworkResetFamily::new(pair_labels(
-            NETWORK_RESET_REASONS,
-            NETWORK_LIFECYCLE_RESULTS,
+            NetworkResetReason::ALL,
+            NetworkLifecycleResult::ALL,
             |reason, result| NetworkResetLabels { reason, result },
         ));
         let network_full_rebuilds = NetworkFullRebuildFamily::new(pair_labels(
-            NETWORK_FULL_REBUILD_REASONS,
-            NETWORK_LIFECYCLE_RESULTS,
+            NetworkFullRebuildReason::ALL,
+            NetworkLifecycleResult::ALL,
             |reason, result| NetworkFullRebuildLabels { reason, result },
         ));
         let network_generation = Gauge::default();
         let network_associations_reset = NetworkAssociationsResetFamily::new(pair_labels(
-            NETWORK_LIFECYCLE_OPERATIONS,
-            TRANSPORTS,
+            NetworkLifecycleOperation::ALL,
+            Transport::ALL,
             |operation, transport| NetworkAssociationsResetLabels {
                 operation,
                 transport,
@@ -310,17 +231,17 @@ impl TunMetrics {
         let tun_strict_route_requested = Gauge::default();
         let tun_strict_route_effective = Gauge::default();
         let tun_strict_route_filter_installs = StrictRouteFilterInstallFamily::new(single_labels(
-            STRICT_ROUTE_FILTER_INSTALL_RESULTS,
+            StrictRouteFilterInstallResult::ALL,
             |result| StrictRouteFilterInstallLabels { result },
         ));
         let outbound_interface_resolutions = InterfaceResolutionFamily::new(pair_labels(
-            INTERFACE_RESOLUTION_SOURCES,
-            INTERFACE_RESOLUTION_RESULTS,
+            InterfaceResolutionSource::ALL,
+            InterfaceResolutionResult::ALL,
             |source, result| InterfaceResolutionLabels { source, result },
         ));
         let outbound_interface_resolution_cache_hits = Counter::default();
         let tun_udp_association_routes = TunUdpAssociationRouteFamily::new(single_labels(
-            TUN_UDP_ASSOCIATION_ROUTE_RESULTS,
+            TunUdpAssociationRouteResult::ALL,
             |result| TunUdpAssociationRouteLabels { result },
         ));
         registry.register(
@@ -633,7 +554,7 @@ impl Metrics {
 
     /// Records one TUN packet rejection using only a closed reason code.
     pub fn tun_packet_rejected(&self, reason: TunPacketRejectReason) {
-        self.tun.tun_packets_rejected.metric(reason as usize).inc();
+        self.tun.tun_packets_rejected.metric(reason.index()).inc();
     }
 
     /// Records one observation of bounded internal egress backpressure.
@@ -653,7 +574,7 @@ impl Metrics {
     pub fn tun_udp_response_dropped(&self, reason: TunUdpResponseDropReason) {
         self.tun
             .tun_udp_response_dropped
-            .metric(reason as usize)
+            .metric(reason.index())
             .inc();
     }
 
@@ -818,9 +739,9 @@ impl Metrics {
         self.tun
             .network_resets
             .metric(pair_index(
-                reason as usize,
-                result as usize,
-                NETWORK_LIFECYCLE_RESULTS.len(),
+                reason.index(),
+                result.index(),
+                NetworkLifecycleResult::ALL.len(),
             ))
             .inc();
     }
@@ -834,9 +755,9 @@ impl Metrics {
         self.tun
             .network_full_rebuilds
             .metric(pair_index(
-                reason as usize,
-                result as usize,
-                NETWORK_LIFECYCLE_RESULTS.len(),
+                reason.index(),
+                result.index(),
+                NetworkLifecycleResult::ALL.len(),
             ))
             .inc();
     }
@@ -856,9 +777,9 @@ impl Metrics {
         self.tun
             .network_associations_reset
             .metric(pair_index(
-                operation as usize,
-                transport as usize,
-                TRANSPORTS.len(),
+                operation.index(),
+                transport.index(),
+                Transport::ALL.len(),
             ))
             .inc_by(usize_counter(associations));
     }
@@ -881,7 +802,7 @@ impl Metrics {
     pub fn tun_strict_route_filter_install(&self, result: StrictRouteFilterInstallResult) {
         self.tun
             .tun_strict_route_filter_installs
-            .metric(result as usize)
+            .metric(result.index())
             .inc();
     }
 
@@ -894,9 +815,9 @@ impl Metrics {
         self.tun
             .outbound_interface_resolutions
             .metric(pair_index(
-                source as usize,
-                result as usize,
-                INTERFACE_RESOLUTION_RESULTS.len(),
+                source.index(),
+                result.index(),
+                InterfaceResolutionResult::ALL.len(),
             ))
             .inc();
     }
@@ -910,7 +831,7 @@ impl Metrics {
     pub fn tun_udp_association_route(&self, result: TunUdpAssociationRouteResult) {
         self.tun
             .tun_udp_association_routes
-            .metric(result as usize)
+            .metric(result.index())
             .inc();
     }
 }

@@ -1,3 +1,5 @@
+use crate::dimension::closed_dimension;
+
 use std::fmt;
 
 use tracing::Level;
@@ -29,146 +31,74 @@ impl LogLevel {
     }
 }
 
-/// Process role used by tracing and metrics.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Role {
-    Client,
-    Server,
-}
-
-impl Role {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Client => "client",
-            Self::Server => "server",
-        }
+closed_dimension! {
+    /// Process role used by tracing and metrics.
+    pub enum Role {
+        Client => "client",
+        Server => "server",
     }
 }
 
-/// Closed transport categories used by tracing.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Transport {
-    Tcp,
-    Udp,
-}
-
-impl Transport {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Tcp => "tcp",
-            Self::Udp => "udp",
-        }
+closed_dimension! {
+    /// Closed transport categories used by tracing.
+    pub enum Transport {
+        Tcp => "tcp",
+        Udp => "udp",
     }
 }
 
-/// Closed tracing stages.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Stage {
-    Config,
-    Listen,
-    Socks5,
-    Shadowsocks,
-    Sniff,
-    Direct,
-    Relay,
-    Metrics,
-    Shutdown,
-    Tun,
-}
-
-impl Stage {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Config => "config",
-            Self::Listen => "listen",
-            Self::Socks5 => "socks5",
-            Self::Shadowsocks => "shadowsocks",
-            Self::Sniff => "sniff",
-            Self::Direct => "direct",
-            Self::Relay => "relay",
-            Self::Metrics => "metrics",
-            Self::Shutdown => "shutdown",
-            Self::Tun => "tun",
-        }
+closed_dimension! {
+    /// Closed tracing stages.
+    pub enum Stage {
+        Config => "config",
+        Listen => "listen",
+        Socks5 => "socks5",
+        Shadowsocks => "shadowsocks",
+        Sniff => "sniff",
+        Direct => "direct",
+        Relay => "relay",
+        Metrics => "metrics",
+        Shutdown => "shutdown",
+        Tun => "tun",
     }
 }
 
-/// Closed tracing outcomes.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Outcome {
-    Accepted,
-    Completed,
-    Rejected,
-    Failed,
-    Cancelled,
-    Timeout,
-    Dropped,
-}
-
-impl Outcome {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Accepted => "accepted",
-            Self::Completed => "completed",
-            Self::Rejected => "rejected",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::Timeout => "timeout",
-            Self::Dropped => "dropped",
-        }
+closed_dimension! {
+    /// Closed tracing outcomes.
+    pub enum Outcome {
+        Accepted => "accepted",
+        Completed => "completed",
+        Rejected => "rejected",
+        Failed => "failed",
+        Cancelled => "cancelled",
+        Timeout => "timeout",
+        Dropped => "dropped",
     }
 }
 
-/// Closed outcomes produced by one authenticated sniff attempt.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum SniffOutcome {
-    Matched,
-    Unknown,
-    Timeout,
-    Limit,
-    Invalid,
-    Unavailable,
-}
-
-impl SniffOutcome {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Matched => "matched",
-            Self::Unknown => "unknown",
-            Self::Timeout => "timeout",
-            Self::Limit => "limit",
-            Self::Invalid => "invalid",
-            Self::Unavailable => "unavailable",
-        }
+closed_dimension! {
+    /// Closed outcomes produced by one authenticated sniff attempt.
+    pub enum SniffOutcome {
+        Matched => "matched",
+        Unknown => "unknown",
+        Timeout => "timeout",
+        Limit => "limit",
+        Invalid => "invalid",
+        Unavailable => "unavailable",
     }
 }
 
-/// Closed protocols observable from authenticated, bounded sniffing.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum SniffProtocol {
-    Dns,
-    Tls,
-    Http,
-    None,
-}
-
-impl SniffProtocol {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Dns => "dns",
-            Self::Tls => "tls",
-            Self::Http => "http",
-            Self::None => "none",
-        }
+closed_dimension! {
+    /// Closed protocols observable from authenticated, bounded sniffing.
+    pub enum SniffProtocol {
+        Dns => "dns",
+        Tls => "tls",
+        Http => "http",
+        None => "none",
     }
 }
 
 /// Closed event names; callers cannot inject a free-form message.
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Event {
     Config,
@@ -234,201 +164,103 @@ impl TunDiagnosticReason {
     }
 }
 
-/// Closed failure reasons shared by tracing and failure metrics.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Reason {
-    ConfigIo,
-    ConfigTooLarge,
-    ConfigSyntax,
-    ConfigSemantic,
-    SocksProtocol,
-    SocksUnsupported,
-    Authentication,
-    InvalidType,
-    TimestampSkew,
-    Replay,
-    ReplayCapacity,
-    FrameBounds,
-    AddressBounds,
-    ResponseBinding,
-    NonceExhausted,
-    RandomUnavailable,
-    ClockUnavailable,
-    HandshakeTimeout,
-    ConnectTimeout,
-    NetworkUnreachable,
-    HostUnreachable,
-    ConnectionRefused,
-    RelayIo,
-    IdleTimeout,
-    Cancelled,
-    Shutdown,
-    ListenerFailure,
-    Bounds,
-    Type,
-    Timestamp,
-    Address,
-    Padding,
-    Binding,
-    Duplicate,
-    TooOld,
-    SessionLimit,
-    BufferLimit,
-    QueueFull,
-    Clock,
-    Random,
-    Key,
-    Counter,
-    Resolve,
-    Send,
-    Receive,
-    Idle,
-}
-
-impl Reason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::ConfigIo => "config_io",
-            Self::ConfigTooLarge => "config_too_large",
-            Self::ConfigSyntax => "config_syntax",
-            Self::ConfigSemantic => "config_semantic",
-            Self::SocksProtocol => "socks_protocol",
-            Self::SocksUnsupported => "socks_unsupported",
-            Self::Authentication => "authentication",
-            Self::InvalidType => "invalid_type",
-            Self::TimestampSkew => "timestamp_skew",
-            Self::Replay => "replay",
-            Self::ReplayCapacity => "replay_capacity",
-            Self::FrameBounds => "frame_bounds",
-            Self::AddressBounds => "address_bounds",
-            Self::ResponseBinding => "response_binding",
-            Self::NonceExhausted => "nonce_exhausted",
-            Self::RandomUnavailable => "random_unavailable",
-            Self::ClockUnavailable => "clock_unavailable",
-            Self::HandshakeTimeout => "handshake_timeout",
-            Self::ConnectTimeout => "connect_timeout",
-            Self::NetworkUnreachable => "network_unreachable",
-            Self::HostUnreachable => "host_unreachable",
-            Self::ConnectionRefused => "connection_refused",
-            Self::RelayIo => "relay_io",
-            Self::IdleTimeout => "idle_timeout",
-            Self::Cancelled => "cancelled",
-            Self::Shutdown => "shutdown",
-            Self::ListenerFailure => "listener_failure",
-            Self::Bounds => "bounds",
-            Self::Type => "type",
-            Self::Timestamp => "timestamp",
-            Self::Address => "address",
-            Self::Padding => "padding",
-            Self::Binding => "binding",
-            Self::Duplicate => "duplicate",
-            Self::TooOld => "too_old",
-            Self::SessionLimit => "session_limit",
-            Self::BufferLimit => "buffer_limit",
-            Self::QueueFull => "queue_full",
-            Self::Clock => "clock",
-            Self::Random => "random",
-            Self::Key => "key",
-            Self::Counter => "counter",
-            Self::Resolve => "resolve",
-            Self::Send => "send",
-            Self::Receive => "receive",
-            Self::Idle => "idle",
-        }
+closed_dimension! {
+    /// Closed failure reasons shared by tracing and failure metrics.
+    pub enum Reason {
+        ConfigIo => "config_io",
+        ConfigTooLarge => "config_too_large",
+        ConfigSyntax => "config_syntax",
+        ConfigSemantic => "config_semantic",
+        SocksProtocol => "socks_protocol",
+        SocksUnsupported => "socks_unsupported",
+        Authentication => "authentication",
+        InvalidType => "invalid_type",
+        TimestampSkew => "timestamp_skew",
+        Replay => "replay",
+        ReplayCapacity => "replay_capacity",
+        FrameBounds => "frame_bounds",
+        AddressBounds => "address_bounds",
+        ResponseBinding => "response_binding",
+        NonceExhausted => "nonce_exhausted",
+        RandomUnavailable => "random_unavailable",
+        ClockUnavailable => "clock_unavailable",
+        HandshakeTimeout => "handshake_timeout",
+        ConnectTimeout => "connect_timeout",
+        NetworkUnreachable => "network_unreachable",
+        HostUnreachable => "host_unreachable",
+        ConnectionRefused => "connection_refused",
+        RelayIo => "relay_io",
+        IdleTimeout => "idle_timeout",
+        Cancelled => "cancelled",
+        Shutdown => "shutdown",
+        ListenerFailure => "listener_failure",
+        Bounds => "bounds",
+        Type => "type",
+        Timestamp => "timestamp",
+        Address => "address",
+        Padding => "padding",
+        Binding => "binding",
+        Duplicate => "duplicate",
+        TooOld => "too_old",
+        SessionLimit => "session_limit",
+        BufferLimit => "buffer_limit",
+        QueueFull => "queue_full",
+        Clock => "clock",
+        Random => "random",
+        Key => "key",
+        Counter => "counter",
+        Resolve => "resolve",
+        Send => "send",
+        Receive => "receive",
+        Idle => "idle",
     }
 }
 
-/// Closed reasons for rejecting a packet at the TUN boundary.
-///
-/// The enum deliberately carries no packet, address, port, adapter, or route
-/// identity, keeping the corresponding metric family bounded.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum TunPacketRejectReason {
-    InvalidIpVersion,
-    FamilyDisabled,
-    InvalidIpLength,
-    InvalidIpChecksum,
-    InvalidExtensionHeader,
-    UnsupportedIpProtocol,
-    IcmpEchoUnsupported,
-    FragmentMalformed,
-    FragmentOverlap,
-    FragmentTimeout,
-    FragmentLimit,
-    InvalidTransportLength,
-    InvalidTransportChecksum,
-    InvalidSource,
-    InvalidDestination,
-    IngressFull,
-    TcpFlowLimit,
-    UdpAssociationLimit,
-    UdpCandidateTimeout,
-    UdpQueueFull,
-    UdpResponseFiltered,
-    UdpResponseClosed,
-    StaleGeneration,
-    WintunRingFull,
-}
-
-impl TunPacketRejectReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidIpVersion => "invalid_ip_version",
-            Self::FamilyDisabled => "family_disabled",
-            Self::InvalidIpLength => "invalid_ip_length",
-            Self::InvalidIpChecksum => "invalid_ip_checksum",
-            Self::InvalidExtensionHeader => "invalid_extension_header",
-            Self::UnsupportedIpProtocol => "unsupported_ip_protocol",
-            Self::IcmpEchoUnsupported => "icmp_echo_unsupported",
-            Self::FragmentMalformed => "fragment_malformed",
-            Self::FragmentOverlap => "fragment_overlap",
-            Self::FragmentTimeout => "fragment_timeout",
-            Self::FragmentLimit => "fragment_limit",
-            Self::InvalidTransportLength => "invalid_transport_length",
-            Self::InvalidTransportChecksum => "invalid_transport_checksum",
-            Self::InvalidSource => "invalid_source",
-            Self::InvalidDestination => "invalid_destination",
-            Self::IngressFull => "ingress_full",
-            Self::TcpFlowLimit => "tcp_flow_limit",
-            Self::UdpAssociationLimit => "udp_association_limit",
-            Self::UdpCandidateTimeout => "udp_candidate_timeout",
-            Self::UdpQueueFull => "udp_queue_full",
-            Self::UdpResponseFiltered => "udp_response_filtered",
-            Self::UdpResponseClosed => "udp_response_closed",
-            Self::StaleGeneration => "stale_generation",
-            Self::WintunRingFull => "wintun_ring_full",
-        }
+closed_dimension! {
+    /// Closed reasons for rejecting a packet at the TUN boundary.
+    ///
+    /// The enum deliberately carries no packet, address, port, adapter, or route
+    /// identity, keeping the corresponding metric family bounded.
+    pub enum TunPacketRejectReason {
+        InvalidIpVersion => "invalid_ip_version",
+        FamilyDisabled => "family_disabled",
+        InvalidIpLength => "invalid_ip_length",
+        InvalidIpChecksum => "invalid_ip_checksum",
+        InvalidExtensionHeader => "invalid_extension_header",
+        UnsupportedIpProtocol => "unsupported_ip_protocol",
+        IcmpEchoUnsupported => "icmp_echo_unsupported",
+        FragmentMalformed => "fragment_malformed",
+        FragmentOverlap => "fragment_overlap",
+        FragmentTimeout => "fragment_timeout",
+        FragmentLimit => "fragment_limit",
+        InvalidTransportLength => "invalid_transport_length",
+        InvalidTransportChecksum => "invalid_transport_checksum",
+        InvalidSource => "invalid_source",
+        InvalidDestination => "invalid_destination",
+        IngressFull => "ingress_full",
+        TcpFlowLimit => "tcp_flow_limit",
+        UdpAssociationLimit => "udp_association_limit",
+        UdpCandidateTimeout => "udp_candidate_timeout",
+        UdpQueueFull => "udp_queue_full",
+        UdpResponseFiltered => "udp_response_filtered",
+        UdpResponseClosed => "udp_response_closed",
+        StaleGeneration => "stale_generation",
+        WintunRingFull => "wintun_ring_full",
     }
 }
 
-/// Closed reasons why one TUN UDP response became terminal before injection.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum TunUdpResponseDropReason {
-    StaleGeneration,
-    AssociationClosed,
-    QueueFull,
-    MalformedResponse,
-    Filtered,
-    InjectionRejected,
-    SessionReset,
-    Shutdown,
-    OwnerFatal,
-}
-
-impl TunUdpResponseDropReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::StaleGeneration => "stale_generation",
-            Self::AssociationClosed => "association_closed",
-            Self::QueueFull => "queue_full",
-            Self::MalformedResponse => "malformed_response",
-            Self::Filtered => "filtered",
-            Self::InjectionRejected => "injection_rejected",
-            Self::SessionReset => "session_reset",
-            Self::Shutdown => "shutdown",
-            Self::OwnerFatal => "owner_fatal",
-        }
+closed_dimension! {
+    /// Closed reasons why one TUN UDP response became terminal before injection.
+    pub enum TunUdpResponseDropReason {
+        StaleGeneration => "stale_generation",
+        AssociationClosed => "association_closed",
+        QueueFull => "queue_full",
+        MalformedResponse => "malformed_response",
+        Filtered => "filtered",
+        InjectionRejected => "injection_rejected",
+        SessionReset => "session_reset",
+        Shutdown => "shutdown",
+        OwnerFatal => "owner_fatal",
     }
 }
 
@@ -518,96 +350,49 @@ impl TraceRecord {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum NetworkLifecycleOperation {
-    ResetNetwork,
-    FullRebuild,
-}
-
-impl NetworkLifecycleOperation {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::ResetNetwork => "reset_network",
-            Self::FullRebuild => "full_rebuild",
-        }
+closed_dimension! {
+    pub enum NetworkLifecycleOperation {
+        ResetNetwork => "reset_network",
+        FullRebuild => "full_rebuild",
     }
 }
 
-/// Closed results for a lightweight reset or managed-plane rebuild attempt.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum NetworkLifecycleResult {
-    Started,
-    Succeeded,
-    Failed,
-}
-
-impl NetworkLifecycleResult {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Started => "started",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-        }
+closed_dimension! {
+    /// Closed results for a lightweight reset or managed-plane rebuild attempt.
+    pub enum NetworkLifecycleResult {
+        Started => "started",
+        Succeeded => "succeeded",
+        Failed => "failed",
     }
 }
 
-/// Closed reasons for replacing generation-bound runtime state while preserving the managed plane.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum NetworkResetReason {
-    NetworkChange,
-    Retry,
-}
-
-impl NetworkResetReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::NetworkChange => "network_change",
-            Self::Retry => "retry",
-        }
+closed_dimension! {
+    /// Closed reasons for replacing generation-bound runtime state while preserving the managed plane.
+    pub enum NetworkResetReason {
+        NetworkChange => "network_change",
+        Retry => "retry",
     }
 }
 
-/// Closed reasons which permit rebuilding Ferrum2-owned managed network state.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum NetworkFullRebuildReason {
-    AdapterDamage,
-    SessionDamage,
-    AddressDamage,
-    RouteDamage,
-    DnsDamage,
-    MtuDamage,
-    StrictRouteDamage,
-    OwnershipLedgerDamage,
-}
-
-impl NetworkFullRebuildReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::AdapterDamage => "adapter_damage",
-            Self::SessionDamage => "session_damage",
-            Self::AddressDamage => "address_damage",
-            Self::RouteDamage => "route_damage",
-            Self::DnsDamage => "dns_damage",
-            Self::MtuDamage => "mtu_damage",
-            Self::StrictRouteDamage => "strict_route_damage",
-            Self::OwnershipLedgerDamage => "ownership_ledger_damage",
-        }
+closed_dimension! {
+    /// Closed reasons which permit rebuilding Ferrum2-owned managed network state.
+    pub enum NetworkFullRebuildReason {
+        AdapterDamage => "adapter_damage",
+        SessionDamage => "session_damage",
+        AddressDamage => "address_damage",
+        RouteDamage => "route_damage",
+        DnsDamage => "dns_damage",
+        MtuDamage => "mtu_damage",
+        StrictRouteDamage => "strict_route_damage",
+        OwnershipLedgerDamage => "ownership_ledger_damage",
     }
 }
 
-/// Closed outcomes for installing the effective Windows strict-route filter set.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum StrictRouteFilterInstallResult {
-    Success,
-    Failure,
-}
-
-impl StrictRouteFilterInstallResult {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Failure => "failure",
-        }
+closed_dimension! {
+    /// Closed outcomes for installing the effective Windows strict-route filter set.
+    pub enum StrictRouteFilterInstallResult {
+        Success => "success",
+        Failure => "failure",
     }
 }
 
@@ -639,59 +424,31 @@ impl StrictRouteDiagnosticStatus {
     }
 }
 
-/// Closed source selected by the shared outbound interface resolver.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum InterfaceResolutionSource {
-    OutboundExplicit,
-    AutoDetected,
-    RouteDefault,
-    SystemBestRoute,
-}
-
-impl InterfaceResolutionSource {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::OutboundExplicit => "outbound_explicit",
-            Self::AutoDetected => "auto_detected",
-            Self::RouteDefault => "route_default",
-            Self::SystemBestRoute => "system_best_route",
-        }
+closed_dimension! {
+    /// Closed source selected by the shared outbound interface resolver.
+    pub enum InterfaceResolutionSource {
+        OutboundExplicit => "outbound_explicit",
+        AutoDetected => "auto_detected",
+        RouteDefault => "route_default",
+        SystemBestRoute => "system_best_route",
     }
 }
 
-/// Closed result of one shared outbound interface resolution.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum InterfaceResolutionResult {
-    Success,
-    Failure,
-}
-
-impl InterfaceResolutionResult {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Failure => "failure",
-        }
+closed_dimension! {
+    /// Closed result of one shared outbound interface resolution.
+    pub enum InterfaceResolutionResult {
+        Success => "success",
+        Failure => "failure",
     }
 }
 
-/// Closed result of the single route evaluation for a TUN UDP association.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum TunUdpAssociationRouteResult {
-    Success,
-    Rejected,
-    Failure,
-    StaleGeneration,
-}
-
-impl TunUdpAssociationRouteResult {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Rejected => "rejected",
-            Self::Failure => "failure",
-            Self::StaleGeneration => "stale_generation",
-        }
+closed_dimension! {
+    /// Closed result of the single route evaluation for a TUN UDP association.
+    pub enum TunUdpAssociationRouteResult {
+        Success => "success",
+        Rejected => "rejected",
+        Failure => "failure",
+        StaleGeneration => "stale_generation",
     }
 }
 

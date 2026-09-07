@@ -12,6 +12,11 @@ adapter names, and route prefixes as labels.
 
 Use these focused gates:
 
+Closed metric dimensions use the private `dimension::closed_dimension` declaration for
+their variants, labels, complete value set and dense index. Family construction and updates
+consume that same owner; do not restore separate vocabulary lists or enum casts in callers.
+Untouched preallocated metric cells remain absent from rendered output.
+
 ```text
 cargo test -p ferrum2-observability --locked
 cargo test -p ferrum2-observability --test tracing_contract --locked

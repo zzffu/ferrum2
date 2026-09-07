@@ -72,6 +72,7 @@ fn prebound_udp_datagram_grid_keeps_every_closed_tuple_distinct() {
         Outcome::Failed,
         Outcome::Cancelled,
         Outcome::Timeout,
+        Outcome::Dropped,
     ];
     let metrics = Metrics::new();
     for role in roles {
@@ -87,7 +88,7 @@ fn prebound_udp_datagram_grid_keeps_every_closed_tuple_distinct() {
         .into_iter()
         .filter(|sample| sample.starts_with("ferrum2_udp_datagrams_total{"))
         .collect::<BTreeSet<_>>();
-    assert_eq!(datagrams.len(), 48);
+    assert_eq!(datagrams.len(), 56);
     for role in roles {
         for direction in directions {
             for outcome in outcomes {
@@ -97,6 +98,42 @@ fn prebound_udp_datagram_grid_keeps_every_closed_tuple_distinct() {
             }
         }
     }
+}
+
+#[test]
+fn dropped_connections_and_tun_failures_increment_only_their_closed_series() {
+    let metrics = Metrics::new();
+    let mut expected = BTreeSet::new();
+    for (role, role_label) in [(Role::Client, "client"), (Role::Server, "server")] {
+        for (inbound, inbound_label) in [
+            (Inbound::Socks5, "socks5"),
+            (Inbound::Shadowsocks, "shadowsocks"),
+        ] {
+            metrics.connection(role, inbound, Outcome::Dropped);
+            expected.insert(format!("ferrum2_tcp_connections_total{{role=\"{role_label}\",inbound=\"{inbound_label}\",outcome=\"dropped\"}} 1"));
+        }
+        for (stage, stage_label) in [(Stage::Config, "config"), (Stage::Tun, "tun")] {
+            for (reason, reason_label) in [(Reason::ConfigIo, "config_io"), (Reason::Idle, "idle")]
+            {
+                metrics.failure(role, stage, reason);
+                metrics.udp_failure(role, stage, reason);
+                for transport in ["tcp", "udp"] {
+                    expected.insert(format!("ferrum2_{transport}_failures_total{{role=\"{role_label}\",stage=\"{stage_label}\",reason=\"{reason_label}\"}} 1"));
+                }
+            }
+        }
+    }
+    let output = metrics.encode_text().expect("closed grid");
+    let actual = output
+        .lines()
+        .filter(|line| {
+            line.starts_with("ferrum2_tcp_connections_total{")
+                || line.starts_with("ferrum2_tcp_failures_total{")
+                || line.starts_with("ferrum2_udp_failures_total{")
+        })
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected);
 }
 
 #[test]
