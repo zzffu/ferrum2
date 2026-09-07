@@ -1501,3 +1501,80 @@ Performance bundle58f790088fbd3cbd4c0d1c46b8a4d5ed92af140137c5f70e66c6055d50dd17
 shared qualification bundle75251dc597099cfc88c58618d2122f957b15805a7e0f3ca715318370adcd0966.
 Next: freeze this controller and obtain complete24/24 A/A and A/B under identical conditions,
 then report and stop without product optimization. All earlier failures remain retained.
+
+
+### M9 final complete A/A and A/B — results and stop
+
+Both final runs completed24/24, all48 workload trial records PASS, actual reported client/server
+failure-counter deltas0, and independent final adapter/routes/addresses/processes/ports residuals
+all0. Both runners exited0; both validators exited3 with REGRESSION. Exit3 here is a valid complete
+evidence set failing adoption policy, not an invalid/missing-evidence error. No failed or slow
+trial was dropped, and no workload/threshold was changed between these two runs.
+
+- A/A runefffc3e7fad3, elapsed713.8226321s.
+- A/B runa2ee99d3fd0c, elapsed711.3628121s.
+- Controller5446789e540490846319d0dfdeac34aba8f28d14, performance bundle
+  58f790088fbd3cbd4c0d1c46b8a4d5ed92af140137c5f70e66c6055d50dd1785.
+- Product A=cba03a4488935a4d40cfd22f8cd658c74f4365cf; B=30ee68939ee844357d46c2ea8fb3de2017d839b0.
+  A/A uses A for both members; A/B uses the same A and B. Both runs use Quick/EndToEnd,4scenarios,
+  three interleaved pairs,2s warmup/10s active with completed-tail accounting, release/locked/offline
+  Windows MSVC builds, Rust1.97.1, Ryzen77700/16logical CPUs, Windows11Pro26200, balanced power.
+  Exact metadata/commands/paths are in m9-environment.json, m9-plan.json and m9-{aa,ab}-request.json.
+
+Raw values below are median byte/s, ns, packet/s or byte/s as named. Pair improvement is the median
+of the three pair ratios minus1; higher-is-better uses candidate/baseline, latency uses
+baseline/candidate. It is deliberately not the ratio of the two displayed raw medians. Pair ranges
+include every pair and are not confidence intervals. Positive improvement means better.
+
+| Run | Metric | Baseline median | Candidate median | Pair improvement | All pair range | Policy |
+|---|---|---:|---:|---:|---|---|
+| AA | TCP bulk | 127,853,986.0 | 121,496,010.0 | -4.973% | -8.365% .. +4.695% | regression |
+| AA | TCP 1KiB request p99 | 148,300.0 | 143,100.0 | -0.269% | -0.913% .. +5.870% | within-noise-band |
+| AA | UDP packets/s | 9,685.0 | 9,945.0 | -0.877% | -2.796% .. +3.490% | regression |
+| AA | Fragment bytes/s | 40,043,473.0 | 39,292,633.0 | -1.863% | -3.022% .. -1.719% | regression |
+| AB | TCP bulk | 135,188,639.0 | 122,896,252.0 | -5.255% | -12.906% .. -2.388% | regression |
+| AB | TCP 1KiB request p99 | 146,500.0 | 142,200.0 | +3.024% | -1.313% .. +5.552% | candidate-win |
+| AB | UDP packets/s | 9,675.0 | 9,209.0 | -3.712% | -14.620% .. -1.106% | regression |
+| AB | Fragment bytes/s | 39,281,119.0 | 38,192,286.0 | -2.748% | -9.249% .. +2.978% | regression |
+
+A/A shows nontrivial same-source variation: TCP pair median-4.973% with range-8.365%..+4.695%.
+This prevents clean attribution of small A/B differences to the architecture alone. Nevertheless,
+A/B itself fails the unchanged reviewed guard: TCP/UDP/fragment throughput regress, while TCP
+request latency is a candidate win. This is not accepted evidence of overall performance
+non-regression, nor a claim that every measured difference was caused by source changes.
+
+A/B workload and resource detail (all medians except explicitly summed requests):
+
+| Scenario | Client CPU % A→B | Server CPU % A→B | Client CPU/work pair change | Server CPU/work pair change | Client peak WS MiB A→B | Server peak WS MiB A→B |
+|---|---:|---:|---:|---:|---:|---:|
+| TCP bulk | 73.46→67.33 | 43.33→40.70 | -1.627% | +1.352% | 146.59→146.71 | 12.70→12.73 |
+| TCP 1KiB request p99 | 37.54→45.84 | 26.75→34.77 | -2.250% | -2.205% | 146.54→146.79 | 12.59→12.67 |
+| UDP packets/s | 42.34→43.78 | 44.73→42.20 | +15.077% | +7.198% | 189.23→202.16 | 16.04→18.44 |
+| Fragment bytes/s | 77.46→78.93 | 75.70→78.46 | +1.391% | +2.230% | 146.48→146.60 | 12.43→12.49 |
+
+CPU/work uses each role's measured CPU seconds (CPU%×actual CPU sample window) divided by checked
+work for that same pair; positive change means higher CPU cost. In particular, UDP cost increased
+client15.077% / server7.198%. Peak working set is the existing per-process peak observation, not
+allocator/RSS attribution. Raw observations and reproducible arithmetic are in m9-analysis.json
+and the archived summarize-m9.py.
+
+TCP request medians A→B: p50 90.9→88.7us, p95 111.5→101.8us, p99 146.5→142.2us.
+Completed requests summed across the three active trials:197,880→243,887 (per-trial medians
+65,460→84,562). This latency result was not produced by omitting failed requests or reducing
+successful work. The producer is still one closed-loop connection: it measures the round trip
+from immediately before write through validated reply, not an open-loop arrival queue. It does
+not demonstrate overload/fairness p99, production SLO compliance, or a CPU-profiled bottleneck.
+
+Within each run both members execute the same exact harness path/hash bound by schema2. Across
+runs the harness is independently rebuilt from the same baseline commit/source bundle/toolchain;
+its binary hashes differ (AA8e0311491ef11f3f5eed71d105da8100f3122d4c11b72fd78f8cb4d35c1f8d32,
+ABeaa2349ee24e81c4eff8682ea007c6f89e884bd311da28ecd3eba55f2477ce57).
+No byte-for-byte cross-run reproducible-build claim is made. Per-run builds.json retains exact
+client/server/harness hashes, source bundles and build roots; no binary identity is fabricated.
+
+Archive `profiles/remediation-performance-m9-20260907T080321Z` retains final M9 runs, prior M8 failures/results and verification: 650 files, 4,116,407bytes. Every file hash was read back and verified; manifest SHA-256 `8bf9e3ff33c10b6a3a4a227f4be07917e9373e03d1c4598aebcd30467c50c39f`. Raw artifacts remain Git-ignored.
+
+Requested endpoint reached: performance test fixes are committed, complete A/A and A/B are obtained,
+and results are reported. Stop further implementation, profiling, qualification runs and optimization.
+Earlier broad engineering production acceptance remains separate and incomplete; this report is
+limited to the recorded Windows Quick/EndToEnd configuration and workload.

@@ -78,6 +78,8 @@ harness测量，工具审计全部清零不再是产品架构实施的前置条�
 | M7 / 最终普通门禁与native caller | 产品源码15ff7e87冻结；平台native契约同步新增monitor/capture owner计数和C6服务端端点诊断，保持精确字段、零active owner、精确回滚/位置检查 | 22项根门禁全通过：workspace768/5旧ignore、TUN138/platform69、compile-only、GNU check、DNS interop、strictlint/fmt/doc/M4有限filters；Python134/66/80/7及PS通过。WSL两端check、server/net/obs99通过。native首次因旧owner字段失败，新增红测后同步caller，Python9及真实Windows release local-contract重跑PASS；原失败保留 |
 | M7h / 最终host correctness | 精确提交30ee6893通过专用已提升且acknowledged runner | 8/8 PASS、QUALIFIED，supervisor102.54s；adapter/routes/addresses/processes/ports独立最终读回全0，run97242ecb0a2f |
 | M7p / 架构性能验收（未通过） | 同控制器30ee6893、Quick/EndToEnd；基线cba03a44，候选30ee6893，未改阈值或工具 | A/A ada4c8101b2e仅16/24：第17试次旧基线UDP预热10060，runner1/validator2；A/B 69b04f188e7c在负载前因M4 bundle不一致被拒，0/24，runner1/validator2。两轮cleanup均PASS、五类残留全0。没有有效的全跨度前后对比，未证明性能无回退，也未进入CPU profiling优化 |
+| M8 / 性能harness身份 | 1fb5c6dd：schema2分别绑定product M4 bundle与实际共享baseline harness，保留每个bundle闭包/内容验证；旧schema拒绝 | controller137、platform9及PS合同通过。M8 A/A18/24因旧server bind失败；A/B24/24有效但REGRESSION；失败未丢弃 |
+| M9 / 启动端口与完整AA/AB | 5446789e：按真实动态端口范围选监听端口，独占预留持有到对应产品启动前；部分失败/退出完整释放，提前退出立即诊断；移除旧free-port API并修正PID变量冲突 | controller144、platform9、PS解析/合同及7项端口行为测试通过。最终AA efffc3e7fad3与AB a2ee99d3fd0c均24/24、runner0/validator3、REGRESSION，48试次PASS且失败计数增量0，两轮五类残留全0。AB配对改善：TCP-5.255%、请求p99+3.024%、UDP-3.712%、分片-2.748%；性能无回退未通过 |
 
 继续位置（2026-09-07）：19个package生产静态审查已完成；配置/规则边界、DNS/RuleSet实际
 工作所有权、native/root cleanup、network/Direct UDP及SOCKS owner批次已实施并分别提交。
@@ -85,13 +87,13 @@ TUN dispatch、sniff、TCP耗尽槽与D6重置已实施；D6之前的冻结门�
 
 所选架构实施批次已完成，最后的C7网络诊断接线已通过受影响包验证。
 最终普通门禁、native contract及最终源码30ee6893的Windows host correctness已通过。
-架构代码实施完成，整体整改与性能验收未完成：A/A的旧基线UDP预热失败；A/B被M4
-source bundle身份不一致拒绝。差异只在协议API迁移后的self_check.rs及其manifest行，
-不是计时负载变更，但不能跳过现有完整bundle合同或替换基线后声称覆盖整段架构。
-下一步应先明确跨bundle版本使用同一实际harness的证据合同，再重建同条件A/A、A/B；
-同时定位旧基线UDP预热超时。此处未擅自重开M1工具整改，未做性能优化。
+架构代码实施完成。后续性能工具身份/端口修复已提交，最终完整A/A与A/B均取得24/24记录，
+但性能判定均REGRESSION，仍未通过整体无回退验收。A/A同源码也有显著波动，不能把
+A/B全部差异直接归因代码。已按用户“完整AA AB，报告后停止”的要求结束后续实施和测量；
+没有启动profiling或性能优化。完整数值、CPU/内存、工作量及650文件归档见逐批证据M9节。
 后续由主代理直接实施，不再启动或重启子代理。M2a性能记录`709e123`不能
-归给后续源码；CT-05/07及CPU完整采样资格继续后置，工具整改范围没有重新开放。
+归给后续源码；CT-05/07及CPU完整采样资格继续后置。本次按用户追加授权完成M8/M9，
+没有扩大到其他工具整改。
 
 ## 环境与暂定验收
 
