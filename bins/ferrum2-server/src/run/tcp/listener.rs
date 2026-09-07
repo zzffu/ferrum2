@@ -34,8 +34,8 @@ impl AcceptListener for ServerTcpListeners {
                         }
                         return Poll::Ready(Ok((inbound, stream)));
                     }
-                    Poll::Ready(Err(_)) => {
-                        return Poll::Ready(Err(io::Error::from(io::ErrorKind::Other)));
+                    Poll::Ready(Err(error)) => {
+                        return Poll::Ready(Err(io::Error::from(error.kind())));
                     }
                     Poll::Pending => {}
                 }
