@@ -8,6 +8,7 @@ from unittest import mock
 from tests.performance_rule._fixture import RUNNER_ARGUMENTS, RUNNER_SHA256, aa_source_report, write_json
 from tools.performance_rule.cli import control, main
 from tools.performance_rule.evidence import review_calibration_source
+from tools.performance_rule.failure import Category, Failure, Stage
 from tools.performance_rule.schema import ControlError
 from tools.performance_rule.schema import sha256_file
 from tools.performance_rule.validated_report import validate_report
@@ -24,6 +25,7 @@ class PreflightOutputTests(unittest.TestCase):
                 candidate.write_bytes(b"candidate")
                 source, calibration = root / "source.json", root / "calibration.json"
                 raw = aa_source_report()
+                raw["execution_policy"]["runner_process_priority"] = "normal"
                 write_json(source, raw)
                 reviewed = review_calibration_source(source, output_path=calibration, reviewed_by="synthetic", reviewed_utc="2026-09-05T00:00:00Z")
                 arguments = list(RUNNER_ARGUMENTS)
@@ -39,9 +41,9 @@ class PreflightOutputTests(unittest.TestCase):
                     if failure == "source_arguments":
                         reviewed["runner_arguments"] = arguments
                 elif failure == "priority":
-                    reviewed["execution_policy"]["runner_process_priority"] = "normal"
+                    reviewed["execution_policy"]["runner_process_priority"] = "high"
                 elif failure == "source_priority":
-                    raw["execution_policy"]["runner_process_priority"] = "normal"
+                    raw["execution_policy"]["runner_process_priority"] = "high"
                     write_json(source, raw)
                     reviewed["source_report_sha256"] = sha256_file(source)
                 elif failure == "runner":
@@ -51,7 +53,7 @@ class PreflightOutputTests(unittest.TestCase):
                 write_json(calibration, reviewed)
                 with mock.patch("tools.performance_rule.cli.sha256_file", side_effect=[RUNNER_SHA256, "b" * 64]), mock.patch("tools.performance_rule.cli.run_once") as runner:
                     with self.assertRaises(ControlError):
-                        control(["run", "--parent", str(parent), "--candidate", str(candidate), "--calibration", str(calibration), "--runner-priority", "high", "--", *arguments])
+                        control(["run", "--parent", str(parent), "--candidate", str(candidate), "--calibration", str(calibration), "--runner-priority", "normal", "--", *arguments])
                     runner.assert_not_called()
 
     def test_first_runner_is_bound_to_calibration_source_workload(self):
@@ -61,13 +63,19 @@ class PreflightOutputTests(unittest.TestCase):
             parent.write_bytes(b"parent")
             candidate.write_bytes(b"candidate")
             source, calibration = root / "source.json", root / "calibration.json"
-            write_json(source, aa_source_report())
+            raw = aa_source_report()
+            raw["execution_policy"]["runner_process_priority"] = "normal"
+            write_json(source, raw)
             write_json(calibration, review_calibration_source(source, output_path=calibration, reviewed_by="synthetic", reviewed_utc="2026-09-05T00:00:00Z"))
             changed = report(RUNNER_SHA256)
             changed["environment"]["cpu_model"] = "different"
             with mock.patch("tools.performance_rule.cli.sha256_file", side_effect=[RUNNER_SHA256, "b" * 64]), mock.patch("tools.performance_rule.cli.run_once", return_value=validate_report(changed, RUNNER_SHA256)) as runner, mock.patch("tools.performance_rule.cli.emit_result"):
-                with self.assertRaisesRegex(ControlError, "stage=runner_report category=invalid_evidence"):
-                    control(["run", "--parent", str(parent), "--candidate", str(candidate), "--calibration", str(calibration), "--runner-priority", "high", "--", *RUNNER_ARGUMENTS])
+                with self.assertRaises(Failure) as failure:
+                    control(["run", "--parent", str(parent), "--candidate", str(candidate), "--calibration", str(calibration), "--runner-priority", "normal", "--", *RUNNER_ARGUMENTS])
+                self.assertEqual(
+                    (failure.exception.stage, failure.exception.category),
+                    (Stage.RUNNER_REPORT, Category.INVALID_EVIDENCE),
+                )
                 self.assertEqual(runner.call_count, 1)
 
     def test_current_schema_unapproved_calibration_never_executes_runner(self):
