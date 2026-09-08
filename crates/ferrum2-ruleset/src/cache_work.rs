@@ -338,22 +338,19 @@ async fn run_operation<D: RuleSetDownloader + 'static>(
                 if cancel.is_cancelled() {
                     return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::Cancelled));
                 }
-                let outcome = match download.loaded.disposition {
-                    RuleSetLoadDisposition::NotModified => RuleSetRefreshOutcome::NotModified,
-                    RuleSetLoadDisposition::OfflineCache | RuleSetLoadDisposition::StaleCache => {
-                        RuleSetRefreshOutcome::RetainedCache(download.loaded.disposition)
+                let outcome = if let Some(next) = download.successor {
+                    let previous = registry.publish(next).map_err(|_| {
+                        RuleSetLoadError::new(RuleSetLoadErrorKind::RegistryPublish)
+                    })?;
+                    RuleSetRefreshOutcome::Updated {
+                        previous_generation: previous.generation(),
+                        generation,
                     }
-                    RuleSetLoadDisposition::Downloaded => {
-                        let next = download.successor.ok_or_else(|| {
-                            RuleSetLoadError::new(RuleSetLoadErrorKind::RegistryCompile)
-                        })?;
-                        let previous = registry.publish(next).map_err(|_| {
-                            RuleSetLoadError::new(RuleSetLoadErrorKind::RegistryPublish)
-                        })?;
-                        RuleSetRefreshOutcome::Updated {
-                            previous_generation: previous.generation(),
-                            generation,
-                        }
+                } else {
+                    match download.loaded.disposition {
+                        RuleSetLoadDisposition::Downloaded
+                        | RuleSetLoadDisposition::NotModified => RuleSetRefreshOutcome::NotModified,
+                        disposition => RuleSetRefreshOutcome::RetainedCache(disposition),
                     }
                 };
                 Ok(OperationOutput::Refreshed(outcome))

@@ -6,6 +6,10 @@ use crate::packet::{
     internet_checksum,
 };
 
+mod ipv4;
+
+use ipv4::normalized_ipv4_header;
+
 pub(crate) const REASSEMBLY_TIMEOUT_MILLIS: i64 = 30_000;
 pub(crate) const MAX_FRAGMENTS_PER_ENTRY: usize = 128;
 pub(crate) const MAX_REASSEMBLY_ENTRIES: usize = 1_024;
@@ -339,10 +343,8 @@ fn layout_for(packet: &[u8], fragment: ParsedFragment) -> Option<Layout> {
     match fragment.reconstruction {
         FragmentReconstruction::Ipv4 { header_len } => {
             let header = packet.get(..header_len)?;
-            let mut normalized_header = header.to_vec();
-            normalized_header[2..4].fill(0);
-            normalized_header[6..8].fill(0);
-            normalized_header[10..12].fill(0);
+            let (normalized, len) = normalized_ipv4_header(header, fragment.offset == 0)?;
+            let normalized_header = normalized[..len].to_vec();
             Some(Layout::Ipv4 {
                 normalized_header,
                 first_header: (fragment.offset == 0).then(|| header.to_vec()),
@@ -375,12 +377,8 @@ fn layout_matches_packet(current: &Layout, packet: &[u8], fragment: ParsedFragme
             },
             FragmentReconstruction::Ipv4 { header_len },
         ) => packet.get(..header_len).is_some_and(|header| {
-            header.len() >= 12
-                && normalized_header.len() == header.len()
-                && normalized_header[..2] == header[..2]
-                && normalized_header[4..6] == header[4..6]
-                && normalized_header[8..10] == header[8..10]
-                && normalized_header[12..] == header[12..]
+            normalized_ipv4_header(header, fragment.offset == 0)
+                .is_some_and(|(normalized, len)| normalized_header == &normalized[..len])
         }),
         (
             Layout::Ipv6 {
@@ -780,10 +778,10 @@ mod tests {
     }
 
     #[test]
-    fn first_fragment_header_mismatch_drops_prior_last_fragment() {
+    fn copied_option_mismatch_drops_prior_last_fragment() {
         let parser = PacketParser::new(Families::DUAL);
         let (mut first, second) =
-            ipv4_fragments_with_options(b"abcdefghijklmnop", 16, 15, &[1, 1, 1, 0]);
+            ipv4_fragments_with_options(b"abcdefghijklmnop", 16, 15, &[0x82, 4, 1, 0]);
         let second_meta = parsed_fragment(parser, &second);
         let mut table = ReassemblyTable::new(1);
         assert_eq!(
@@ -791,7 +789,7 @@ mod tests {
             ReassemblyOutcome::Pending
         );
 
-        first[20..24].copy_from_slice(&[2, 2, 1, 0]);
+        first[20..24].copy_from_slice(&[0x82, 4, 2, 0]);
         repair_ipv4_header(&mut first);
         let first_meta = parsed_fragment(parser, &first);
         assert_eq!(
@@ -799,6 +797,62 @@ mod tests {
             ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed)
         );
         assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn reassembles_first_only_noncopy_options_with_different_ihl_in_both_orders() {
+        let parser = PacketParser::new(Families::DUAL);
+        for copied in [&[][..], &[0x82, 4, 1, 2][..]] {
+            let mut options = vec![7, 4, 0, 0];
+            options.extend_from_slice(copied);
+            let original = ipv4_udp(b"abcdefghijklmnop", &options);
+            let expected = expected_ipv4_reassembly(original.clone(), 16);
+            let mut fragments = ipv4_packet_fragments(&original, &[16, 8], 16);
+            // Non-initial fragments contain only the copied option sequence.
+            fragments[1].drain(20..24);
+            fragments[1][0] -= 1;
+            let len = u16::try_from(fragments[1].len()).unwrap();
+            fragments[1][2..4].copy_from_slice(&len.to_be_bytes());
+            repair_ipv4_header(&mut fragments[1]);
+            for reverse in [false, true] {
+                let mut ordered = fragments.clone();
+                if reverse {
+                    ordered.reverse();
+                }
+                let rebuilt =
+                    complete_reassembly(parser, &mut ReassemblyTable::new(1), &ordered, 1);
+                assert_eq!(rebuilt, expected);
+                assert!(matches!(
+                    parser.parse_reassembled(&rebuilt),
+                    Ok(ParsedPacket::Complete(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn noncopy_option_on_noninitial_fragment_is_rejected_in_both_orders() {
+        let parser = PacketParser::new(Families::DUAL);
+        let (first, second) =
+            ipv4_fragments_with_options(b"abcdefghijklmnop", 16, 17, &[7, 4, 0, 0]);
+        for first_arrives in [false, true] {
+            let mut table = ReassemblyTable::new(1);
+            if first_arrives {
+                assert_eq!(
+                    table
+                        .accept(&first, parsed_fragment(parser, &first), 0, 1)
+                        .outcome,
+                    ReassemblyOutcome::Pending
+                );
+            }
+            assert_eq!(
+                table
+                    .accept(&second, parsed_fragment(parser, &second), 1, 1)
+                    .outcome,
+                ReassemblyOutcome::Dropped(ReassemblyDropReason::Malformed)
+            );
+            assert_eq!(table.len(), 0);
+        }
     }
 
     #[test]

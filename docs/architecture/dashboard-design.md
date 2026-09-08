@@ -41,6 +41,10 @@ Cancellation requests signal a connection owner. They do not drop arbitrary OS r
 
 It reuses route-once and generation semantics. Outbound probes use the actual egress engine. DNS queries use the configured DNS policy. Route trial evaluates the real rule program with explicit input; missing metadata is reported and no network lookup occurs implicitly.
 
+Dashboard and Prometheus responses share a registry-aware metrics projection. UDP gauges
+are sampled from the current owner registry for each response, without changing shared
+gauges or depending on a previous Prometheus scrape.
+
 ### Frontend module
 
 `ui/dashboard/` owns the React application and single-file build. Route-local state stays local. An external subscription store publishes stable immutable snapshot identities through `useSyncExternalStore`; network updates do not cause unrestricted per-event page renders. Native fetch serves the small same-origin protocol. Additional state/cache libraries must earn their dependency through actual behavior, rather than being installed preemptively.
@@ -79,7 +83,7 @@ Protocol version is 1. Same-origin endpoints are:
 
 - `GET /`: the embedded single HTML.
 - `GET /api/snapshot`: a bounded snapshot of current generation, process/traffic, connections/history, domain state and recent redacted logs.
-- `POST /api/command`: tagged operation with `generation` and operation-specific fields. Response is `{result: ...}`; failure is `{error: {code: ...}}` with an appropriate HTTP status.
+- `POST /api/command`: `{generation: string, command: {action: ..., ...}}`. `CommandRequest`, `Command`, and `CommandResult` in `crates/ferrum2-dashboard/src/wire.rs` own the closed contract. Successful responses are `{result: {kind: ..., ...}}`; failures are `{error: {code: ...}}` with an appropriate HTTP status. Unknown fields/actions and invalid typed values are rejected. The old flat command envelope is not accepted.
 - `GET /api/config`: current bounded source text, available only after explicit sensitive editor action and authentication; never included in ordinary snapshots.
 
 Snapshot polling defaults to one second and pauses while the tab is hidden. A shared backend sample bounds duplicate browser work. Failure marks the last snapshot stale rather than replacing it with zeros. Browser state records receipt time and rejects results from superseded requests. All u64 identifiers and byte totals cross JSON as decimal strings to avoid JavaScript precision loss.
@@ -144,6 +148,11 @@ The source tree stays modular. Bun installs exactly locked dependencies; Vite co
 The shipping document is `ui/dashboard/embedded/index.html`, accompanied by compile-time CSP and build identity metadata. These are tracked so ordinary locked Cargo builds need neither Bun nor frontend downloads. `bun run build` regenerates them; `bun run build:check` rebuilds and compares without overwriting shipping files. Transient `dist` and `node_modules` are ignored. The client embeds the document with `include_bytes!`; a missing asset is a compile error, never a placeholder page.
 
 Dependencies for Rust are workspace-inherited and exactly pinned. Frontend dependencies and Bun version are pinned with the committed lockfile. UI updates and the embedded document ship together.
+
+`bun scripts/wire.ts` derives browser command/result declarations from the Rust wire
+types. `dev`, `typecheck`, and the build gates reject stale declarations; regenerate
+them after changing `wire.rs`. The generator rejects unsupported declarations rather
+than widening the browser contract. Generated `src/wire.ts` is not independently formatted.
 
 ## Implementation sequence
 

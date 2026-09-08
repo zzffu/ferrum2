@@ -31,38 +31,21 @@ where
         let metrics = Arc::new(Metrics::new());
         let registry = OwnerRegistry::new();
         #[cfg(all(windows, not(test)))]
-        let monitor = if prepared.has_tun() {
-            None
-        } else {
-            Some(
-                ferrum2_platform_windows::WindowsNetworkChangeMonitor::new()
-                    .map_err(|_| RunError::StartupRuntime)?,
-            )
-        };
-        #[cfg(all(windows, not(test)))]
-        let mut network = network_owner::ClientNetworkRuntime::prepare(
+        let mut network = network_owner::ClientNetworkRuntime::prepare_generation(
             registry.clone(),
             Arc::clone(&metrics),
-            monitor,
+            prepared.has_tun(),
         )?;
         let result = async {
             #[cfg(all(windows, not(test)))]
-            let network_reset_coordinator = network.coordinator.clone();
-            #[cfg(all(windows, not(test)))]
-            let network_interface_catalog = network.catalog.clone();
-            #[cfg(all(windows, not(test)))]
-            let network_socket_service = Arc::clone(&network.sockets);
-            #[cfg(all(windows, not(test)))]
-            let network_change_monitor = network.waiter();
-            #[cfg(not(all(windows, not(test))))]
-            let network_reset_coordinator =
-                tun::network_reset_coordinator(initial_network_snapshot()?, registry.clone());
-            let underlay = ferrum2_tun::UnderlayPublisher::new();
+            let network_resources = network.resources();
+            #[cfg(any(not(windows), test))]
+            let network_resources = ClientNetworkResources::prepare(&registry)?;
             let materializer = materialize::ClientV2Materializer::new(
                 system.clone(),
                 Arc::clone(&metrics),
                 #[cfg(all(windows, not(test)))]
-                Arc::clone(&network_socket_service),
+                Arc::clone(&network_resources.sockets),
             );
             let materialized = match materializer.materialize(prepared).await {
                 Ok(materialized) => materialized,
@@ -93,10 +76,10 @@ where
                     return Err(error);
                 }
             };
-            let dns_specs = config
-                .dns
-                .as_ref()
-                .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
+            let mut resources = ClientRunResources::new(network_resources);
+            resources.management = management;
+            resources.materialization_root = materialization_root;
+            resources.materialized_cache = materialized_cache;
             run_with_registry_and_metrics_inner_using_system(
                 system.clone(),
                 config,
@@ -105,30 +88,7 @@ where
                 metrics,
                 #[cfg(test)]
                 ClientTestOverrides::default(),
-                ClientRunResources {
-                    management,
-                    process_resources: {
-                        #[cfg(all(windows, not(test)))]
-                        {
-                            Some(network.process_resources())
-                        }
-                        #[cfg(not(all(windows, not(test))))]
-                        {
-                            None
-                        }
-                    },
-                    materialization_root,
-                    materialized_cache,
-                    materialized_underlay: Some(underlay),
-                    dns_specs,
-                    network_reset_coordinator: Some(network_reset_coordinator),
-                    #[cfg(all(windows, not(test)))]
-                    network_interface_catalog: Some(network_interface_catalog),
-                    #[cfg(all(windows, not(test)))]
-                    network_socket_service: Some(network_socket_service),
-                    #[cfg(all(windows, not(test)))]
-                    network_change_monitor,
-                },
+                resources,
             )
             .await
         }

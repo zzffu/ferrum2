@@ -444,8 +444,9 @@ export function Connections() {
             const fixed = confirmation;
             setConfirmation(null);
             void action.run(
-              fixed.all ? "connections.close_all" : "connections.close",
-              fixed.all ? {} : { ids: fixed.ids },
+              fixed.all
+                ? { action: "connections.close_all" }
+                : { action: "connections.close", ids: fixed.ids },
               fixed.generation,
             );
           }}

@@ -16,7 +16,8 @@ export function Outbounds() {
   const [port, setPort] = useState("443");
   function probe(e: FormEvent) {
     e.preventDefault();
-    void action.run("outbounds.probe", {
+    void action.run({
+      action: "outbounds.probe",
       outbound: Number(outbound),
       host: host.trim(),
       port: Number(port),
@@ -47,7 +48,8 @@ export function Outbounds() {
                       "确认切换出口？仅新连接使用新出口；TUN UDP 会话可能因代次变化断开重建。",
                     )
                   )
-                    void action.run("selectors.select", {
+                    void action.run({
+                      action: "selectors.select",
                       selector: selector.id,
                       member: Number(e.target.value),
                     });
@@ -142,7 +144,7 @@ export function RoutesPage() {
   const action = useAction();
   const [host, setHost] = useState("");
   const [port, setPort] = useState("443");
-  const [protocol, setProtocol] = useState("tcp");
+  const [protocol, setProtocol] = useState<"tcp" | "udp">("tcp");
   const [inbound, setInbound] = useState("0");
   const rules = s?.catalog?.route.rules;
   return (
@@ -157,7 +159,8 @@ export function RoutesPage() {
             className="toolbar"
             onSubmit={(e) => {
               e.preventDefault();
-              void action.run("routes.test", {
+              void action.run({
+                action: "routes.test",
                 host: host.trim(),
                 port: Number(port),
                 protocol,
@@ -188,7 +191,9 @@ export function RoutesPage() {
               协议
               <select
                 value={protocol}
-                onChange={(e) => setProtocol(e.target.value)}
+                onChange={(e) =>
+                  setProtocol(e.target.value === "udp" ? "udp" : "tcp")
+                }
               >
                 <option value="tcp">TCP</option>
                 <option value="udp">UDP</option>
@@ -240,7 +245,9 @@ export function RoutesPage() {
               <Capability name="rulesets.refresh">
                 <button
                   disabled={busy}
-                  onClick={() => void action.run("rulesets.refresh", { index })}
+                  onClick={() =>
+                    void action.run({ action: "rulesets.refresh", index })
+                  }
                 >
                   刷新
                 </button>
@@ -261,7 +268,7 @@ export function DnsPage() {
   const { snapshot: s, busy } = useDashboard();
   const action = useAction();
   const [name, setName] = useState("");
-  const [qtype, setQtype] = useState("A");
+  const [qtype, setQtype] = useState<"A" | "AAAA">("A");
   const [server, setServer] = useState("");
   const [confirm, setConfirm] = useState<string | null>(null);
   return (
@@ -289,7 +296,8 @@ export function DnsPage() {
             className="toolbar"
             onSubmit={(e) => {
               e.preventDefault();
-              void action.run("dns.query", {
+              void action.run({
+                action: "dns.query",
                 name: name.trim(),
                 qtype,
                 server: server === "" ? null : Number(server),
@@ -307,7 +315,12 @@ export function DnsPage() {
             </label>
             <label>
               记录类型
-              <select value={qtype} onChange={(e) => setQtype(e.target.value)}>
+              <select
+                value={qtype}
+                onChange={(e) =>
+                  setQtype(e.target.value === "AAAA" ? "AAAA" : "A")
+                }
+              >
                 <option>A</option>
                 <option>AAAA</option>
               </select>
@@ -334,7 +347,7 @@ export function DnsPage() {
           busy={busy}
           close={() => setConfirm(null)}
           accept={() => {
-            void action.run("dns.clear", {}, confirm);
+            void action.run({ action: "dns.clear" }, confirm);
             setConfirm(null);
           }}
         >

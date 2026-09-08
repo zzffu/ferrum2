@@ -47,6 +47,70 @@ async fn commit(table: &mut UdpTable, candidate: UdpCandidate, now_millis: i64) 
 }
 
 #[tokio::test]
+async fn single_control_step_rejects_expired_candidate_without_expire() {
+    let (mut table, mut candidates, _) = table(1, 60_000, UdpFiltering::EndpointIndependent, 1);
+    let key = endpoints(10000, "192.0.2.1:53");
+    assert_eq!(table.admit(key, b"q", 128, 0, true), Admission::Provisional);
+    let task = tokio::spawn(candidates.try_recv().unwrap().commit_association());
+    tokio::task::yield_now().await;
+    assert_eq!(
+        table.process_one_control(CANDIDATE_TIMEOUT_MILLIS, true),
+        Some(false)
+    );
+    assert!(matches!(task.await.unwrap(), Err(UdpCommitError::Rejected)));
+    assert_eq!(table.active_entries(), 0);
+    assert_eq!(
+        table.admit(key, b"new", 128, CANDIDATE_TIMEOUT_MILLIS, true),
+        Admission::Provisional
+    );
+}
+
+#[tokio::test]
+async fn single_response_step_rejects_expired_queued_and_deferred_responses() {
+    for deferred in [false, true] {
+        let (mut table, mut candidates, _) = table(1, 10, UdpFiltering::EndpointIndependent, 1);
+        let key = endpoints(10000, "192.0.2.1:53");
+        table.admit(key, b"q", 128, 0, true);
+        let association = commit(&mut table, candidates.try_recv().unwrap(), 0).await;
+        let sink = association.response_sink();
+        assert_eq!(
+            sink.send(key.target(), b"reply"),
+            UdpResponseSendOutcome::Queued
+        );
+        if deferred {
+            assert_eq!(
+                table.process_one_response(9, |_, _| InjectOutcome::Backpressured),
+                ResponseProcessOutcome::Deferred
+            );
+        }
+        assert_eq!(
+            table.process_one_response(10, |_, _| panic!(
+                "expired response must not reach injection"
+            )),
+            ResponseProcessOutcome::Dropped(UdpResponseDropReason::AssociationClosed)
+        );
+        assert!(!table.has_pending_response());
+        assert_eq!(table.active_entries(), 0);
+    }
+}
+
+#[tokio::test]
+async fn packet_at_idle_deadline_starts_new_candidate_instead_of_reviving_association() {
+    let (mut table, mut candidates, _) = table(1, 10, UdpFiltering::EndpointIndependent, 1);
+    let key = endpoints(10000, "192.0.2.1:53");
+    table.admit(key, b"q", 128, 0, true);
+    let mut association = commit(&mut table, candidates.try_recv().unwrap(), 0).await;
+    drop(association.receive().await.unwrap());
+    assert_eq!(
+        table.admit(key, b"new", 128, 10, true),
+        Admission::Provisional
+    );
+    assert!(association.receive().await.is_none());
+    let mut replacement = commit(&mut table, candidates.try_recv().unwrap(), 10).await;
+    assert_eq!(replacement.receive().await.unwrap().payload(), b"new");
+}
+
+#[tokio::test]
 async fn udp_byte_budget_charges_shared_candidates_and_retained_datagrams_until_drop() {
     let registry = ferrum2_runtime::OwnerRegistry::new();
     let budget = ferrum2_runtime::UdpBufferBudget::new_tun(6, registry.clone());

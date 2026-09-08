@@ -94,11 +94,10 @@ class ClosedFailureTests(unittest.TestCase):
 
     def test_bounded_mock_capture_timeout_and_limit_have_closed_fingerprints(self):
         for timed_out in (False, True):
-            process = mock.Mock()
-            process.stdout = io.BytesIO(SECRET.encode())
-            process.stderr = io.BytesIO(SECRET.encode())
-            process.wait.side_effect = [subprocess.TimeoutExpired([SECRET], 1), 0] if timed_out else [0]
-            with self.subTest(timed_out=timed_out), mock.patch("tools.performance_rule.runner_report.subprocess.Popen", return_value=process), mock.patch("tools.performance_rule.runner_report.RUNNER_STDOUT_MAX_BYTES", 8 if not timed_out else 128):
+            from tools.owned_process import Capture
+            result = Capture(-1, SECRET.encode(), SECRET.encode(),
+                             "timed_out" if timed_out else "output_limit", True)
+            with self.subTest(timed_out=timed_out), mock.patch("tools.performance_rule.runner_report.capture", return_value=result):
                 with self.assertRaises(Failure) as raised:
                     _run_bounded(["mock"], timeout_seconds=1, creation_flags=0)
             self.assertEqual(raised.exception.stage, Stage.RUNNER_CAPTURE)

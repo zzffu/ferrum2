@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import io
 import os
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -467,31 +466,25 @@ class ProvisioningTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
-    def test_nonzero_command_prints_captured_diagnostics_before_failure(self) -> None:
-        result = subprocess.CompletedProcess(["provider"], 17, stdout="provider diagnostic\n")
+    def test_nonzero_command_retains_diagnostics(self) -> None:
         output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(RuntimeError):
+            subject.run([sys.executable, "-c", "print('diagnostic'); raise SystemExit(17)"],
+                        subject.Deadline.after(5))
+        self.assertIn("diagnostic", output.getvalue())
 
-        with mock.patch.object(subject.subprocess, "run", return_value=result):
-            with redirect_stdout(output):
-                with self.assertRaisesRegex(RuntimeError, "failed with status 17: provider"):
-                    subject.run(["provider", "--version"], subject.Deadline.after(60))
-
-        self.assertEqual(output.getvalue(), "provider diagnostic\n")
-
-    def test_timed_out_command_prints_captured_diagnostics_before_failure(self) -> None:
-        timeout = subprocess.TimeoutExpired(
-            ["provider"],
-            60,
-            output="partial provider diagnostic\n",
-        )
-        output = io.StringIO()
-
-        with mock.patch.object(subject.subprocess, "run", side_effect=timeout):
-            with redirect_stdout(output):
-                with self.assertRaisesRegex(RuntimeError, "command timed out: provider"):
-                    subject.run(["provider"], subject.Deadline.after(60))
-
-        self.assertEqual(output.getvalue(), "partial provider diagnostic\n")
+    def test_deadline_stops_descendant_after_parent_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "escaped"
+            child = f"import time,pathlib; time.sleep(1); pathlib.Path({str(marker)!r}).write_text('escaped')"
+            parent = f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{child!r}]); print('partial',flush=True)"
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(RuntimeError):
+                subject.run([sys.executable, "-c", parent], subject.Deadline.after(0.3))
+            import time
+            time.sleep(1.1)
+            self.assertFalse(marker.exists())
+            self.assertIn("partial", output.getvalue())
 
 
 if __name__ == "__main__":

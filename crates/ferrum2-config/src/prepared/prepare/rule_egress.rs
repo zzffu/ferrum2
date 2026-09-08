@@ -120,7 +120,10 @@ pub(super) fn prepare_rule_sets(
         let update_interval = raw
             .update_interval_seconds
             .map(|seconds| {
-                if seconds == 0 {
+                if !(ferrum2_rule::MIN_RULE_SET_REFRESH_INTERVAL.as_secs()
+                    ..=ferrum2_rule::MAX_RULE_SET_REFRESH_INTERVAL.as_secs())
+                    .contains(&seconds)
+                {
                     Err(ConfigError::semantic(
                         ConfigField::RouteRuleSetUpdateInterval,
                     ))

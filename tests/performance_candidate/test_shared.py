@@ -98,6 +98,8 @@ class ScenarioPlanTests(unittest.TestCase):
             package = root / "tools" / "performance_candidate"
             package.mkdir(parents=True)
             (package / "cli.py").write_text("controller", encoding="utf-8")
+            owner = root / "tools" / "owned_process.py"
+            owner.write_text("owned process", encoding="utf-8")
             imported = root / "tools" / "ci"
             imported.mkdir()
             initializer = imported / "__init__.py"
@@ -110,7 +112,9 @@ class ScenarioPlanTests(unittest.TestCase):
                 changed_gate = evidence_contract.controller_source_sha256.__wrapped__()
                 initializer.write_text("changed initializer", encoding="utf-8")
                 changed_initializer = evidence_contract.controller_source_sha256.__wrapped__()
-            self.assertEqual(len({digest, changed_gate, changed_initializer}), 3)
+                owner.write_text("changed owned process", encoding="utf-8")
+                changed_owner = evidence_contract.controller_source_sha256.__wrapped__()
+            self.assertEqual(len({digest, changed_gate, changed_initializer, changed_owner}), 4)
 
     def test_workflow_publishes_summary_after_successful_cleanup(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")

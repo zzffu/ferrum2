@@ -41,10 +41,18 @@ Use `python` instead of `python3` on Windows.
 
 `tools/performance_candidate/cli.py` is the composition root. Named shared modules own strict JSON,
 identity, atomic output, and paired statistics. The `linux/` package owns Linux plans, trials,
-calibration, scale lineage, and decisions. `tun_mock.py`, `tun_mock_contract.py`, and
-`tun_mock_process.py` own TUN-only execution, closed evidence, and bounded child ownership.
+calibration, scale lineage, and decisions. `tun_mock.py` and `tun_mock_contract.py` own
+TUN-only execution and closed evidence. `tools/owned_process.py` owns shared bounded
+child lifetimes for mock measurement, CI provisioning, rule execution and CPU diagnostics.
 Privileged correctness belongs exclusively to `Ferrum2.Qualification.Host`.
 Production code must not be loaded from `tests/`.
+
+The shared owner preserves a Unix leader with non-reaping exit observation until final
+process-group termination and cleanup confirmation. Windows children remain suspended
+until assigned to their kill-on-close Job, whose active-process count is checked at cleanup.
+Output and deadlines are bounded; primary failures remain distinct from unconfirmed cleanup.
+Linux groups are not a sandbox for descendants deliberately escaping their inherited session.
+Controller source identities include the shared owner wherever those identities are recorded.
 
 The Linux evidence chain is:
 

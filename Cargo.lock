@@ -550,6 +550,7 @@ dependencies = [
 name = "ferrum2-dashboard"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "tokio",
 ]

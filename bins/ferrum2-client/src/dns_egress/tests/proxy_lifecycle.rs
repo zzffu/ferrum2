@@ -294,10 +294,6 @@ final = "upstream"
     let registry = OwnerRegistry::new();
     let (observed, resolver) = tokio::sync::oneshot::channel();
     let (stop, stopped) = tokio::sync::oneshot::channel();
-    let dns_specs = config
-        .dns
-        .as_ref()
-        .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
     let task = tokio::spawn(run_with_registry_and_metrics_inner(
         config,
         registry.clone(),
@@ -307,7 +303,9 @@ final = "upstream"
         Arc::new(Metrics::new()),
         None,
         Some(observed),
-        ClientRunResources::test_unmaterialized(dns_specs),
+        ClientRunResources::new(
+            crate::run::ClientNetworkResources::prepare(&registry).expect("prepare client network"),
+        ),
     ));
     let (context, resolver) = resolver.await.expect("observed DNS resolver");
     let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))

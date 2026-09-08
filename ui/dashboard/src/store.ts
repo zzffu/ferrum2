@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { Snapshot } from "./protocol";
+import type { Command, CommandResult, Snapshot } from "./protocol";
 
 export interface Preferences {
   theme: "system" | "light" | "dark";
@@ -171,17 +171,16 @@ export async function poll(): Promise<void> {
   }
 }
 export async function command(
-  action: string,
-  payload: Record<string, unknown> = {},
+  command: Command,
   generation = state.snapshot?.generation,
-): Promise<unknown> {
+): Promise<CommandResult> {
   if (!generation || state.busy) throw new Error("CONTROL_UNAVAILABLE");
   const current = epoch;
   update({ busy: true });
   try {
-    const data = await request<{ result: unknown }>("/api/command", {
+    const data = await request<{ result: CommandResult }>("/api/command", {
       method: "POST",
-      body: JSON.stringify({ action, generation, ...payload }),
+      body: JSON.stringify({ generation, command }),
       signal: AbortSignal.timeout(360000),
     });
     if (current !== epoch) throw new Error("SESSION_CHANGED");

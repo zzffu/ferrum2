@@ -236,6 +236,17 @@ pub struct CompiledMatchSet {
 }
 
 impl CompiledMatchSet {
+    /// Compares the normalized declarations defining this set, without comparing
+    /// derived indexes or allocating another representation. Equal content is
+    /// sufficient for cache/live reconciliation; this does not attempt to prove
+    /// equivalence of differently expressed (for example redundant) predicates.
+    pub fn has_same_content(&self, other: &Self) -> bool {
+        self.exact_domains == other.exact_domains
+            && self.suffix_domains == other.suffix_domains
+            && self.domain_keywords == other.domain_keywords
+            && self.ip_cidrs == other.ip_cidrs
+    }
+
     pub const fn resource_usage(&self) -> MatchSetResourceUsage {
         self.resource_usage
     }

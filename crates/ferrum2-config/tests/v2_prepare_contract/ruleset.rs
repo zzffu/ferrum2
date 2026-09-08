@@ -1,6 +1,28 @@
 use super::support::*;
 
 #[test]
+fn ruleset_refresh_interval_has_shared_portable_limits() {
+    let minimum = ferrum2_rule::MIN_RULE_SET_REFRESH_INTERVAL.as_secs();
+    let maximum = ferrum2_rule::MAX_RULE_SET_REFRESH_INTERVAL.as_secs();
+    for seconds in [minimum, maximum] {
+        let file = TempConfig::new(&CLIENT_V2.replace(
+            "update_interval_seconds = 86400",
+            &format!("update_interval_seconds = {seconds}"),
+        ));
+        prepare_client(&file.0).expect("supported refresh interval");
+    }
+    for seconds in [0, maximum + 1, i64::MAX as u64] {
+        let file = TempConfig::new(&CLIENT_V2.replace(
+            "update_interval_seconds = 86400",
+            &format!("update_interval_seconds = {seconds}"),
+        ));
+        let error = prepare_client(&file.0).unwrap_err();
+        assert_eq!(error.kind(), ConfigErrorKind::Semantic);
+        assert_eq!(error.field(), ConfigField::RouteRuleSetUpdateInterval);
+    }
+}
+
+#[test]
 fn finish_client_replaces_domain_endpoints_and_captures_one_registry() {
     let file = TempConfig::new(CLIENT_V2);
     let prepared = prepare_client(&file.0).expect("prepare client V2");

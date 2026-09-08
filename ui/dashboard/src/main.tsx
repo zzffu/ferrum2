@@ -79,7 +79,7 @@ function Shell() {
   const action = useAction();
   const location = useLocation();
   const [confirmation, setConfirmation] = useState<{
-    action: string;
+    action: "runtime.stop" | "runtime.restart";
     generation: string;
   } | null>(null);
   const s = state.snapshot;
@@ -147,7 +147,7 @@ function Shell() {
                 !!state.error ||
                 !["stopped", "failed"].includes(s.state)
               }
-              onClick={() => void action.run("runtime.start")}
+              onClick={() => void action.run({ action: "runtime.start" })}
             >
               启动
             </button>
@@ -233,7 +233,10 @@ function Shell() {
           busy={state.busy}
           close={() => setConfirmation(null)}
           accept={() => {
-            void action.run(confirmation.action, {}, confirmation.generation);
+            void action.run(
+              { action: confirmation.action },
+              confirmation.generation,
+            );
             setConfirmation(null);
           }}
         >

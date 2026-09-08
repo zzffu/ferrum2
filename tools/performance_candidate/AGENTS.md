@@ -4,9 +4,11 @@ The only command entry point is `python -B -m tools.performance_candidate`. Keep
 composition root. Shared JSON, identity, atomic output and pairing contracts have named owners;
 the `linux/` package retains Linux workload/calibration/scale behavior.
 
-`tun_mock.py`, `tun_mock_contract.py` and `tun_mock_process.py` own TUN-only run, evidence and process
-lifetime. They build the crate-owned `tun-benchmark` with `--no-default-features --features benchmark`;
-they never create host network state or invoke the privileged correctness runner.
+`tun_mock.py` and `tun_mock_contract.py` own TUN-only run and evidence. Shared
+`tools/owned_process.py` owns bounded child lifetimes and is part of controller identity.
+The controller builds the crate-owned `tun-benchmark` with
+`--no-default-features --features benchmark`; it never creates host network state or
+invokes the privileged correctness runner.
 
 Quick uses three interleaved pairs across six scenarios, Confirm five. Independent product builds
 must share the exact benchmark recipe closure. Bind source SHAs, binaries, controller, workload,

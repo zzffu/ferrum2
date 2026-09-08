@@ -118,7 +118,7 @@ pub(crate) fn owner_main(
                 .checked_add(config.ready_timeout)
                 .unwrap_or_else(std::time::Instant::now)
         };
-        let mut adapter = if let Some(existing) = existing_adapter {
+        let adapter = if let Some(existing) = existing_adapter {
             existing
         } else {
             match ferrum2_platform_windows::Adapter::create(
@@ -176,23 +176,27 @@ pub(crate) fn owner_main(
                 }
             }
         };
+        let mut adapter = AttemptAdapter {
+            inner: adapter,
+            current_work: &current_work,
+        };
         if let Ok(mut work) = current_work.lock() {
-            *work = Some(adapter.work_signal());
+            *work = Some(adapter.inner.work_signal());
         } else {
             if let Some(ready) = ready.take() {
                 ready.close();
             }
-            return finish_adapter(&current_work, adapter, OwnerExit::RuntimeFailed);
+            return adapter.finish(OwnerExit::RuntimeFailed);
         }
 
-        while attempt.is_rebuilding() && !adapter_underlay_is_current(&adapter) {
-            match adapter.refresh_underlay() {
+        while attempt.is_rebuilding() && !adapter_underlay_is_current(&adapter.inner) {
+            match adapter.inner.refresh_underlay() {
                 Ok(_) => {}
                 Err(error) => match classify_network_reset_refresh_error(error) {
                     NetworkResetHealthDisposition::Retry => {
                         if !wait_owner_delay(&control, backoff.next_delay()) {
                             attempt.emit_rebuild_failed(&events);
-                            return finish_adapter(&current_work, adapter, OwnerExit::Stopped);
+                            return adapter.finish(OwnerExit::Stopped);
                         }
                     }
                     NetworkResetHealthDisposition::RuntimeFailed
@@ -206,7 +210,7 @@ pub(crate) fn owner_main(
                         } else {
                             OwnerExit::RuntimeFailed
                         };
-                        return finish_adapter(&current_work, adapter, exit);
+                        return adapter.finish(exit);
                     }
                     NetworkResetHealthDisposition::Healthy
                     | NetworkResetHealthDisposition::FullRebuild(_) => {
@@ -218,7 +222,7 @@ pub(crate) fn owner_main(
 
         if let Some(reason) = reset_reason {
             match complete_ordinary_reset(OrdinaryResetRequest {
-                adapter: &mut adapter,
+                adapter: &mut adapter.inner,
                 control: &control,
                 backoff: &mut backoff,
                 events: &events,
@@ -247,10 +251,9 @@ pub(crate) fn owner_main(
                     ) {
                         Ok(rebuild) => rebuild,
                         Err(exit) => {
-                            return finish_adapter(&current_work, adapter, exit);
+                            return adapter.finish(exit);
                         }
                     };
-                    clear_owner_work(&current_work);
                     if adapter.cleanup().is_err() {
                         rebuild.emit_failed(&events);
                         return OwnerExit::CleanupFailed;
@@ -262,13 +265,13 @@ pub(crate) fn owner_main(
                     continue;
                 }
                 OrdinaryResetOutcome::RuntimeFailed => {
-                    return finish_adapter(&current_work, adapter, OwnerExit::RuntimeFailed);
+                    return adapter.finish(OwnerExit::RuntimeFailed);
                 }
                 OrdinaryResetOutcome::CleanupFailed => {
-                    return finish_adapter(&current_work, adapter, OwnerExit::CleanupFailed);
+                    return adapter.finish(OwnerExit::CleanupFailed);
                 }
                 OrdinaryResetOutcome::Stopped => {
-                    return finish_adapter(&current_work, adapter, OwnerExit::Stopped);
+                    return adapter.finish(OwnerExit::Stopped);
                 }
             }
         }
@@ -284,9 +287,6 @@ pub(crate) fn owner_main(
             .or_else(|| generation.checked_add(1));
         let Some(candidate_generation) = candidate_generation else {
             attempt.emit_rebuild_failed(&events);
-            if let Ok(mut work) = current_work.lock() {
-                *work = None;
-            }
             return match adapter.cleanup() {
                 Ok(()) => OwnerExit::RuntimeFailed,
                 Err(_) => OwnerExit::CleanupFailed,
@@ -309,7 +309,7 @@ pub(crate) fn owner_main(
             owner_wake.clone(),
             Arc::clone(&port_quarantine),
         );
-        let (mut stack, mut flows, mut datagrams) = match stack {
+        let (mut stack, flows, datagrams) = match stack {
             Ok(ready_stack) => ready_stack,
             Err(()) => {
                 session_cancel_handle.cancel();
@@ -318,14 +318,17 @@ pub(crate) fn owner_main(
                     let delay = backoff.next_delay();
                     lifecycle
                         .back_off(
-                            OwnerAttempt::reset(adapter, TunNetworkResetReason::Retry, true),
+                            OwnerAttempt::reset(
+                                adapter.retain(),
+                                TunNetworkResetReason::Retry,
+                                true,
+                            ),
                             delay,
                         )
                         .expect("failed reset stack construction backs off atomically");
                     continue;
                 }
                 if attempt.is_rebuilding() {
-                    clear_owner_work(&current_work);
                     if adapter.cleanup().is_err() {
                         attempt.emit_rebuild_failed(&events);
                         return OwnerExit::CleanupFailed;
@@ -336,7 +339,6 @@ pub(crate) fn owner_main(
                         .expect("failed rebuilt stack construction preserves rebuild ownership");
                     continue;
                 }
-                clear_owner_work(&current_work);
                 let cleanup = adapter.cleanup();
                 if cleanup.is_err() {
                     if let Some(ready) = ready.take() {
@@ -363,7 +365,6 @@ pub(crate) fn owner_main(
                 candidate_generation.saturating_add(1),
                 UdpResponseDropReason::OwnerFatal,
             );
-            clear_owner_work(&current_work);
             let cleanup = adapter.cleanup();
             if let Some(ready) = ready.take() {
                 ready.close();
@@ -374,7 +375,7 @@ pub(crate) fn owner_main(
                 OwnerExit::RuntimeFailed
             };
         }
-        match classify_network_reset_health(adapter.managed_health()) {
+        match classify_network_reset_health(adapter.inner.managed_health()) {
             NetworkResetHealthDisposition::Healthy => {}
             disposition => {
                 session_cancel_handle.cancel();
@@ -392,7 +393,11 @@ pub(crate) fn owner_main(
                     let delay = backoff.next_delay();
                     lifecycle
                         .back_off(
-                            OwnerAttempt::reset(adapter, TunNetworkResetReason::Retry, true),
+                            OwnerAttempt::reset(
+                                adapter.retain(),
+                                TunNetworkResetReason::Retry,
+                                true,
+                            ),
                             delay,
                         )
                         .expect("transient reset health failure preserves the adapter");
@@ -419,10 +424,9 @@ pub(crate) fn owner_main(
                     ) {
                         Ok(rebuild) => rebuild,
                         Err(exit) => {
-                            return finish_adapter(&current_work, adapter, exit);
+                            return adapter.finish(exit);
                         }
                     };
-                    clear_owner_work(&current_work);
                     if adapter.cleanup().is_err() {
                         rebuild.emit_failed(&events);
                         return OwnerExit::CleanupFailed;
@@ -444,9 +448,8 @@ pub(crate) fn owner_main(
                     } else {
                         OwnerExit::RuntimeFailed
                     };
-                    return finish_adapter(&current_work, adapter, exit);
+                    return adapter.finish(exit);
                 }
-                clear_owner_work(&current_work);
                 let cleanup = adapter.cleanup();
                 if cleanup.is_err() {
                     attempt.emit_rebuild_failed(&events);
@@ -479,7 +482,7 @@ pub(crate) fn owner_main(
             }
         }
         if let Some(reason) = reset_reason
-            && !adapter_underlay_is_current(&adapter)
+            && !adapter_underlay_is_current(&adapter.inner)
         {
             session_cancel_handle.cancel();
             stack.quiesce(
@@ -490,7 +493,7 @@ pub(crate) fn owner_main(
             drop(datagrams);
             drop(stack);
             lifecycle
-                .stage(OwnerAttempt::reset(adapter, reason, false))
+                .stage(OwnerAttempt::reset(adapter.retain(), reason, false))
                 .expect("stale reset underlay stages the retained adapter");
             continue;
         }
@@ -499,8 +502,11 @@ pub(crate) fn owner_main(
                 "ordinary reset completed before stack replacement",
             )))
         } else {
-            NetworkSnapshot::capture(candidate_generation, &adapter.network_interface_catalog())
-                .map(Arc::new)
+            NetworkSnapshot::capture(
+                candidate_generation,
+                &adapter.inner.network_interface_catalog(),
+            )
+            .map(Arc::new)
         };
         let snapshot = match snapshot {
             Ok(snapshot) => snapshot,
@@ -518,13 +524,16 @@ pub(crate) fn owner_main(
                     let delay = backoff.next_delay();
                     lifecycle
                         .back_off(
-                            OwnerAttempt::reset(adapter, TunNetworkResetReason::Retry, true),
+                            OwnerAttempt::reset(
+                                adapter.retain(),
+                                TunNetworkResetReason::Retry,
+                                true,
+                            ),
                             delay,
                         )
                         .expect("snapshot retry preserves reset ownership");
                     continue;
                 }
-                clear_owner_work(&current_work);
                 let cleanup = adapter.cleanup();
                 if cleanup.is_err() {
                     attempt.emit_rebuild_failed(&events);
@@ -556,7 +565,7 @@ pub(crate) fn owner_main(
                 continue;
             }
         };
-        if underlay.publish(adapter.underlay_policy()).is_err() {
+        if underlay.publish(adapter.inner.underlay_policy()).is_err() {
             session_cancel_handle.cancel();
             stack.quiesce(
                 candidate_generation.saturating_add(1),
@@ -566,7 +575,6 @@ pub(crate) fn owner_main(
                 events.emit(TunEvent::NetworkResetFailed(reason));
             }
             attempt.emit_rebuild_failed(&events);
-            clear_owner_work(&current_work);
             let cleanup = adapter.cleanup();
             if let Some(ready) = ready.take() {
                 ready.close();
@@ -578,7 +586,7 @@ pub(crate) fn owner_main(
             };
         }
         if let Some(reason) = reset_reason
-            && !adapter_underlay_is_current(&adapter)
+            && !adapter_underlay_is_current(&adapter.inner)
         {
             let underlay_failed = underlay.invalidate().is_err();
             session_cancel_handle.cancel();
@@ -591,14 +599,14 @@ pub(crate) fn owner_main(
             drop(stack);
             if underlay_failed {
                 events.emit(TunEvent::NetworkResetFailed(reason));
-                return finish_adapter(&current_work, adapter, OwnerExit::RuntimeFailed);
+                return adapter.finish(OwnerExit::RuntimeFailed);
             }
             lifecycle
-                .stage(OwnerAttempt::reset(adapter, reason, false))
+                .stage(OwnerAttempt::reset(adapter.retain(), reason, false))
                 .expect("post-publication reset revalidation preserves the adapter");
             continue;
         }
-        if attempt.is_rebuilding() && !adapter_underlay_is_current(&adapter) {
+        if attempt.is_rebuilding() && !adapter_underlay_is_current(&adapter.inner) {
             let underlay_failed = underlay.invalidate().is_err();
             session_cancel_handle.cancel();
             stack.quiesce(
@@ -610,14 +618,14 @@ pub(crate) fn owner_main(
             drop(stack);
             if underlay_failed {
                 attempt.emit_rebuild_failed(&events);
-                return finish_adapter(&current_work, adapter, OwnerExit::RuntimeFailed);
+                return adapter.finish(OwnerExit::RuntimeFailed);
             }
             lifecycle
                 .stage(OwnerAttempt::rebuild(
                     attempt
                         .pending_rebuild()
                         .expect("rebuild attempt retains its metadata"),
-                    Some(adapter),
+                    Some(adapter.retain()),
                 ))
                 .expect("stale rebuilt underlay preserves adapter and rebuild metadata");
             continue;
@@ -626,7 +634,7 @@ pub(crate) fn owner_main(
         // advance deferred quarantine, and must still recover once old identities expire.
         let now_millis = i64::try_from(supervisor_origin.elapsed().as_millis()).unwrap_or(i64::MAX);
         stack.expire_deadlines(now_millis);
-        if let Err(tcp_error) = start_tcp_epoch(&mut stack, &mut adapter, &runtime) {
+        if let Err(tcp_error) = start_tcp_epoch(&mut stack, &mut adapter.inner, &runtime) {
             session_cancel_handle.cancel();
             stack.quiesce(
                 candidate_generation.saturating_add(1),
@@ -649,21 +657,20 @@ pub(crate) fn owner_main(
                 } else {
                     OwnerExit::RuntimeFailed
                 };
-                return finish_adapter(&current_work, adapter, exit);
+                return adapter.finish(exit);
             }
             if let Some(reason) = reset_reason {
                 events.emit(TunEvent::NetworkResetFailed(reason));
                 let delay = backoff.next_delay();
                 lifecycle
                     .back_off(
-                        OwnerAttempt::reset(adapter, TunNetworkResetReason::Retry, true),
+                        OwnerAttempt::reset(adapter.retain(), TunNetworkResetReason::Retry, true),
                         delay,
                     )
                     .expect("failed TCP reset epoch backs off with the retained adapter");
                 continue;
             }
             if attempt.is_rebuilding() {
-                clear_owner_work(&current_work);
                 if adapter.cleanup().is_err() {
                     attempt.emit_rebuild_failed(&events);
                     return OwnerExit::CleanupFailed;
@@ -674,7 +681,6 @@ pub(crate) fn owner_main(
                     .expect("failed rebuilt TCP epoch preserves rebuild ownership");
                 continue;
             }
-            clear_owner_work(&current_work);
             if adapter.cleanup().is_err() {
                 if let Some(ready) = ready.take() {
                     ready.close();
@@ -696,6 +702,20 @@ pub(crate) fn owner_main(
             }
             return OwnerExit::RuntimeFailed;
         }
+        let mut epoch = ActiveEpoch {
+            adapter,
+            stack,
+            flows,
+            datagrams,
+            pending_flow: None,
+            pending_datagram: None,
+            cancellation: session_cancel_handle,
+            generation: candidate_generation,
+            control: &control,
+            events: &events,
+            underlay: &underlay,
+            supervisor_origin,
+        };
         if let Some(rebuild) = attempt.pending_rebuild() {
             let outcome = request_full_rebuild_transition(
                 &network_lifecycle_output,
@@ -705,22 +725,9 @@ pub(crate) fn owner_main(
                 &mut backoff,
             );
             if outcome != NetworkResetBridgeOutcome::Completed {
-                session_cancel_handle.cancel();
-                let _ = stack.fence_generation(candidate_generation.saturating_add(1));
-                let tcp_cleanup_failed = stop_tcp_epoch(&mut stack, &mut adapter).is_err();
-                stack.quiesce(
-                    candidate_generation.saturating_add(1),
-                    UdpResponseDropReason::OwnerFatal,
-                );
-                let _ = underlay.invalidate();
-                clear_owner_work(&current_work);
+                let exit = epoch.abort(OwnerExit::Stopped);
                 rebuild.emit_failed(&events);
-                let exit = if tcp_cleanup_failed {
-                    OwnerExit::CleanupFailed
-                } else {
-                    OwnerExit::Stopped
-                };
-                return finish_adapter(&current_work, adapter, exit);
+                return exit;
             }
         }
         if attempt.is_starting() {
@@ -729,33 +736,15 @@ pub(crate) fn owner_main(
                 crate::TunNetworkLifecycle::Initialize,
             );
             if outcome != NetworkResetBridgeOutcome::Completed {
-                session_cancel_handle.cancel();
-                let _ = stack.fence_generation(candidate_generation.saturating_add(1));
-                let tcp_cleanup_failed = stop_tcp_epoch(&mut stack, &mut adapter).is_err();
-                stack.quiesce(
-                    candidate_generation.saturating_add(1),
-                    UdpResponseDropReason::OwnerFatal,
-                );
-                let _ = underlay.invalidate();
-                let exit = if tcp_cleanup_failed {
-                    OwnerExit::CleanupFailed
-                } else if outcome == NetworkResetBridgeOutcome::Stopped {
+                let exit = if outcome == NetworkResetBridgeOutcome::Stopped {
                     OwnerExit::Stopped
                 } else {
                     OwnerExit::RuntimeFailed
                 };
-                return finish_adapter(&current_work, adapter, exit);
+                return epoch.abort(exit);
             }
         }
-        if stack.tcp_failed() {
-            session_cancel_handle.cancel();
-            let _ = stack.fence_generation(candidate_generation.saturating_add(1));
-            let tcp_cleanup_failed = stop_tcp_epoch(&mut stack, &mut adapter).is_err();
-            stack.quiesce(
-                candidate_generation.saturating_add(1),
-                UdpResponseDropReason::OwnerFatal,
-            );
-            let _ = underlay.invalidate();
+        if epoch.stack.tcp_failed() {
             if let Some(reason) = reset_reason {
                 events.emit(TunEvent::NetworkResetFailed(reason));
             }
@@ -763,29 +752,11 @@ pub(crate) fn owner_main(
             if let Some(ready) = ready.take() {
                 ready.close();
             }
-            let exit = if tcp_cleanup_failed {
-                OwnerExit::CleanupFailed
-            } else {
-                OwnerExit::RuntimeFailed
-            };
-            return finish_adapter(&current_work, adapter, exit);
+            return epoch.abort(OwnerExit::RuntimeFailed);
         }
         if attempt.is_starting() {
             if std::time::Instant::now() >= initial_deadline {
-                session_cancel_handle.cancel();
-                let _ = stack.fence_generation(candidate_generation.saturating_add(1));
-                let tcp_cleanup_failed = stop_tcp_epoch(&mut stack, &mut adapter).is_err();
-                stack.quiesce(
-                    candidate_generation.saturating_add(1),
-                    UdpResponseDropReason::OwnerFatal,
-                );
-                let _ = underlay.invalidate();
-                let exit = if tcp_cleanup_failed {
-                    OwnerExit::CleanupFailed
-                } else {
-                    OwnerExit::RuntimeFailed
-                };
-                return finish_adapter(&current_work, adapter, exit);
+                return epoch.abort(OwnerExit::RuntimeFailed);
             }
             ready
                 .take()
@@ -793,7 +764,6 @@ pub(crate) fn owner_main(
                 .prepared(owner_wake.clone());
         }
         generation = candidate_generation;
-        completed_reset = None;
         events.emit(TunEvent::SessionGeneration(generation));
         events.emit(TunEvent::SessionActive(true));
         lifecycle
@@ -813,17 +783,16 @@ pub(crate) fn owner_main(
             Ordering::Release,
         );
 
-        let mut pending_flow = None;
-        let mut pending_datagram = None;
+        // The epoch retains all queues until retirement has fenced and quiesced them.
         let session_started = std::time::Instant::now();
         debounce.clear();
         let session_exit = run_active_session(&mut ActiveSession {
-            adapter: &mut adapter,
-            stack: &mut stack,
-            flows: &mut flows,
-            datagrams: &mut datagrams,
-            pending_flow: &mut pending_flow,
-            pending_datagram: &mut pending_datagram,
+            adapter: &mut epoch.adapter.inner,
+            stack: &mut epoch.stack,
+            flows: &mut epoch.flows,
+            datagrams: &mut epoch.datagrams,
+            pending_flow: &mut epoch.pending_flow,
+            pending_datagram: &mut epoch.pending_datagram,
             control: &control,
             flow_output: &flow_output,
             datagram_output: &datagram_output,
@@ -834,10 +803,202 @@ pub(crate) fn owner_main(
             audit_managed_dns: config.ipv4_dns_address.is_some()
                 || config.ipv6_dns_address.is_some(),
         });
+        let mut retired = epoch.retire(session_exit, |adapter, settle_underlay| {
+            complete_ordinary_reset(OrdinaryResetRequest {
+                adapter,
+                control: &control,
+                backoff: &mut backoff,
+                events: &events,
+                link: &network_lifecycle_output,
+                current_generation: generation,
+                reason: TunNetworkResetReason::NetworkChange,
+                settle_underlay,
+                completed: None,
+            })
+        });
+        completed_reset = retired.completed_reset.take();
+        let rebuild_tcp_associations = retired.tcp_associations;
+        let rebuild_udp_associations = retired.udp_associations;
+        let session_exit = retired.exit;
+        let underlay_failed = retired.underlay_failed;
+        if let SessionExit::Terminal(exit) = session_exit {
+            return retired.finish(exit);
+        }
+        if underlay_failed {
+            if matches!(session_exit, SessionExit::ResetNetwork { .. }) {
+                events.emit(TunEvent::NetworkResetFailed(
+                    TunNetworkResetReason::NetworkChange,
+                ));
+            }
+            return retired.finish(OwnerExit::RuntimeFailed);
+        }
+        if control.stop.load(Ordering::Acquire)
+            || control.shutdown.load(Ordering::Acquire)
+            || matches!(session_exit, SessionExit::Stopped)
+        {
+            if matches!(session_exit, SessionExit::ResetNetwork { .. }) {
+                events.emit(TunEvent::NetworkResetFailed(
+                    TunNetworkResetReason::NetworkChange,
+                ));
+            }
+            return retired.finish(OwnerExit::Stopped);
+        }
+        let damage = match session_exit {
+            SessionExit::ResetNetwork { .. } => {
+                debug_assert!(completed_reset.is_some());
+                if session_started.elapsed() >= Duration::from_secs(5) {
+                    backoff.reset();
+                }
+                debounce.clear();
+                lifecycle
+                    .stage(OwnerAttempt::reset(
+                        retired.retain(),
+                        TunNetworkResetReason::NetworkChange,
+                        false,
+                    ))
+                    .expect("completed reset retains its adapter and immutable snapshot");
+                continue 'owner;
+            }
+            SessionExit::FullRebuild(damage) => damage,
+            SessionExit::Stopped | SessionExit::Terminal(_) => {
+                unreachable!("stopped and terminal sessions exit before rebuild dispatch")
+            }
+        };
+        let rebuild = match start_full_rebuild(
+            PendingFullRebuild::new(
+                damage,
+                generation,
+                rebuild_tcp_associations,
+                rebuild_udp_associations,
+            )
+            .ok_or(OwnerExit::RuntimeFailed),
+            &network_lifecycle_output,
+            &control,
+            &mut backoff,
+            &events,
+        ) {
+            Ok(rebuild) => rebuild,
+            Err(exit) => {
+                return retired.finish(exit);
+            }
+        };
+        if retired.cleanup().is_err() {
+            rebuild.emit_failed(&events);
+            return OwnerExit::CleanupFailed;
+        }
+        if session_started.elapsed() >= Duration::from_secs(5) {
+            backoff.reset();
+        }
+        debounce.clear();
+        lifecycle
+            .stage(OwnerAttempt::rebuild(rebuild, None))
+            .expect("active managed damage stages a rebuild");
+        continue 'owner;
+    }
+}
+
+fn clear_owner_work(current_work: &std::sync::Mutex<Option<ferrum2_platform_windows::WorkSignal>>) {
+    if let Ok(mut work) = current_work.lock() {
+        *work = None;
+    }
+}
+
+/// The preparation/rebuild attempt owns its managed identities and the published
+/// work signal together. Consuming cleanup cannot leave a stale adapter wakeup;
+/// retaining transfers identities back to the reducer without cleaning them.
+#[must_use = "managed identities must be retained or explicitly cleaned up"]
+struct AttemptAdapter<'a> {
+    inner: ferrum2_platform_windows::Adapter,
+    current_work: &'a Mutex<Option<ferrum2_platform_windows::WorkSignal>>,
+}
+
+impl AttemptAdapter<'_> {
+    fn cleanup(self) -> Result<(), ()> {
+        clear_owner_work(self.current_work);
+        self.inner.cleanup().map_err(|_| ())
+    }
+
+    fn finish(self, clean_exit: OwnerExit) -> OwnerExit {
+        match self.cleanup() {
+            Ok(()) => clean_exit,
+            Err(()) => OwnerExit::CleanupFailed,
+        }
+    }
+
+    fn retain(self) -> ferrum2_platform_windows::Adapter {
+        self.inner
+    }
+}
+
+/// Owns a successfully bound TCP epoch, including the queues that can still
+/// contain identities from that epoch. It can only leave through abort or retire;
+/// neither path delegates fallible network cleanup to Drop.
+#[must_use = "a bound epoch must be explicitly aborted or retired"]
+struct ActiveEpoch<'a> {
+    adapter: AttemptAdapter<'a>,
+    stack: Stack,
+    flows: tokio::sync::mpsc::Receiver<crate::TcpFlow>,
+    datagrams: tokio::sync::mpsc::Receiver<crate::UdpCandidate>,
+    pending_flow: Option<crate::TcpFlow>,
+    pending_datagram: Option<crate::UdpCandidate>,
+    cancellation: crate::supervisor::runtime::SessionCancelHandle,
+    generation: u64,
+    control: &'a OwnerControl,
+    events: &'a crate::TunEventSink,
+    underlay: &'a crate::UnderlayPublisher,
+    supervisor_origin: std::time::Instant,
+}
+
+/// TCP and queued traffic have been retired. Only the managed adapter remains:
+/// a reset may retain its identities, while a rebuild or exit must consume cleanup.
+#[must_use = "a retired epoch must retain or clean up its managed adapter"]
+struct RetiredEpoch<'a> {
+    adapter: AttemptAdapter<'a>,
+    exit: SessionExit,
+    underlay_failed: bool,
+    completed_reset: Option<Arc<NetworkSnapshot>>,
+    tcp_associations: usize,
+    udp_associations: usize,
+}
+
+impl<'a> ActiveEpoch<'a> {
+    fn abort(mut self, exit: OwnerExit) -> OwnerExit {
+        self.cancellation.cancel();
+        let next = self.generation.saturating_add(1);
+        let _ = self.stack.fence_generation(next);
+        let tcp_cleanup_failed = stop_tcp_epoch(&mut self.stack, &mut self.adapter.inner).is_err();
+        self.stack.quiesce(next, UdpResponseDropReason::OwnerFatal);
+        let _ = self.underlay.invalidate();
+        self.adapter.finish(if tcp_cleanup_failed {
+            OwnerExit::CleanupFailed
+        } else {
+            exit
+        })
+    }
+    fn retire(
+        self,
+        session_exit: SessionExit,
+        reset: impl FnOnce(&mut ferrum2_platform_windows::Adapter, bool) -> OrdinaryResetOutcome,
+    ) -> RetiredEpoch<'a> {
+        let Self {
+            mut adapter,
+            mut stack,
+            flows,
+            datagrams,
+            pending_flow,
+            pending_datagram,
+            cancellation,
+            generation,
+            control,
+            events,
+            underlay,
+            supervisor_origin,
+        } = self;
+        let mut completed_reset = None;
         control.admitting.store(false, Ordering::Release);
         events.emit(TunEvent::SessionActive(false));
-        let rebuild_tcp_associations = control.flow_count.load(Ordering::Acquire);
-        let rebuild_udp_associations = stack.live_udp_associations();
+        let tcp_associations = control.flow_count.load(Ordering::Acquire);
+        let udp_associations = stack.live_udp_associations();
         let underlay_failed = underlay.invalidate().is_err();
         let mut session_exit = session_exit;
         let mut tcp_epoch_stop_attempted = false;
@@ -858,27 +1019,17 @@ pub(crate) fn owner_main(
                 tcp_epoch_stop_attempted = true;
                 let notified = super::tcp_epoch::drain_fenced(
                     &mut stack,
-                    &mut adapter,
+                    &mut adapter.inner,
                     supervisor_origin,
-                    &events,
+                    events,
                 );
-                if stop_tcp_epoch(&mut stack, &mut adapter).is_err() {
+                if stop_tcp_epoch(&mut stack, &mut adapter.inner).is_err() {
                     session_exit = SessionExit::Terminal(OwnerExit::CleanupFailed);
                 } else if notified.is_err() {
                     session_exit = SessionExit::Terminal(OwnerExit::RuntimeFailed);
                 } else {
-                    session_cancel_handle.cancel();
-                    match complete_ordinary_reset(OrdinaryResetRequest {
-                        adapter: &mut adapter,
-                        control: &control,
-                        backoff: &mut backoff,
-                        events: &events,
-                        link: &network_lifecycle_output,
-                        current_generation: generation,
-                        reason: TunNetworkResetReason::NetworkChange,
-                        settle_underlay,
-                        completed: None,
-                    }) {
+                    cancellation.cancel();
+                    match reset(&mut adapter.inner, settle_underlay) {
                         OrdinaryResetOutcome::Completed(snapshot) => {
                             completed_reset = Some(snapshot)
                         }
@@ -906,15 +1057,15 @@ pub(crate) fn owner_main(
         {
             session_exit = SessionExit::Terminal(OwnerExit::RuntimeFailed);
         }
-        session_cancel_handle.cancel();
+        cancellation.cancel();
         if !tcp_epoch_stop_attempted {
             let notified = super::tcp_epoch::drain_fenced(
                 &mut stack,
-                &mut adapter,
+                &mut adapter.inner,
                 supervisor_origin,
-                &events,
+                events,
             );
-            if stop_tcp_epoch(&mut stack, &mut adapter).is_err() {
+            if stop_tcp_epoch(&mut stack, &mut adapter.inner).is_err() {
                 session_exit = SessionExit::Terminal(OwnerExit::CleanupFailed);
             } else if notified.is_err()
                 && !matches!(
@@ -947,97 +1098,27 @@ pub(crate) fn owner_main(
         drop(flows);
         drop(datagrams);
         drop(stack);
-        if let SessionExit::Terminal(exit) = session_exit {
-            return finish_adapter(&current_work, adapter, exit);
+        RetiredEpoch {
+            adapter,
+            exit: session_exit,
+            underlay_failed,
+            completed_reset,
+            tcp_associations,
+            udp_associations,
         }
-        if underlay_failed {
-            if matches!(session_exit, SessionExit::ResetNetwork { .. }) {
-                events.emit(TunEvent::NetworkResetFailed(
-                    TunNetworkResetReason::NetworkChange,
-                ));
-            }
-            return finish_adapter(&current_work, adapter, OwnerExit::RuntimeFailed);
-        }
-        if control.stop.load(Ordering::Acquire)
-            || control.shutdown.load(Ordering::Acquire)
-            || matches!(session_exit, SessionExit::Stopped)
-        {
-            if matches!(session_exit, SessionExit::ResetNetwork { .. }) {
-                events.emit(TunEvent::NetworkResetFailed(
-                    TunNetworkResetReason::NetworkChange,
-                ));
-            }
-            return finish_adapter(&current_work, adapter, OwnerExit::Stopped);
-        }
-        let damage = match session_exit {
-            SessionExit::ResetNetwork { .. } => {
-                debug_assert!(completed_reset.is_some());
-                if session_started.elapsed() >= Duration::from_secs(5) {
-                    backoff.reset();
-                }
-                debounce.clear();
-                lifecycle
-                    .stage(OwnerAttempt::reset(
-                        adapter,
-                        TunNetworkResetReason::NetworkChange,
-                        false,
-                    ))
-                    .expect("completed reset retains its adapter and immutable snapshot");
-                continue 'owner;
-            }
-            SessionExit::FullRebuild(damage) => damage,
-            SessionExit::Stopped | SessionExit::Terminal(_) => {
-                unreachable!("stopped and terminal sessions exit before rebuild dispatch")
-            }
-        };
-        let rebuild = match start_full_rebuild(
-            PendingFullRebuild::new(
-                damage,
-                generation,
-                rebuild_tcp_associations,
-                rebuild_udp_associations,
-            )
-            .ok_or(OwnerExit::RuntimeFailed),
-            &network_lifecycle_output,
-            &control,
-            &mut backoff,
-            &events,
-        ) {
-            Ok(rebuild) => rebuild,
-            Err(exit) => {
-                return finish_adapter(&current_work, adapter, exit);
-            }
-        };
-        clear_owner_work(&current_work);
-        if adapter.cleanup().is_err() {
-            rebuild.emit_failed(&events);
-            return OwnerExit::CleanupFailed;
-        }
-        if session_started.elapsed() >= Duration::from_secs(5) {
-            backoff.reset();
-        }
-        debounce.clear();
-        lifecycle
-            .stage(OwnerAttempt::rebuild(rebuild, None))
-            .expect("active managed damage stages a rebuild");
-        continue 'owner;
     }
 }
 
-fn clear_owner_work(current_work: &std::sync::Mutex<Option<ferrum2_platform_windows::WorkSignal>>) {
-    if let Ok(mut work) = current_work.lock() {
-        *work = None;
+impl RetiredEpoch<'_> {
+    fn finish(self, exit: OwnerExit) -> OwnerExit {
+        self.adapter.finish(exit)
     }
-}
 
-fn finish_adapter(
-    current_work: &std::sync::Mutex<Option<ferrum2_platform_windows::WorkSignal>>,
-    adapter: ferrum2_platform_windows::Adapter,
-    clean_exit: OwnerExit,
-) -> OwnerExit {
-    clear_owner_work(current_work);
-    match adapter.cleanup() {
-        Ok(()) => clean_exit,
-        Err(_) => OwnerExit::CleanupFailed,
+    fn cleanup(self) -> Result<(), ()> {
+        self.adapter.cleanup()
+    }
+
+    fn retain(self) -> ferrum2_platform_windows::Adapter {
+        self.adapter.retain()
     }
 }

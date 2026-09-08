@@ -1,13 +1,12 @@
 use std::error::Error;
 use std::fmt;
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use ferrum2_core::CanonicalDomain;
 use ferrum2_rule::{CompiledMatchSet, RuleEngineSnapshot, RuleProgramMode, RuleSetId};
 use hickory_proto::op::Message;
-use hickory_proto::rr::{Name, RData, RecordType};
+use hickory_proto::rr::RecordType;
 
 use super::compiler::DnsPolicyProgram;
 use super::model::{
@@ -15,6 +14,7 @@ use super::model::{
     DnsPolicyQuery, DnsPolicyRoute, DnsPolicyStage, observe_domain_match,
 };
 use crate::policy_candidate::QueryCandidateDriver;
+use crate::response::ResponseSemantics;
 use crate::{DnsServerId, DnsStrategy};
 
 /// One state-machine step for query selection and response continuation.
@@ -400,55 +400,17 @@ fn response_matches_rule_sets<'a>(
     query: &'a DnsPolicyQuery,
     response: &'a Message,
 ) -> bool {
-    let mut matched = false;
-    visit_response_addresses(&query.qname, query.qtype, response, |address| {
-        matched |= rule_sets.iter().copied().any(|rule_set| {
-            rule_set_match_set(snapshot, rule_set).is_some_and(|set| set.matches_ip(address))
-        });
-    });
-    matched
+    ResponseSemantics::new(&query.qname, query.qtype, response)
+        .addresses()
+        .any(|(address, _)| {
+            rule_sets.iter().copied().any(|rule_set| {
+                rule_set_match_set(snapshot, rule_set).is_some_and(|set| set.matches_ip(address))
+            })
+        })
 }
 
 fn elapsed_ns(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
-}
-
-pub(crate) fn visit_response_addresses<'a>(
-    qname: &'a Name,
-    qtype: RecordType,
-    response: &'a Message,
-    mut visit: impl FnMut(IpAddr),
-) {
-    if !is_address_qtype(qtype) {
-        return;
-    }
-    let answers = &response.answers;
-    let mut owner = qname;
-    for _ in 0..=answers.len() {
-        if let Some(next) = answers.iter().find_map(|record| {
-            if &record.name != owner {
-                return None;
-            }
-            match &record.data {
-                RData::CNAME(cname) => Some(&cname.0),
-                _ => None,
-            }
-        }) {
-            owner = next;
-            continue;
-        }
-        for record in answers {
-            if &record.name != owner {
-                continue;
-            }
-            match &record.data {
-                RData::A(address) => visit(IpAddr::V4(address.0)),
-                RData::AAAA(address) => visit(IpAddr::V6(address.0)),
-                _ => {}
-            }
-        }
-        return;
-    }
 }
 
 pub(crate) const fn is_address_qtype(qtype: RecordType) -> bool {

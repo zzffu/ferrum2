@@ -8,7 +8,6 @@ import hashlib
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tarfile
 import time
@@ -16,6 +15,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
+
+from tools.owned_process import capture
 
 from .interop_manifest import (
     ArchiveStrategy,
@@ -178,24 +179,22 @@ def print_captured(output: str | bytes | None) -> None:
 
 
 def run(command: list[str], deadline: Deadline, *, cwd: Path | None = None) -> str:
-    try:
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=deadline.remaining(command[0]),
-        )
-    except subprocess.TimeoutExpired as error:
-        print_captured(error.stdout)
-        print_captured(error.stderr)
-        raise RuntimeError(f"command timed out: {command[0]}") from None
-    print_captured(result.stdout)
+    result = capture(
+        command, cwd=cwd, deadline=time.monotonic() + deadline.remaining(command[0]),
+        stdout_cap=32 * 1024 * 1024, stderr_cap=0, merge_stderr=True,
+    )
+    output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+    print_captured(output)
+    cleanup = "" if result.cleanup_confirmed else "; process cleanup unconfirmed"
+    if result.failure == "timed_out":
+        raise RuntimeError(f"command timed out: {command[0]}{cleanup}")
+    if result.failure:
+        raise RuntimeError(f"command capture failed ({result.failure}): {command[0]}{cleanup}")
+    if not result.cleanup_confirmed:
+        raise RuntimeError(f"command cleanup unconfirmed: {command[0]}")
     if result.returncode != 0:
         raise RuntimeError(f"command failed with status {result.returncode}: {command[0]}")
-    return result.stdout
+    return output
 
 
 def require_executable(path: Path) -> None:

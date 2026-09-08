@@ -220,10 +220,11 @@ async fn handle(
                 Ok(Err(_)) => return Ok(failure(StatusCode::PAYLOAD_TOO_LARGE, "dashboard.body")),
                 Err(_) => return Ok(failure(StatusCode::REQUEST_TIMEOUT, "dashboard.timeout")),
             };
-            let value = match serde_json::from_slice::<Value>(&body) {
-                Ok(value) if value.is_object() => value,
-                _ => return Ok(failure(StatusCode::BAD_REQUEST, "dashboard.json")),
-            };
+            let value =
+                match serde_json::from_slice::<ferrum2_dashboard::wire::CommandRequest>(&body) {
+                    Ok(value) => value,
+                    _ => return Ok(failure(StatusCode::BAD_REQUEST, "dashboard.json")),
+                };
             RequestKind::Command(value)
         }
         _ => return Ok(failure(StatusCode::NOT_FOUND, "dashboard.not_found")),

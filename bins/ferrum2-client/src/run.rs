@@ -14,6 +14,7 @@ use ferrum2_dns::{
     ApplicationResolver, ApplicationResolverAdapter, DnsCache, DnsProxySockets, DnsStrategy,
     TaggedResolver,
 };
+#[cfg(any(not(windows), test))]
 use ferrum2_net::NetworkSnapshot;
 use ferrum2_observability::{Metrics, Role, json_subscriber};
 use ferrum2_runtime::{
@@ -71,6 +72,7 @@ use egress::{
     ClientEgressEngine, ClientUdpContext, prepare_client_outbounds, runtime_route_network,
 };
 
+#[cfg(any(not(windows), test))]
 fn initial_network_snapshot() -> Result<Arc<NetworkSnapshot>, RunError> {
     #[cfg(windows)]
     {
@@ -155,39 +157,51 @@ pub(crate) fn validate_prepared_materialization(
     })
 }
 
+struct ClientNetworkResources {
+    process: ferrum2_runtime::ProcessResources<RunError>,
+    coordinator: ferrum2_runtime::NetworkResetCoordinator,
+    catalog: ferrum2_platform_windows::WindowsNetworkInterfaceCatalog,
+    #[cfg(all(windows, not(test)))]
+    sockets: Arc<egress::ClientNetworkSocketService>,
+    #[cfg(all(windows, not(test)))]
+    change_monitor: Option<network_wait::NativeNetworkChangeWait>,
+}
+
+impl ClientNetworkResources {
+    #[cfg(any(not(windows), test))]
+    fn prepare(registry: &OwnerRegistry) -> Result<Self, RunError> {
+        // Capture before bootstrap or process roots can acquire owners.
+        let baseline = registry.snapshot();
+        let catalog = ferrum2_platform_windows::WindowsNetworkInterfaceCatalog::system();
+        let coordinator =
+            tun::network_reset_coordinator(initial_network_snapshot()?, registry.clone());
+        Ok(Self {
+            process: ferrum2_runtime::ProcessResources {
+                baseline,
+                cleanup: Box::pin(async { Ok(()) }),
+            },
+            coordinator,
+            catalog,
+        })
+    }
+}
+
 struct ClientRunResources {
     management: Option<management::Management>,
-    process_resources: Option<ferrum2_runtime::ProcessResources<RunError>>,
+    network: ClientNetworkResources,
     materialization_root: Option<materialize::ClientV2RuntimeRoot>,
     materialized_cache: Option<DnsCache>,
-    materialized_underlay: Option<ferrum2_tun::UnderlayPublisher>,
-    dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>,
-    network_reset_coordinator: Option<ferrum2_runtime::NetworkResetCoordinator>,
-    #[cfg(all(windows, not(test)))]
-    network_interface_catalog: Option<ferrum2_platform_windows::WindowsNetworkInterfaceCatalog>,
-    #[cfg(all(windows, not(test)))]
-    network_socket_service: Option<Arc<egress::ClientNetworkSocketService>>,
-    #[cfg(all(windows, not(test)))]
-    network_change_monitor: Option<network_wait::NativeNetworkChangeWait>,
+    underlay: ferrum2_tun::UnderlayPublisher,
 }
 
 impl ClientRunResources {
-    #[cfg(test)]
-    const fn test_unmaterialized(dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>) -> Self {
+    fn new(network: ClientNetworkResources) -> Self {
         Self {
             management: None,
-            process_resources: None,
+            network,
             materialization_root: None,
             materialized_cache: None,
-            materialized_underlay: None,
-            dns_specs,
-            network_reset_coordinator: None,
-            #[cfg(all(windows, not(test)))]
-            network_interface_catalog: None,
-            #[cfg(all(windows, not(test)))]
-            network_socket_service: None,
-            #[cfg(all(windows, not(test)))]
-            network_change_monitor: None,
+            underlay: ferrum2_tun::UnderlayPublisher::new(),
         }
     }
 }
@@ -214,10 +228,7 @@ async fn run_with_registry_and_metrics<S>(
 where
     S: std::future::Future<Output = ()> + Send,
 {
-    let dns_specs = config
-        .dns
-        .as_ref()
-        .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
+    let resources = ClientRunResources::new(ClientNetworkResources::prepare(&registry)?);
     run_with_registry_and_metrics_inner(
         config,
         registry,
@@ -226,7 +237,7 @@ where
         None,
         #[cfg(test)]
         None,
-        ClientRunResources::test_unmaterialized(dns_specs),
+        resources,
     )
     .await
 }
@@ -250,40 +261,20 @@ where
     } = overrides;
     let ClientRunResources {
         management,
-        process_resources,
+        network:
+            ClientNetworkResources {
+                process: process_resources,
+                coordinator: network_reset_coordinator,
+                catalog: network_interface_catalog,
+                #[cfg(all(windows, not(test)))]
+                    sockets: network_socket_service,
+                #[cfg(all(windows, not(test)))]
+                    change_monitor: network_change_monitor,
+            },
         mut materialization_root,
         materialized_cache,
-        materialized_underlay,
-        dns_specs,
-        network_reset_coordinator,
-        #[cfg(all(windows, not(test)))]
-        network_interface_catalog,
-        #[cfg(all(windows, not(test)))]
-        network_socket_service,
-        #[cfg(all(windows, not(test)))]
-        mut network_change_monitor,
+        underlay,
     } = resources;
-    let network_reset_coordinator = match network_reset_coordinator {
-        Some(coordinator) => coordinator,
-        None => tun::network_reset_coordinator(initial_network_snapshot()?, registry.clone()),
-    };
-    #[cfg(all(windows, not(test)))]
-    let network_interface_catalog = match network_interface_catalog {
-        Some(catalog) => catalog,
-        None => {
-            return Err(RunError::StartupProtocol);
-        }
-    };
-    #[cfg(all(windows, not(test)))]
-    let network_socket_service = match network_socket_service {
-        Some(service) => service,
-        None => {
-            return Err(RunError::StartupProtocol);
-        }
-    };
-    #[cfg(any(not(windows), test))]
-    let network_interface_catalog =
-        ferrum2_platform_windows::WindowsNetworkInterfaceCatalog::system();
     let mut recording = None;
     let result = async {
         recording = config
@@ -313,7 +304,10 @@ where
                     ferrum2_config::ClientOutboundConfig::Direct { .. }
                 )
             });
-        let underlay = materialized_underlay.unwrap_or_default();
+        let dns_specs = config
+            .dns
+            .as_ref()
+            .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
         let mut dns = match (config.dns, config.dns_route, dns_specs) {
             (
                 Some(DnsConfig {
@@ -487,6 +481,7 @@ where
                 control_cache,
                 control_refresh,
                 Arc::clone(&metrics),
+                registry.clone(),
                 config.inbounds.len() + usize::from(tun_config.is_some()),
             )),
             registry: registry.clone(),
@@ -511,10 +506,7 @@ where
         let tcp_routing = Arc::clone(&routing);
         let mut roots = ClientProcessRoots::default();
         #[cfg(all(windows, not(test)))]
-        if tun_config.is_none() {
-            let monitor = network_change_monitor
-                .take()
-                .ok_or(RunError::StartupProtocol)?;
+        if let Some(monitor) = network_change_monitor {
             roots.push(
                 ClientRootName::Network,
                 tun::network_change_process_root(
@@ -647,9 +639,7 @@ where
             );
         }
         let (roots, root_names) = roots.into_parts();
-        let owner_baseline = process_resources
-            .as_ref()
-            .map_or_else(|| registry.snapshot(), |resources| resources.baseline);
+        let owner_baseline = process_resources.baseline;
         let supervisor = ProcessSupervisor::new(roots, shutdown_grace, registry.clone())
             .map_err(|_| RunError::StartupProtocol)?;
         let cleanup_outbounds = Arc::clone(&egress.outbounds);
@@ -662,10 +652,7 @@ where
                         protocol_result = protocol_result.and(outbound.shutdown().await);
                     }
                 }
-                let native_result = match process_resources {
-                    Some(resources) => resources.cleanup.await,
-                    None => Ok(()),
-                };
+                let native_result = process_resources.cleanup.await;
                 protocol_result.and(native_result)
             }),
         });

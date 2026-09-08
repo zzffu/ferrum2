@@ -5,6 +5,7 @@
 
 mod connection;
 mod io;
+pub mod wire;
 
 pub use connection::{Connection, ConnectionMetadata};
 pub use io::{Direction, ObservedIo};

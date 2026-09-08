@@ -65,9 +65,11 @@ characters. Failure-artifact write errors preserve the primary category and add
 a closed output failure diagnostic. Ordinary help and interruption exit semantics
 are retained.
 
-The capture owner includes thread startup and child cleanup in one lifetime.
-After execution fails, a single five-second deadline bounds the post-kill wait
-and all reader joins. Kill/wait/join failures retain the primary category and
+The shared `tools/owned_process.py` capture owner includes thread startup and complete
+child-tree cleanup in one lifetime. Unix leaders are observed without reaping until
+final group termination; Windows Jobs retain descendant ownership after leader exit.
+A single five-second cleanup deadline bounds final termination, confirmation and reader
+joins. Kill/wait/join failures retain the primary category and
 report `cleanup_unconfirmed`. A reader that remains alive may still own an
 inherited pipe; Python cannot forcibly terminate that thread. Its capture bytes
 are not read or fingerprinted, and the run cannot return successful evidence.

@@ -46,7 +46,8 @@ pub(super) async fn load<D: RuleSetDownloader + 'static>(
             () = cancel.cancelled() => return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::Cancelled)),
             state = current => state.map_err(|_| RuleSetLoadError::new(RuleSetLoadErrorKind::Task))??,
         };
-        let deadline = Instant::now() + config.download_timeout;
+        let deadline = Instant::now().checked_add(config.download_timeout)
+            .ok_or_else(|| RuleSetLoadError::new(RuleSetLoadErrorKind::InvalidLoaderConfig))?;
         sender.send(Command::Begin { deadline }).await.map_err(|_| RuleSetLoadError::new(RuleSetLoadErrorKind::Task))?;
         let request = RuleSetDownloadRequest {
             url: source.url.clone(), mode: source.mode, detour: source.detour.as_ref().map(EgressPlanHandle::snapshot_owned),
@@ -163,7 +164,7 @@ fn complete(
             }
         },
         TransferOutcome::NotModified => {
-            session?;
+            let prepared = session?;
             let mut cached = state.cached.take().ok_or_else(|| {
                 RuleSetLoadError::new(
                     state
@@ -174,7 +175,7 @@ fn complete(
             cached.loaded.disposition = crate::loader::RuleSetLoadDisposition::NotModified;
             Ok(PreparedDownload {
                 loaded: cached.loaded,
-                successor: None,
+                successor: prepared.and_then(|prepared| prepared.successor),
             })
         }
         TransferOutcome::FetchFailed(failure) | TransferOutcome::BodyFailed(failure) => {

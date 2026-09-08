@@ -114,6 +114,10 @@ then passes each URL's domain and port unchanged to that fixed detour. Omitting
 both fields is invalid. `download_detour` may name an outbound, selector, or
 chain.
 
+`update_interval_seconds`, when present, must be between 1 and 31,536,000 seconds
+(365 days), inclusive. Omitting it disables scheduled refresh. Configuration and
+remote-source construction share this portable bound; scheduling uses checked deadlines.
+
 The strict decoder supports exact domains, domain suffixes, domain keywords,
 and IPv4/IPv6 CIDRs. It rejects unknown versions, malformed or trailing data,
 truncated zlib streams, regex, logical rules, inversion, and other unsupported
@@ -168,10 +172,14 @@ retained, including cancelled callers' unfinished work; streaming handoff has tw
 32 KiB chunks per operation. Filesystem operations may outlive the caller deadline.
 The old `.srs`/`.meta` cache is neither read nor migrated and cannot support offline
 startup after this change; old or unrelated files are not deleted.
-Cancellation after atomic replacement may leave a complete newer cache with the
-complete older live snapshot. Windows can refuse replacement while a reader holds
-the destination; the old cache remains intact. Atomic visibility is not a guarantee
-of power-loss durability.
+Cancellation or durability failure after atomic replacement may leave a complete newer
+cache with the complete older live snapshot. A later successful conditional refresh
+compares normalized matcher content with the live slot, validates a complete compatible
+successor, and publishes it even when the server returns 304. Repeated 304s for content
+already live do not advance the generation. Content comparison uses existing immutable
+declarations, without a retained identity cache. Windows can refuse replacement while
+a reader holds the destination; the old cache remains intact. Atomic visibility is not
+a guarantee of power-loss durability.
 
 DNS A and AAAA entries are cached separately by DNS server, canonical name,
 query type, and resolver generation. Positive and negative TTLs are honored.
@@ -180,6 +188,14 @@ materialization and RuleSet resolution retain their cache where used; an unused
 policy proxy does not allocate or retain an application cache. UDP
 associations retain only the last successful candidate index, never an address
 TTL cache.
+
+The application policy proxy shares terminal CNAME/address interpretation with response
+policy evaluation. Both positive and negative entries expire no later than the shortest
+CNAME TTL; negative entries also honor the SOA TTL/minimum. Zero-lifetime, truncated or
+ambiguous chains bypass caching. Application dialing remains bounded to 16 candidates
+per family, but policy evaluation considers the complete response. Responses whose full
+policy address set cannot be reconstructed within the cache bound are not cached;
+cache hits must not change upstream selection.
 
 The cache is FIFO, not LRU: replacing an entry moves it to the newest position;
 reading it does not. Fixed-capacity entry slots and an indexed expiry heap keep

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use ferrum2_config::PreparedClientV2;
 use ferrum2_dashboard::Dashboard;
+use ferrum2_dashboard::wire::{Command, CommandRequest, CommandResult, ConfigState, RuntimeState};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -15,7 +16,7 @@ use super::config::{ConfigStore, catalog};
 
 pub(super) enum RequestKind {
     Config,
-    Command(Value),
+    Command(CommandRequest),
 }
 pub(super) struct ControlRequest {
     pub(super) kind: RequestKind,
@@ -239,34 +240,35 @@ impl Controller {
 
     async fn command(
         &mut self,
-        command: Value,
+        request: CommandRequest,
         shutdown: &mut watch::Receiver<bool>,
-    ) -> Result<Value, &'static str> {
+    ) -> Result<CommandResult, &'static str> {
         if *shutdown.borrow() {
             return Err("dashboard.stopped");
         }
-        let action = command
-            .get("action")
-            .and_then(Value::as_str)
-            .ok_or("dashboard.action")?;
-        let generation = command
-            .get("generation")
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or("dashboard.generation")?;
+        let generation = request
+            .generation
+            .parse::<u64>()
+            .map_err(|_| "dashboard.generation")?;
+        let command = request.command;
+        let apply = matches!(command, Command::ConfigApply { .. });
         if generation != self.generation {
             return Err("dashboard.generation_conflict");
         }
-        match action {
-            "runtime.start" => {
+        match &command {
+            Command::RuntimeStart {} => {
                 self.start_disk()?;
-                Ok(json!({"state":"starting"}))
+                Ok(CommandResult::Runtime {
+                    state: RuntimeState::Starting,
+                })
             }
-            "runtime.stop" => {
+            Command::RuntimeStop {} => {
                 self.stop().await?;
-                Ok(json!({"state":"stopped"}))
+                Ok(CommandResult::Runtime {
+                    state: RuntimeState::Stopped,
+                })
             }
-            "runtime.restart" => {
+            Command::RuntimeRestart {} => {
                 let document = self.config.read().map_err(|error| error.code())?;
                 let prepared = self
                     .config
@@ -277,75 +279,80 @@ impl Controller {
                     return Err("dashboard.stopped");
                 }
                 self.start(prepared, &document.source, document.revision.clone())?;
-                Ok(json!({"state":"starting"}))
+                Ok(CommandResult::Runtime {
+                    state: RuntimeState::Starting,
+                })
             }
-            "connections.close" => {
-                let ids = command
-                    .get("ids")
-                    .and_then(Value::as_array)
-                    .ok_or("connections.ids")?;
+            Command::ConnectionsClose { ids } => {
                 if ids.len() > 4096 {
                     return Err("connections.limit");
                 }
-                let ids = ids
-                    .iter()
-                    .map(|value| {
-                        value
-                            .as_str()
-                            .filter(|id| id.len() <= 64)
-                            .map(str::to_owned)
-                            .ok_or("connections.id")
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(json!({"requested":self.dashboard.close_connections(&ids)}))
+                if ids.iter().any(|id| id.len() > 64) {
+                    return Err("connections.id");
+                }
+                Ok(CommandResult::Connections {
+                    requested: self.dashboard.close_connections(ids),
+                })
             }
-            "connections.close_all" => {
-                Ok(json!({"requested":self.dashboard.close_all_connections()}))
-            }
-            "config.validate" => {
-                let source = source(&command)?;
+            Command::ConnectionsCloseAll {} => Ok(CommandResult::Connections {
+                requested: self.dashboard.close_all_connections(),
+            }),
+            Command::ConfigValidate { source } => {
                 let prepared = self.config.validate(source).map_err(|error| error.code())?;
                 if prepared.has_tun() && !crate::cli::tun_target_supported() {
                     return Err("config.tun_unsupported");
                 }
-                Ok(json!({"valid":true,"materialized":false}))
+                Ok(CommandResult::Validated {
+                    valid: true,
+                    materialized: false,
+                })
             }
-            "config.save" | "config.apply" => {
-                let source = source(&command)?;
-                let revision = command
-                    .get("revision")
-                    .and_then(Value::as_str)
-                    .ok_or("config.revision")?;
+            Command::ConfigSave { source, revision }
+            | Command::ConfigApply { source, revision } => {
                 let prepared = self.config.validate(source).map_err(|error| error.code())?;
                 if prepared.has_tun() && !crate::cli::tun_target_supported() {
                     return Err("config.tun_unsupported");
                 }
-                let document = self
+                let mut document = self
                     .config
                     .save(source, revision)
                     .map_err(|error| error.code())?;
-                if action == "config.apply" {
+                if apply {
                     self.stop().await?;
                     if *shutdown.borrow() {
                         return Err("dashboard.stopped");
                     }
                     self.start(prepared, &document.source, document.revision.clone())?;
                 }
-                Ok(
-                    json!({"revision":document.revision,"state":if action == "config.apply" {"starting"} else {"saved"}}),
-                )
+                Ok(CommandResult::Config {
+                    revision: std::mem::take(&mut document.revision),
+                    state: if apply {
+                        ConfigState::Starting
+                    } else {
+                        ConfigState::Saved
+                    },
+                })
             }
-            "diagnostics.export" => {
+            Command::DiagnosticsExport {} => {
                 let snapshot = self.dashboard.snapshot();
-                Ok(
-                    json!({"version":env!("CARGO_PKG_VERSION"),"generation":snapshot["generation"],
-                    "state":snapshot["state"],"error":snapshot["error"],"traffic":snapshot["traffic"],
-                    "resources":snapshot["resources"],"process":snapshot["process"],"logs":snapshot["logs"],
-                    "metrics":snapshot["domains"]["metrics"]}),
-                )
+                Ok(CommandResult::Diagnostics {
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    generation: snapshot["generation"].clone(),
+                    state: snapshot["state"].clone(),
+                    error: snapshot["error"].clone(),
+                    traffic: snapshot["traffic"].clone(),
+                    resources: snapshot["resources"].clone(),
+                    process: snapshot["process"].clone(),
+                    logs: snapshot["logs"].clone(),
+                    metrics: snapshot["domains"]["metrics"].clone(),
+                })
             }
-            "selectors.select" | "outbounds.probe" | "routes.test" | "rulesets.refresh"
-            | "dns.clear" | "dns.query" => {
+            Command::SelectorsSelect { .. }
+            | Command::OutboundsProbe { .. }
+            | Command::RoutesTest { .. }
+            | Command::RulesetsRefresh { .. }
+            | Command::DnsClear {}
+            | Command::DnsQuery { .. } => {
                 let control = self
                     .controls
                     .read()
@@ -370,14 +377,6 @@ impl Controller {
                 self.dashboard.set_domains(control.snapshot());
                 Ok(result)
             }
-            _ => Err("dashboard.action"),
         }
     }
-}
-
-fn source(command: &Value) -> Result<&str, &'static str> {
-    command
-        .get("source")
-        .and_then(Value::as_str)
-        .ok_or("config.source")
 }

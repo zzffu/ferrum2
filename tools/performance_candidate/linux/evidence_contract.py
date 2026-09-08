@@ -59,6 +59,7 @@ def controller_source_sha256() -> str:
         raise CandidateControlError("performance controller source bundle is empty")
     paths = tuple(sorted((
         *package_paths,
+        root / "tools" / "owned_process.py",
         root / "tools" / "ci" / "__init__.py",
         root / "tools" / "ci" / "required_gate.py",
     )))

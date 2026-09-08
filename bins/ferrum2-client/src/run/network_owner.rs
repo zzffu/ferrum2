@@ -16,6 +16,21 @@ pub(super) struct ClientNetworkRuntime {
     )>,
 }
 impl ClientNetworkRuntime {
+    pub(super) fn prepare_generation(
+        registry: OwnerRegistry,
+        metrics: Arc<Metrics>,
+        has_tun: bool,
+    ) -> Result<Self, RunError> {
+        let monitor = if has_tun {
+            None
+        } else {
+            Some(
+                ferrum2_platform_windows::WindowsNetworkChangeMonitor::new()
+                    .map_err(|_| RunError::StartupRuntime)?,
+            )
+        };
+        Self::prepare(registry, metrics, monitor)
+    }
     pub(super) fn prepare(
         registry: OwnerRegistry,
         metrics: Arc<Metrics>,
@@ -52,13 +67,16 @@ impl ClientNetworkRuntime {
             }),
         })
     }
-    pub(super) fn waiter(&self) -> Option<network_wait::NativeNetworkChangeWait> {
-        self.native.as_ref().map(|(_, waiter)| waiter.clone())
-    }
-    pub(super) fn process_resources(&self) -> ferrum2_runtime::ProcessResources<RunError> {
-        ferrum2_runtime::ProcessResources {
-            baseline: self.baseline,
-            cleanup: self.cleanup(),
+    pub(super) fn resources(&self) -> super::ClientNetworkResources {
+        super::ClientNetworkResources {
+            process: ferrum2_runtime::ProcessResources {
+                baseline: self.baseline,
+                cleanup: self.cleanup(),
+            },
+            coordinator: self.coordinator.clone(),
+            catalog: self.catalog.clone(),
+            sockets: Arc::clone(&self.sockets),
+            change_monitor: self.native.as_ref().map(|(_, waiter)| waiter.clone()),
         }
     }
     pub(super) fn cleanup(&self) -> ferrum2_runtime::ProcessFuture<Result<(), RunError>> {

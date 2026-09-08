@@ -17,8 +17,7 @@ use ferrum2_shadowsocks::{MethodKeyAdapter, UdpPacketScratch, UdpServer};
 use crate::run::egress::{UdpIoFaultPlan, UdpIoOperation};
 use crate::run::test_support::*;
 use crate::run::{
-    ClientRunResources, dns_egress, run_with_registry_and_metrics,
-    run_with_registry_and_metrics_inner,
+    ClientRunResources, run_with_registry_and_metrics, run_with_registry_and_metrics_inner,
 };
 
 async fn dns_tcp_detour_once(

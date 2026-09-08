@@ -4,10 +4,15 @@ use std::time::{Duration, Instant};
 use ferrum2_config::RouteAction;
 use ferrum2_core::TargetAddr;
 use ferrum2_core::route::{EgressPlanHandle, Network};
+use ferrum2_dashboard::wire::{
+    Command, CommandResult, DnsAnswer, DnsPath, Measurement, QueryType, RefreshResult,
+    RouteSelection,
+};
 use ferrum2_dns::{DnsCache, DnsProxy, ProxyIngress, ProxyTransport, TaggedResolver};
 use ferrum2_observability::Metrics;
 use ferrum2_rule::{RouteMetadata, RouteProgramAction};
 use ferrum2_ruleset::{RuleSetDownloader, RuleSetRefreshOutcome, RuleSetRefreshService};
+use ferrum2_runtime::OwnerRegistry;
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, RecordType};
 use serde_json::{Value, json};
@@ -29,6 +34,7 @@ pub(crate) struct ClientDashboardControl {
     cache: Option<DnsCache>,
     refresh: Option<Refresh>,
     metrics: Arc<Metrics>,
+    registry: OwnerRegistry,
     inbound_count: usize,
     retired: watch::Sender<bool>,
     lifetime: RwLock<()>,
@@ -44,6 +50,7 @@ impl ClientDashboardControl {
         cache: Option<DnsCache>,
         refresh: Option<Refresh>,
         metrics: Arc<Metrics>,
+        registry: OwnerRegistry,
         inbound_count: usize,
     ) -> Self {
         Self {
@@ -54,6 +61,7 @@ impl ClientDashboardControl {
             cache,
             refresh,
             metrics,
+            registry,
             inbound_count,
             retired: watch::channel(false).0,
             lifetime: RwLock::new(()),
@@ -96,10 +104,10 @@ impl ClientDashboardControl {
             capabilities.push("dns.query");
         }
         let cache = self.cache.as_ref().map(|cache| json!({"capacity":cache.capacity().ok(),"entries":cache.entry_count(Instant::now()).ok(),"clear_semantics":"inflight_queries_may_repopulate"}));
-        json!({"available":true,"selectors":selectors,"rulesets":rulesets,"dns_cache":cache,"metrics":self.metrics.encode_text().ok(),"capabilities":capabilities})
+        json!({"available":true,"selectors":selectors,"rulesets":rulesets,"dns_cache":cache,"metrics":super::observation::render_client_metrics(&self.metrics, &self.registry),"capabilities":capabilities})
     }
 
-    pub(crate) async fn command(&self, request: &Value) -> Result<Value, &'static str> {
+    pub(crate) async fn command(&self, request: &Command) -> Result<CommandResult, &'static str> {
         let _lease = self.lifetime.read().await;
         let mut retired = self.retired.subscribe();
         if *retired.borrow() {
@@ -112,35 +120,31 @@ impl ClientDashboardControl {
         }
     }
 
-    async fn dispatch(&self, request: &Value) -> Result<Value, &'static str> {
-        match request
-            .get("action")
-            .and_then(Value::as_str)
-            .ok_or("invalid_action")?
-        {
-            "selectors.select" => {
+    async fn dispatch(&self, request: &Command) -> Result<CommandResult, &'static str> {
+        match request {
+            Command::SelectorsSelect { selector, member } => {
                 let rows = self.routing.selector.snapshot();
-                let row = rows
-                    .get(index(request, "selector")?)
-                    .ok_or("invalid_selector")?;
-                let member = row
-                    .members
-                    .get(index(request, "member")?)
-                    .ok_or("invalid_member")?;
+                let row = rows.get(*selector).ok_or("invalid_selector")?;
+                let member_name = row.members.get(*member).ok_or("invalid_member")?;
                 self.routing
                     .selector
-                    .switch(&row.name, member)
+                    .switch(&row.name, member_name)
                     .map_err(|_| "selection_failed")?;
-                Ok(
-                    json!({"selected":index(request,"member")?,"generation":self.routing.selector.generation().to_string()}),
-                )
+                Ok(CommandResult::Selected {
+                    selected: *member,
+                    generation: self.routing.selector.generation().to_string(),
+                })
             }
-            "outbounds.probe" => {
-                let outbound = index(request, "outbound")?;
+            Command::OutboundsProbe {
+                outbound,
+                host,
+                port,
+            } => {
+                let outbound = *outbound;
                 if outbound >= self.routing.outbounds.len() {
                     return Err("invalid_outbound");
                 }
-                let target = target(request)?;
+                let target = target(host, *port)?;
                 let plan = EgressPlanHandle::direct(outbound).snapshot_owned();
                 let started = Instant::now();
                 let flow = self
@@ -160,43 +164,67 @@ impl ClientDashboardControl {
                 let mut io = ferrum2_shadowsocks::tokio::TokioFramed::new(flow);
                 let closed = tokio::time::timeout(Duration::from_secs(1), io.shutdown()).await;
                 drop(io);
-                Ok(
-                    json!({"outbound":outbound,"host":text(request,"host")?,"port":target.port().get(),"measurement":"transport_connect","elapsed_ms":elapsed,"transport_closed":true,"graceful_shutdown":matches!(closed,Ok(Ok(())))}),
-                )
+                Ok(CommandResult::Probe {
+                    outbound,
+                    host: host.clone(),
+                    port: target.port().get(),
+                    measurement: Measurement::TransportConnect,
+                    elapsed_ms: elapsed,
+                    transport_closed: true,
+                    graceful_shutdown: matches!(closed, Ok(Ok(()))),
+                })
             }
-            "routes.test" => self.route_trial(request),
-            "rulesets.refresh" => {
+            Command::RoutesTest {
+                host,
+                port,
+                protocol,
+                inbound,
+            } => self.route_trial(host, *port, *protocol, *inbound),
+            Command::RulesetsRefresh { index } => {
                 let refresh = self.refresh.as_ref().ok_or("unavailable")?;
-                let index = index(request, "index")?;
+                let index = *index;
                 if index >= refresh.snapshot().len() {
                     return Err("invalid_ruleset");
                 }
-                Ok(refresh_result(refresh.refresh_once(index).await))
+                Ok(CommandResult::Refresh {
+                    outcome: refresh_result(refresh.refresh_once(index).await),
+                })
             }
-            "dns.clear" => {
+            Command::DnsClear {} => {
                 let removed = self
                     .cache
                     .as_ref()
                     .ok_or("unavailable")?
                     .clear()
                     .map_err(|_| "cache_unavailable")?;
-                Ok(json!({"removed":removed,"inflight_queries_may_repopulate":true}))
+                Ok(CommandResult::DnsCleared {
+                    removed,
+                    inflight_queries_may_repopulate: true,
+                })
             }
-            "dns.query" => self.dns_query(request).await,
+            Command::DnsQuery {
+                name,
+                qtype,
+                server,
+            } => self.dns_query(name, *qtype, *server).await,
             _ => Err("invalid_action"),
         }
     }
 
-    fn route_trial(&self, request: &Value) -> Result<Value, &'static str> {
-        let target = target(request)?;
-        let inbound = index(request, "inbound")?;
+    fn route_trial(
+        &self,
+        host: &str,
+        port: u16,
+        protocol: ferrum2_dashboard::wire::Network,
+        inbound: usize,
+    ) -> Result<CommandResult, &'static str> {
+        let target = target(host, port)?;
         if inbound >= self.inbound_count {
             return Err("invalid_inbound");
         }
-        let network = match text(request, "protocol")? {
-            "tcp" => Network::Tcp,
-            "udp" => Network::Udp,
-            _ => return Err("invalid_protocol"),
+        let network = match protocol {
+            ferrum2_dashboard::wire::Network::Tcp => Network::Tcp,
+            ferrum2_dashboard::wire::Network::Udp => Network::Udp,
         };
         let mut scratch = self
             .routing
@@ -222,33 +250,48 @@ impl ClientDashboardControl {
                 RouteProgramAction::Final(action) => (action, true),
             };
             let selected = match action {
-                RouteAction::Route(handle) => {
-                    json!({"kind":"route","hops":handle.snapshot_owned().hops()})
-                }
-                RouteAction::HijackDns => json!({"kind":"hijack_dns"}),
-                RouteAction::Reject => json!({"kind":"reject"}),
+                RouteAction::Route(handle) => RouteSelection::Route {
+                    hops: handle.snapshot_owned().hops().to_vec(),
+                },
+                RouteAction::HijackDns => RouteSelection::HijackDns {},
+                RouteAction::Reject => RouteSelection::Reject {},
                 RouteAction::Sniff(_) => return Err("route_unavailable"),
             };
-            return Ok(
-                json!({"action":selected,"final":final_action,"rule_index":evaluation.selected_rule_index(),"rule_generation":evaluation.snapshot_generation().map(|generation|generation.to_string()),"missing_metadata":["sniff_protocol","sniff_domain","dns_resolution"],"sniff_requested":sniff_requested,"network_lookup":false}),
-            );
+            return Ok(CommandResult::Route {
+                action: selected,
+                final_action,
+                rule_index: evaluation.selected_rule_index(),
+                rule_generation: evaluation
+                    .snapshot_generation()
+                    .map(|generation| generation.to_string()),
+                missing_metadata: vec![
+                    "sniff_protocol".into(),
+                    "sniff_domain".into(),
+                    "dns_resolution".into(),
+                ],
+                sniff_requested,
+                network_lookup: false,
+            });
         }
     }
 
-    async fn dns_query(&self, request: &Value) -> Result<Value, &'static str> {
-        let name = text(request, "name")?;
+    async fn dns_query(
+        &self,
+        name: &str,
+        qtype: QueryType,
+        server: Option<usize>,
+    ) -> Result<CommandResult, &'static str> {
+        let name = text(name)?;
         ferrum2_core::CanonicalDomain::new(name).map_err(|_| "invalid_name")?;
         let name = Name::from_ascii(name).map_err(|_| "invalid_name")?;
-        let qtype = match text(request, "qtype")? {
-            "A" => RecordType::A,
-            "AAAA" => RecordType::AAAA,
-            _ => return Err("invalid_qtype"),
+        let qtype = match qtype {
+            QueryType::A => RecordType::A,
+            QueryType::Aaaa => RecordType::AAAA,
         };
         let mut query = Message::new(0, MessageType::Query, OpCode::Query);
         query.metadata.recursion_desired = true;
         query.add_query(Query::query(name, qtype));
-        let (response, path) = if request.get("server").is_some_and(|value| !value.is_null()) {
-            let server = index(request, "server")?;
+        let (response, path) = if let Some(server) = server {
             let resolver = self
                 .tagged
                 .get()
@@ -259,7 +302,7 @@ impl ClientDashboardControl {
                     .query(server, query)
                     .await
                     .map_err(|_| "dns_query_failed")?,
-                json!({"kind":"tagged_server","server":server}),
+                DnsPath::TaggedServer { server },
             )
         } else {
             if self.inbound_count == 0 {
@@ -277,33 +320,38 @@ impl ClientDashboardControl {
                 .ok_or("dns_query_failed")?;
             (
                 Message::from_vec(&response).map_err(|_| "dns_query_failed")?,
-                json!({"kind":"ordinary_policy","inbound":0}),
+                DnsPath::OrdinaryPolicy { inbound: 0 },
             )
         };
-        let answers:Vec<_> = response.answers.iter().take(256).map(|record|json!({"name":record.name.to_string(),"ttl":record.ttl,"type":record.data.record_type().to_string(),"data":record.data.to_string()})).collect();
-        Ok(
-            json!({"path":path,"response_code":response.metadata.response_code.to_string(),"answers":answers,"truncated":response.metadata.truncation || response.answers.len()>256}),
-        )
+        let answers = response
+            .answers
+            .iter()
+            .take(256)
+            .map(|record| DnsAnswer {
+                name: record.name.to_string(),
+                ttl: record.ttl,
+                record_type: record.data.record_type().to_string(),
+                data: record.data.to_string(),
+            })
+            .collect();
+        Ok(CommandResult::DnsQuery {
+            path,
+            response_code: response.metadata.response_code.to_string(),
+            answers,
+            truncated: response.metadata.truncation || response.answers.len() > 256,
+        })
     }
 }
 
-fn text<'a>(request: &'a Value, field: &str) -> Result<&'a str, &'static str> {
-    request
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty() && value.len() <= 255)
-        .ok_or("invalid_input")
+fn text(value: &str) -> Result<&str, &'static str> {
+    if value.is_empty() || value.len() > 255 {
+        Err("invalid_input")
+    } else {
+        Ok(value)
+    }
 }
-fn index(request: &Value, field: &str) -> Result<usize, &'static str> {
-    request
-        .get(field)
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or("invalid_input")
-}
-fn target(request: &Value) -> Result<TargetAddr, &'static str> {
-    let host = text(request, "host")?;
-    let port = u16::try_from(index(request, "port")?).map_err(|_| "invalid_port")?;
+fn target(host: &str, port: u16) -> Result<TargetAddr, &'static str> {
+    let host = text(host)?;
     match host.parse::<std::net::IpAddr>() {
         Ok(ip) => TargetAddr::ip(std::net::SocketAddr::new(ip, port)),
         Err(_) => {
@@ -313,20 +361,74 @@ fn target(request: &Value) -> Result<TargetAddr, &'static str> {
     }
     .map_err(|_| "invalid_target")
 }
-fn refresh_result(outcome: RuleSetRefreshOutcome) -> Value {
+fn refresh_result(outcome: RuleSetRefreshOutcome) -> RefreshResult {
     match outcome {
         RuleSetRefreshOutcome::Updated {
             previous_generation,
             generation,
-        } => {
-            json!({"status":"updated","previous_generation":previous_generation.to_string(),"generation":generation.to_string()})
-        }
-        RuleSetRefreshOutcome::NotModified => json!({"status":"unchanged"}),
-        RuleSetRefreshOutcome::RetainedCache(reason) => {
-            json!({"status":"degraded","retained_previous":true,"reason":format!("{reason:?}")})
-        }
-        RuleSetRefreshOutcome::Failed(reason) => {
-            json!({"status":"failed","retained_previous":true,"reason":format!("{reason:?}")})
-        }
+        } => RefreshResult::Updated {
+            previous_generation: previous_generation.to_string(),
+            generation: generation.to_string(),
+        },
+        RuleSetRefreshOutcome::NotModified => RefreshResult::Unchanged {},
+        RuleSetRefreshOutcome::RetainedCache(reason) => RefreshResult::Degraded {
+            retained_previous: true,
+            reason: format!("{reason:?}"),
+        },
+        RuleSetRefreshOutcome::Failed(reason) => RefreshResult::Failed {
+            retained_previous: true,
+            reason: format!("{reason:?}"),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run::test_support::{default_test_psk, test_routing, udp_test_context_for_server};
+    use ferrum2_runtime::{UdpDirection, UdpRuntimeLimits, UdpSessionManager};
+
+    #[test]
+    fn dashboard_metrics_follow_udp_ownership_without_prometheus_scrapes() {
+        let registry = OwnerRegistry::new();
+        let server = "127.0.0.1:9".parse().expect("loopback");
+        let (path, context) = udp_test_context_for_server(registry.clone(), server);
+        std::fs::remove_file(path).expect("remove fixture");
+        let control = ClientDashboardControl::new(
+            Arc::new(test_routing(server, default_test_psk())),
+            Arc::clone(&context.egress),
+            None,
+            Arc::new(OnceLock::new()),
+            None,
+            None,
+            Arc::clone(&context.metrics),
+            registry.clone(),
+            1,
+        );
+        let manager = UdpSessionManager::new(
+            UdpRuntimeLimits::new(
+                1,
+                ferrum2_runtime::MIN_UDP_MAX_BUFFERED_BYTES,
+                ferrum2_runtime::MIN_UDP_IDLE_TIMEOUT,
+            )
+            .expect("limits"),
+            registry,
+        );
+        let session = manager
+            .reserve_session(tokio::time::Instant::now())
+            .expect("session");
+        let datagram = session
+            .reserve_datagram(UdpDirection::ToTarget, 777)
+            .expect("buffer");
+        let snapshot = control.snapshot();
+        let metrics = snapshot["metrics"].as_str().expect("dashboard metrics");
+        assert!(metrics.contains("ferrum2_udp_sessions_active{role=\"client\"} 1"));
+        assert!(metrics.contains("ferrum2_udp_buffered_bytes{role=\"client\"} 777"));
+        drop(datagram);
+        drop(session);
+        let snapshot = control.snapshot();
+        let metrics = snapshot["metrics"].as_str().expect("dashboard metrics");
+        assert!(metrics.contains("ferrum2_udp_sessions_active{role=\"client\"} 0"));
+        assert!(metrics.contains("ferrum2_udp_buffered_bytes{role=\"client\"} 0"));
     }
 }

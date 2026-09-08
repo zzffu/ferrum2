@@ -98,6 +98,11 @@ dropped, including across reset. Exhausting either byte domain does not consume 
 Association count, packet queues, payload length, shared session capacity, timeouts, and generation
 checks still apply. TUN queue byte exhaustion follows the existing drop-new queue-full outcome.
 
+UDP candidates have a fixed five-second admission lifetime. Commit and response
+consumption validate the slot deadline as well as lease phase and generation, even
+when they run before the scheduler's expiry stage. A queued or backpressured response
+cannot revive an idle-expired association; deadline cleanup order is not an admission rule.
+
 The accounted UDP envelope is ordinary `udp.max_buffered_bytes` plus
 `tun.udp_buffered_bytes_limit`; the owner registry exposes each domain independently as
 `udp_buffered_bytes` and `tun_udp_buffered_bytes`. Proxy fixed capacity is 131,014 bytes for one hop
@@ -233,12 +238,22 @@ order, reconstructs the managed plane, performs readback, publishes exactly one 
 then reopens admission. Other VPN or LAN routes, default-route metric changes, link handovers, and
 temporary loss of an automatically detected interface are never full-rebuild reasons.
 
+Private preparation, active-epoch and retired-epoch owners keep managed adapter
+identities, TCP lifetime, queued traffic and wake publication together. Reset/rebuild
+branches choose an explicit consuming retain or cleanup transition; fallible cleanup
+is not hidden in `Drop`. This ownership structure does not change the privileged
+qualification requirement.
+
 ## Fragmentation, MTU, and ping
 
 Accepted IPv4 and IPv6 fragments are reassembled under bounded entry, fragment-count, protocol-size,
 and timeout limits before transport checks, DNS matching, or routing. Overlapping fragments are
 dropped. Ferrum2 may generate local IPv4 Fragmentation Needed, IPv6 Packet Too Big, and appropriate
 Unreachable errors.
+IPv4 reassembly preserves the complete first-fragment header and compares copied
+options on subsequent fragments. First-only non-copy options may therefore produce
+different legal IHL values, including when fragments arrive out of order. Copied-option
+mismatches and non-copy options on noninitial fragments are rejected.
 
 UDP ingress reassembly does not imply outbound response fragmentation. A TUN UDP response payload
 must fit the interface MTU minus its IP/UDP headers (28 bytes for IPv4, 48 for IPv6); an oversized

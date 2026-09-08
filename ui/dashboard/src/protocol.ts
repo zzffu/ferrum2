@@ -1,3 +1,4 @@
+import type { Command } from "./wire";
 // Shared implementation contract. Decimal strings carry Rust u64 values.
 export interface ConnectionView {
   id: string;
@@ -65,23 +66,12 @@ export interface Snapshot {
     rulesets?: Record<string, unknown>[];
     dns_cache?: Record<string, unknown> | null;
     metrics?: string | null;
-    capabilities?: string[];
+    capabilities?: Command["action"][];
   };
 }
+export type { Command, CommandRequest, CommandResult } from "./wire";
 // HTTP: GET /api/snapshot, GET /api/config -> {source:string,revision:string,running_revision:string|null}
-// POST /api/command JSON { action:string, generation:string, ...payload } -> {result:unknown}
-// failures -> {error:{code:string}}, status 400/401/403/409/413/429/500/503.
-// Commands and payloads:
-// runtime.start / runtime.stop / runtime.restart: no extra fields
-// connections.close: {ids:string[]} ; connections.close_all: all current-generation flows at execution
-// selectors.select: {selector:number,member:number}
-// outbounds.probe: {outbound:number,host:string,port:number} transport-connect timing only
-// routes.test: {host:string,port:number,protocol:'tcp'|'udp',inbound:number}
-// rulesets.refresh: {index:number}
-// dns.clear: no extra fields
-// dns.query: {name:string,qtype:'A'|'AAAA',server:number|null}
-// config.validate: {source:string}
-// config.save / config.apply: {source:string,revision:string}
-// diagnostics.export: no extra fields; result JSON download from browser
+// POST /api/command: CommandRequest -> {result:CommandResult}.
+// Failures -> {error:{code:string}}, status 400/401/403/409/413/429/500/503.
 // All APIs require Authorization Bearer (token only in memory), same-origin.
 // Runtime-only domain capabilities are published only while their real handle is available.

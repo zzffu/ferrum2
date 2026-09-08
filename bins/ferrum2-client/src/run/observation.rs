@@ -69,11 +69,24 @@ impl PreparedProcessRoot<RunError> for ClientMetricsRoot {
     }
 }
 
-fn render_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String {
+pub(super) fn render_client_metrics(metrics: &Metrics, registry: &OwnerRegistry) -> String {
     let snapshot = registry.snapshot();
-    metrics.set_udp_sessions_active(Role::Client, snapshot.udp_sessions);
-    metrics.set_udp_buffered_bytes(Role::Client, snapshot.udp_buffered_bytes);
     let mut output = metrics.encode_text().unwrap_or_default();
+    // Project authoritative ownership into this response, never into shared counters.
+    // Dashboard sampling and concurrent scrapes must not publish stale gauge writes.
+    for (name, value) in [
+        ("ferrum2_udp_sessions_active", snapshot.udp_sessions),
+        ("ferrum2_udp_buffered_bytes", snapshot.udp_buffered_bytes),
+    ] {
+        let sample = format!("{name}{{role=\"client\"}} ");
+        if let Some(start) = output.find(&sample) {
+            let value_start = start + sample.len();
+            let end = output[value_start..]
+                .find('\n')
+                .map_or(output.len(), |offset| value_start + offset);
+            output.replace_range(value_start..end, &value.to_string());
+        }
+    }
     if output.ends_with("# EOF\n") {
         output.truncate(output.len() - "# EOF\n".len());
     }
@@ -633,6 +646,10 @@ mod tests {
             registry.clone(),
         );
         let metrics = Metrics::new();
+        // Rendering must use registry state even before an endpoint has ever scraped,
+        // without overwriting shared metric state as a side effect.
+        metrics.set_udp_sessions_active(Role::Client, 41);
+        metrics.set_udp_buffered_bytes(Role::Client, 42);
         let provisional = manager.reserve_session(Instant::now()).expect("session");
         let temporary = provisional
             .reserve_datagram(UdpDirection::ToTarget, 777)
@@ -649,6 +666,9 @@ mod tests {
         let closed = render_client_metrics(&metrics, &registry);
         assert!(closed.contains("ferrum2_udp_sessions_active{role=\"client\"} 0"));
         assert!(closed.contains("ferrum2_udp_buffered_bytes{role=\"client\"} 0"));
+        let unprojected = metrics.encode_text().expect("metrics");
+        assert!(unprojected.contains("ferrum2_udp_sessions_active{role=\"client\"} 41"));
+        assert!(unprojected.contains("ferrum2_udp_buffered_bytes{role=\"client\"} 42"));
     }
 
     #[test]

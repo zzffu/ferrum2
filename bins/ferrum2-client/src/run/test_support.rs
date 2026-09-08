@@ -45,9 +45,7 @@ pub(in crate::run) use super::egress::{
     ClientEgressEngine, ClientOpenFailure, ClientOutboundContext, ClientShadowsocksContext,
     ClientUdpContext, prepare_client_outbounds,
 };
-use super::{
-    ClientRunResources, dns_egress, run_with_registry, run_with_registry_and_metrics_inner,
-};
+use super::{ClientRunResources, run_with_registry, run_with_registry_and_metrics_inner};
 pub(in crate::run) use ferrum2_shadowsocks::tokio::{TokioConnector, TokioFramed, TokioTransport};
 
 enum ScriptedMode {
@@ -623,10 +621,6 @@ pub(in crate::run) fn spawn_test_client_with_random(
     random: Arc<dyn SecureRandom>,
 ) -> (tokio::sync::oneshot::Sender<()>, TestClientTask) {
     let (stop, stopped) = tokio::sync::oneshot::channel();
-    let dns_specs = config
-        .dns
-        .as_ref()
-        .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
     let task = tokio::spawn(run_with_registry_and_metrics_inner(
         config,
         registry.clone(),
@@ -636,7 +630,9 @@ pub(in crate::run) fn spawn_test_client_with_random(
         Arc::new(Metrics::new()),
         Some(random),
         None,
-        ClientRunResources::test_unmaterialized(dns_specs),
+        ClientRunResources::new(
+            super::ClientNetworkResources::prepare(registry).expect("prepare client network"),
+        ),
     ));
     (stop, task)
 }

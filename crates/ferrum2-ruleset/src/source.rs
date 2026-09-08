@@ -88,7 +88,11 @@ impl RuleSetRemoteSource {
         if url.len() > crate::cache::MAX_URL_BYTES {
             return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::InvalidSource));
         }
-        if update_interval.is_some_and(|interval| interval.is_zero()) {
+        if update_interval.is_some_and(|interval| {
+            !(ferrum2_rule::MIN_RULE_SET_REFRESH_INTERVAL
+                ..=ferrum2_rule::MAX_RULE_SET_REFRESH_INTERVAL)
+                .contains(&interval)
+        }) {
             return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::InvalidSource));
         }
         if mode == RuleSetDownloadMode::DeferredToDetour && detour.is_none() {

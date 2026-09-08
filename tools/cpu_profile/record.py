@@ -153,6 +153,7 @@ def _controller_sources():
     root = Path(__file__).resolve().parents[2]
     paths = [root / "tools" / "profile-cpu.sh"]
     paths.extend(Path(__file__).parent / name for name in ("__init__.py", "record.py", "process.py", "evidence.py"))
+    paths.append(root / "tools" / "owned_process.py")
     sources = []
     for path in sorted(paths):
         raw = bounded_bytes(path, 256 * 1024)

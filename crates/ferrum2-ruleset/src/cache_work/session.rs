@@ -29,6 +29,38 @@ pub(super) struct RefreshBuild {
     pub(super) rule_set: RuleSetId,
 }
 
+impl RefreshBuild {
+    fn successor(
+        &self,
+        generation: u64,
+        match_set: &Arc<ferrum2_rule::CompiledMatchSet>,
+        downloaded: bool,
+    ) -> Result<Option<RuleEngineSnapshot>, RuleSetLoadError> {
+        let descriptor = self
+            .current
+            .rule_set(self.rule_set)
+            .ok_or_else(|| RuleSetLoadError::new(RuleSetLoadErrorKind::RegistryCompile))?;
+        if !downloaded
+            && self
+                .current
+                .shared_match_set(descriptor.match_set())
+                .is_some_and(|current| {
+                    Arc::ptr_eq(current, match_set) || current.has_same_content(match_set)
+                })
+        {
+            return Ok(None);
+        }
+        let mut builder = self
+            .current
+            .builder_for_generation(generation)
+            .map_err(rule_compile_load_error)?;
+        builder
+            .replace_shared_rule_set(self.rule_set, Arc::clone(match_set))
+            .map_err(rule_compile_load_error)?;
+        builder.build().map(Some).map_err(rule_compile_load_error)
+    }
+}
+
 pub(super) struct PreparedDownload {
     pub(super) loaded: LoadedRuleSet,
     pub(super) successor: Option<RuleEngineSnapshot>,
@@ -86,6 +118,31 @@ pub(super) fn run_session(
         state.cached = None;
         state.failure = Some(RuleSetLoadErrorKind::RegistryCompile);
     }
+    // Cache reuse must satisfy the same complete successor admission as downloads.
+    // In particular a 304 only identifies disk bytes, not the live matcher.
+    let cached_successor = (|| {
+        let Some(cached) = state.cached.as_ref() else {
+            return Ok(None);
+        };
+        let successor = match input.refresh.as_ref() {
+            Some(refresh) => {
+                refresh.successor(input.generation, &cached.loaded.match_set, false)?
+            }
+            None => None,
+        };
+        Ok::<_, RuleSetLoadError>(successor.map(|successor| PreparedDownload {
+            loaded: cached.loaded.clone(),
+            successor: Some(successor),
+        }))
+    })();
+    let cached_successor = match cached_successor {
+        Ok(successor) => successor,
+        Err(error) => {
+            state.cached = None;
+            state.failure = Some(error.kind());
+            None
+        }
+    };
     if ready.send(Ok(state)).is_err() {
         return SessionCompletion {
             result: Err(RuleSetLoadError::new(RuleSetLoadErrorKind::Cancelled)),
@@ -93,7 +150,12 @@ pub(super) fn run_session(
         };
     }
     let mut transaction = None;
-    let result = accept_commands(&mut input, &mut commands, &mut transaction);
+    let result = accept_commands(
+        &mut input,
+        &mut commands,
+        &mut transaction,
+        cached_successor,
+    );
     let cleanup_failed = transaction
         .as_mut()
         .is_some_and(|transaction: &mut CacheTransaction| transaction.cleanup().is_err());
@@ -107,6 +169,7 @@ fn accept_commands(
     input: &mut SessionInput,
     commands: &mut mpsc::Receiver<Command>,
     transaction: &mut Option<CacheTransaction>,
+    cached_successor: Option<PreparedDownload>,
 ) -> Result<Option<PreparedDownload>, RuleSetLoadError> {
     loop {
         input.stop.check()?;
@@ -152,25 +215,13 @@ fn accept_commands(
                 {
                     return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::RegistryCompile));
                 }
-                // Registry preparation belongs to work orchestration, not the
-                // file-format owner, and finishes before the disk commit point.
-                let successor = input
-                    .refresh
-                    .as_ref()
-                    .map(|refresh| {
-                        let mut builder = refresh
-                            .current
-                            .builder_for_generation(input.generation)
-                            .map_err(rule_compile_load_error)?;
-                        builder
-                            .replace_shared_rule_set(
-                                refresh.rule_set,
-                                Arc::clone(&compiled.match_set),
-                            )
-                            .map_err(rule_compile_load_error)?;
-                        builder.build().map_err(rule_compile_load_error)
-                    })
-                    .transpose()?;
+                // Full successor construction must precede the disk commit point.
+                let successor = match input.refresh.as_ref() {
+                    Some(refresh) => {
+                        refresh.successor(input.generation, &compiled.match_set, true)?
+                    }
+                    None => None,
+                };
                 input.stop.check()?;
                 transaction.commit(CacheCommit {
                     directory: &input.directory,
@@ -194,7 +245,7 @@ fn accept_commands(
                     successor,
                 }));
             }
-            Some(Command::Abort) => return Ok(None),
+            Some(Command::Abort) => return Ok(cached_successor),
             None => return Err(RuleSetLoadError::new(RuleSetLoadErrorKind::Cancelled)),
         }
     }

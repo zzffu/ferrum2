@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { command, useDashboard } from "./store";
+import type { Command, CommandResult } from "./protocol";
 
 export function bytes(value: string | number | null | undefined) {
   if (value == null) return "不可用";
@@ -89,17 +90,13 @@ export function Pager({
   );
 }
 export function useAction() {
-  const [result, setResult] = useState<unknown>(undefined);
+  const [result, setResult] = useState<CommandResult | undefined>(undefined);
   const [error, setError] = useState("");
-  async function run(
-    action: string,
-    payload: Record<string, unknown> = {},
-    generation?: string,
-  ) {
+  async function run(request: Command, generation?: string) {
     setError("");
     setResult(undefined);
     try {
-      const value = await command(action, payload, generation);
+      const value = await command(request, generation);
       setResult(value);
       return value;
     } catch (e) {
@@ -132,7 +129,7 @@ export function Capability({
   name,
   children,
 }: {
-  name: string;
+  name: Command["action"];
   children: ReactNode;
 }) {
   const { snapshot, error } = useDashboard();

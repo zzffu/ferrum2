@@ -8,8 +8,8 @@
     "bun": "1.4.2"
   },
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
-    "typecheck": "tsc --noEmit",
+    "dev": "bun scripts/wire.ts --check && vite --host 127.0.0.1",
+    "typecheck": "bun scripts/wire.ts --check && tsc --noEmit",
     "build": "bun run typecheck && vite build && bun scripts/embed.ts",
     "build:check": "bun run typecheck && vite build && bun scripts/embed.ts --check",
     "format": "prettier --write src scripts package.json tsconfig.json vite.config.ts index.html",

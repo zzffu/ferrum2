@@ -13,7 +13,7 @@ import time
 
 from tools.performance_candidate.json_contract import CandidateControlError, _strict_json
 from tools.performance_candidate.output import _atomic_text
-from tools.performance_candidate.tun_mock_process import ProcessTree
+from tools.owned_process import capture
 from tools.performance_candidate.tun_mock_contract import (
     BUILD_COMMAND, MODES, RECIPE_PATHS, artifact, decision, digest, fail, file_hash,
     load, schedule, sha, trial, validate,
@@ -36,8 +36,9 @@ def register_commands(commands) -> None:
 
 def controller_identity() -> str:
     package = pathlib.Path(__file__).resolve().parent
-    paths = [package / name for name in ("cli.py", "tun_mock.py", "tun_mock_contract.py", "tun_mock_process.py", "identity.py", "json_contract.py", "pairing.py", "output.py", "__main__.py", "__init__.py")]
-    return digest({path.name: file_hash(path) for path in paths})
+    paths = [package / name for name in ("cli.py", "tun_mock.py", "tun_mock_contract.py", "identity.py", "json_contract.py", "pairing.py", "output.py", "__main__.py", "__init__.py")]
+    paths.append(package.parent / "owned_process.py")
+    return digest({path.relative_to(package.parent).as_posix(): file_hash(path) for path in paths})
 
 
 def write_json(path: pathlib.Path, value: object) -> None:
@@ -49,31 +50,22 @@ def execute(command: list[str], *, cwd: pathlib.Path, stdout: pathlib.Path,
             maximum_bytes: int = 32 * 1024 * 1024) -> None:
     """Bound wall time and log size; terminate the entire owned process tree."""
     stdout.parent.mkdir(parents=True, exist_ok=True)
-    # Create suspended on Windows so no descendant can escape job assignment.
-    kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | 0x4} if os.name == "nt" else {"start_new_session": True}
     try:
-        with stdout.open("wb") as out, stderr.open("wb") as err:
-            child = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, **kwargs)
-            tree = None
-            try:
-                tree = ProcessTree(child)
-                deadline = time.monotonic() + timeout
-                while child.poll() is None:
-                    if time.monotonic() >= deadline:
-                        fail(f"process timeout: {command[0]}; logs retained")
-                    if stdout.stat().st_size + stderr.stat().st_size > maximum_bytes:
-                        fail(f"process output exceeded bound: {command[0]}; logs retained")
-                    time.sleep(0.05)
-                if child.returncode != 0:
-                    fail(f"process exited {child.returncode}: {command[0]}; logs retained")
-                if stdout.stat().st_size + stderr.stat().st_size > maximum_bytes:
-                    fail(f"process output exceeded bound: {command[0]}; logs retained")
-            finally:
-                if tree is not None:
-                    tree.close()
-                elif child.poll() is None:
-                    child.kill()
-                child.wait(timeout=15)
+        result = capture(command, cwd=cwd, env=env, deadline=time.monotonic() + timeout,
+                         stdout_cap=maximum_bytes, stderr_cap=maximum_bytes)
+        stdout.write_bytes(result.stdout)
+        stderr.write_bytes(result.stderr)
+        cleanup = "" if result.cleanup_confirmed else "; process cleanup unconfirmed"
+        if result.failure == "timed_out":
+            fail(f"process timeout: {command[0]}; logs retained{cleanup}")
+        if result.failure == "output_limit" or len(result.stdout) + len(result.stderr) > maximum_bytes:
+            fail(f"process output exceeded bound: {command[0]}; logs retained{cleanup}")
+        if result.failure:
+            fail(f"process capture failed: {command[0]}; logs retained{cleanup}")
+        if result.returncode != 0:
+            fail(f"process exited {result.returncode}: {command[0]}; logs retained{cleanup}")
+        if not result.cleanup_confirmed:
+            fail(f"process cleanup unconfirmed: {command[0]}; logs retained")
     except (OSError, subprocess.SubprocessError) as error:
         raise CandidateControlError(f"unable to execute {command[0]}; logs retained: {error}") from error
 

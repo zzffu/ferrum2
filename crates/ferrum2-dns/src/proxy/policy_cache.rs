@@ -1,13 +1,12 @@
-use std::sync::Arc;
-use std::time::Duration;
 use std::time::Instant;
 
 use hickory_proto::op::{Message, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 
 use super::{MemoizedPolicyResponse, ProxyCache, ProxyIngress, ProxyPolicy};
+use crate::response::ResponseSemantics;
 use crate::{
-    DnsAddressRecords, DnsCacheKey, DnsCacheQtype, DnsError, DnsServerId,
+    DnsAddressRecords, DnsCacheAnswer, DnsCacheKey, DnsCacheQtype, DnsError, DnsServerId,
     MAX_APPLICATION_RESOLVED_CANDIDATES,
 };
 
@@ -40,29 +39,19 @@ pub(super) fn append_application_records(
     ipv4: &mut Vec<std::net::Ipv4Addr>,
     ipv6: &mut Vec<std::net::Ipv6Addr>,
 ) {
-    let Some((records, _)) = application_records_with_ttl(qname, qtype, response) else {
-        return;
-    };
-    match records {
-        DnsAddressRecords::A(records) => {
-            for address in records.iter().copied() {
-                if ipv4.len() == MAX_APPLICATION_RESOLVED_CANDIDATES {
-                    break;
-                }
-                if !ipv4.contains(&address) {
-                    ipv4.push(address);
-                }
+    for (address, _) in ResponseSemantics::new(qname, qtype, response).addresses() {
+        match (qtype, address) {
+            (RecordType::A, std::net::IpAddr::V4(address))
+                if ipv4.len() < MAX_APPLICATION_RESOLVED_CANDIDATES && !ipv4.contains(&address) =>
+            {
+                ipv4.push(address);
             }
-        }
-        DnsAddressRecords::Aaaa(records) => {
-            for address in records.iter().copied() {
-                if ipv6.len() == MAX_APPLICATION_RESOLVED_CANDIDATES {
-                    break;
-                }
-                if !ipv6.contains(&address) {
-                    ipv6.push(address);
-                }
+            (RecordType::AAAA, std::net::IpAddr::V6(address))
+                if ipv6.len() < MAX_APPLICATION_RESOLVED_CANDIDATES && !ipv6.contains(&address) =>
+            {
+                ipv6.push(address);
             }
+            _ => {}
         }
     }
 }
@@ -82,127 +71,16 @@ pub(super) fn cache_application_response(
     qtype: RecordType,
     response: &Message,
 ) -> Result<(), DnsError> {
+    let Some((answer, ttl)) = ResponseSemantics::new(qname, qtype, response).cache_answer() else {
+        return Ok(());
+    };
     let now = Instant::now();
-    match response.metadata.response_code {
-        ResponseCode::NoError => {
-            if let Some((records, ttl)) = application_records_with_ttl(qname, qtype, response) {
-                cache
-                    .cache
-                    .insert_positive(key, records, ttl, now)
-                    .map_err(|_| DnsError::Runtime)?;
-            } else if let Some(ttl) = negative_ttl(response) {
-                cache
-                    .cache
-                    .insert_negative(key, ttl, now)
-                    .map_err(|_| DnsError::Runtime)?;
-            }
-        }
-        ResponseCode::NXDomain => {
-            if let Some(ttl) = negative_ttl(response) {
-                cache
-                    .cache
-                    .insert_negative(key, ttl, now)
-                    .map_err(|_| DnsError::Runtime)?;
-            }
-        }
-        _ => {}
+    match answer {
+        DnsCacheAnswer::Positive(records) => cache.cache.insert_positive(key, records, ttl, now),
+        DnsCacheAnswer::Negative => cache.cache.insert_negative(key, ttl, now),
     }
+    .map_err(|_| DnsError::Runtime)?;
     Ok(())
-}
-
-pub(super) fn application_records_with_ttl(
-    qname: &Name,
-    qtype: RecordType,
-    response: &Message,
-) -> Option<(DnsAddressRecords, Duration)> {
-    let (owner, mut ttl) = final_answer_owner(qname, &response.answers)?;
-    match qtype {
-        RecordType::A => {
-            let mut addresses = Vec::new();
-            for record in &response.answers {
-                if &record.name != owner {
-                    continue;
-                }
-                let RData::A(address) = &record.data else {
-                    continue;
-                };
-                ttl = minimum_ttl(ttl, record.ttl);
-                if addresses.len() < MAX_APPLICATION_RESOLVED_CANDIDATES
-                    && !addresses.contains(&address.0)
-                {
-                    addresses.push(address.0);
-                }
-            }
-            (!addresses.is_empty()).then(|| {
-                (
-                    DnsAddressRecords::A(Arc::from(addresses)),
-                    Duration::from_secs(u64::from(ttl.unwrap_or(0))),
-                )
-            })
-        }
-        RecordType::AAAA => {
-            let mut addresses = Vec::new();
-            for record in &response.answers {
-                if &record.name != owner {
-                    continue;
-                }
-                let RData::AAAA(address) = &record.data else {
-                    continue;
-                };
-                ttl = minimum_ttl(ttl, record.ttl);
-                if addresses.len() < MAX_APPLICATION_RESOLVED_CANDIDATES
-                    && !addresses.contains(&address.0)
-                {
-                    addresses.push(address.0);
-                }
-            }
-            (!addresses.is_empty()).then(|| {
-                (
-                    DnsAddressRecords::Aaaa(Arc::from(addresses)),
-                    Duration::from_secs(u64::from(ttl.unwrap_or(0))),
-                )
-            })
-        }
-        _ => None,
-    }
-}
-
-pub(super) fn final_answer_owner<'a>(
-    qname: &'a Name,
-    answers: &'a [Record],
-) -> Option<(&'a Name, Option<u32>)> {
-    let mut owner = qname;
-    let mut ttl = None;
-    for _ in 0..=answers.len() {
-        let Some(record) = answers
-            .iter()
-            .find(|record| &record.name == owner && matches!(record.data, RData::CNAME(_)))
-        else {
-            return Some((owner, ttl));
-        };
-        let RData::CNAME(cname) = &record.data else {
-            unreachable!("the selected record is a CNAME")
-        };
-        ttl = minimum_ttl(ttl, record.ttl);
-        owner = &cname.0;
-    }
-    None
-}
-
-pub(super) fn minimum_ttl(current: Option<u32>, candidate: u32) -> Option<u32> {
-    Some(current.map_or(candidate, |current| current.min(candidate)))
-}
-
-pub(super) fn negative_ttl(response: &Message) -> Option<Duration> {
-    response
-        .authorities
-        .iter()
-        .filter_map(|record| match &record.data {
-            RData::SOA(soa) => Some(record.ttl.min(soa.minimum)),
-            _ => None,
-        })
-        .min()
-        .map(|ttl| Duration::from_secs(u64::from(ttl)))
 }
 
 pub(super) fn cached_application_response(

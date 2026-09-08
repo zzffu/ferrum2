@@ -97,7 +97,7 @@ export function LogsPage() {
         <button
           disabled={busy || !s || !!error}
           onClick={async () => {
-            const result = await action.run("diagnostics.export");
+            const result = await action.run({ action: "diagnostics.export" });
             if (result !== undefined)
               download("ferrum2-diagnostics.json", result);
           }}
@@ -170,7 +170,7 @@ export function SettingsPage() {
     [],
   );
   const [confirm, setConfirm] = useState<{
-    action: string;
+    action: "config.save" | "config.apply";
     source: string;
     revision: string;
     generation: string;
@@ -206,13 +206,12 @@ export function SettingsPage() {
     setReadError("");
     setConfirm(null);
     const result = await action.run(
-      fixed.action,
-      { source: fixed.source, revision: fixed.revision },
+      { action: fixed.action, source: fixed.source, revision: fixed.revision },
       fixed.generation,
     );
     if (epoch !== editorEpoch.current) return;
-    if (result !== undefined) {
-      const { revision } = result as { revision: string };
+    if (result?.kind === "config") {
+      const { revision } = result;
       // Keep the saved source and its authoritative revision paired, even if disk changes again.
       setEditor((current) => ({
         source: fixed.source,
@@ -349,7 +348,9 @@ export function SettingsPage() {
             <div className="actions">
               <button
                 disabled={busy || reading || !s || !!error}
-                onClick={() => void action.run("config.validate", { source })}
+                onClick={() =>
+                  void action.run({ action: "config.validate", source })
+                }
               >
                 离线校验
               </button>

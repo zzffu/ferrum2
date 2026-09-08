@@ -360,7 +360,11 @@ impl UdpTable {
             }
             return None;
         };
-        if entry.lease().phase() == LeasePhase::Closed {
+        if entry.lease().phase() == LeasePhase::Closed
+            || entry.lease().is_stale()
+            || id != Some(entry.lease().id)
+            || entry.deadline_millis() <= now_millis
+        {
             if let Some(id) = id {
                 self.remove(id);
             }
@@ -503,17 +507,34 @@ impl UdpTable {
             return Some(false);
         };
         let valid = admitting
+            && self.generations.current(id.slot) == Some(id)
+            && lease.session_generation == self.session_generation
             && !lease.is_stale()
+            && lease.phase() == LeasePhase::CommitPending
             && matches!(
                 self.slots.get(id.slot).and_then(Option::as_ref),
                 Some(Slot::Candidate {
                     payload_bound,
                     lease: current,
+                    deadline_millis,
                     ..
                 }) if Arc::ptr_eq(current, &lease)
+                    && *deadline_millis > now_millis
                     && commit.selected_payload_bound <= *payload_bound
             );
         if !valid || !lease.mark_live() {
+            if self
+                .slots
+                .get(id.slot)
+                .and_then(Option::as_ref)
+                .is_some_and(|slot| {
+                    matches!(slot, Slot::Candidate { .. }) && slot.deadline_millis() <= now_millis
+                })
+            {
+                self.events.emit(TunEvent::PacketRejected(
+                    TunRejectReason::UdpCandidateTimeout,
+                ));
+            }
             if lease.is_stale() {
                 self.events.emit(TunEvent::UdpStaleGeneration);
                 self.events
@@ -601,6 +622,16 @@ impl UdpTable {
                 TunRejectReason::StaleGeneration,
             );
             return ResponseProcessOutcome::Dropped(UdpResponseDropReason::StaleGeneration);
+        }
+        if self
+            .slots
+            .get(id.slot)
+            .and_then(Option::as_ref)
+            .is_some_and(|slot| {
+                Arc::ptr_eq(slot.lease(), &response.lease) && slot.deadline_millis() <= now_millis
+            })
+        {
+            self.remove(id);
         }
         let (association_matches, payload_bound) =
             match self.slots.get(id.slot).and_then(Option::as_ref) {

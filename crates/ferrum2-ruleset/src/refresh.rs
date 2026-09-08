@@ -162,11 +162,9 @@ where
         due.try_reserve_exact(self.entries.len())
             .map_err(|_| RuleSetLoadError::new(RuleSetLoadErrorKind::Allocation))?;
         let now = Instant::now();
-        due.extend(
-            self.entries
-                .iter()
-                .map(|entry| entry.source.update_interval.map(|interval| now + interval)),
-        );
+        for entry in &self.entries {
+            due.push(refresh_deadline(now, entry.source.update_interval)?);
+        }
 
         loop {
             let Some(next_due) = due.iter().flatten().copied().min() else {
@@ -188,14 +186,26 @@ where
                         () = &mut stop => return Ok(()),
                         _ = &mut refresh => {},
                     }
-                    *deadline = self.entries[index]
-                        .source
-                        .update_interval
-                        .map(|interval| Instant::now() + interval);
+                    *deadline = refresh_deadline(
+                        Instant::now(),
+                        self.entries[index].source.update_interval,
+                    )?;
                 }
             }
         }
     }
+}
+
+fn refresh_deadline(
+    now: Instant,
+    interval: Option<std::time::Duration>,
+) -> Result<Option<Instant>, RuleSetLoadError> {
+    interval
+        .map(|interval| {
+            now.checked_add(interval)
+                .ok_or_else(|| RuleSetLoadError::new(RuleSetLoadErrorKind::InvalidSource))
+        })
+        .transpose()
 }
 
 fn refresh_identities_match(
@@ -248,6 +258,29 @@ mod identity_tests {
     use crate::{
         RuleSetCacheName, RuleSetDownloadMode, RuleSetDownloadResolver, RuleSetRemoteSource,
     };
+
+    #[test]
+    fn refresh_scheduling_is_checked_on_every_platform() {
+        use ferrum2_rule::{MAX_RULE_SET_REFRESH_INTERVAL, MIN_RULE_SET_REFRESH_INTERVAL};
+        use std::time::Duration;
+        let now = tokio::time::Instant::now();
+        for interval in [MIN_RULE_SET_REFRESH_INTERVAL, MAX_RULE_SET_REFRESH_INTERVAL] {
+            assert_eq!(
+                super::refresh_deadline(now, Some(interval)).unwrap(),
+                now.checked_add(interval)
+            );
+        }
+        // Huge instants are representable on Windows but not necessarily Unix.
+        // The contract is checked arithmetic, not a platform-specific overflow.
+        let huge = Duration::from_secs(i64::MAX as u64);
+        match now.checked_add(huge) {
+            Some(expected) => assert_eq!(
+                super::refresh_deadline(now, Some(huge)).unwrap(),
+                Some(expected)
+            ),
+            None => assert!(super::refresh_deadline(now, Some(huge)).is_err()),
+        }
+    }
 
     #[test]
     fn refresh_rejects_a_source_bound_to_another_registry_tag() {

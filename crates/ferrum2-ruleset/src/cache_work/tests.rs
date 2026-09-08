@@ -430,15 +430,109 @@ async fn aggregate_rejected_refresh_preserves_cache_bytes_and_live_snapshot() {
             downloader,
             config,
         )
-        .await
-        .unwrap();
-    assert!(matches!(
-        result,
-        OperationOutput::Refreshed(RuleSetRefreshOutcome::RetainedCache(
-            RuleSetLoadDisposition::StaleCache
-        ))
-    ));
+        .await;
+    assert_eq!(
+        result.err().map(RuleSetLoadError::kind),
+        Some(RuleSetLoadErrorKind::CacheLimit)
+    );
     assert!(Arc::ptr_eq(&current, &registry.snapshot()));
     assert_eq!(std::fs::read(container).unwrap(), before);
+    work.shutdown().await.unwrap();
+}
+
+struct NotModifiedDownloader;
+
+impl RuleSetDownloader for NotModifiedDownloader {
+    fn fetch(&self, request: RuleSetDownloadRequest) -> RuleSetDownloadFuture<'_> {
+        Box::pin(async move {
+            assert!(request.if_none_match.is_some());
+            Ok(RuleSetDownloadResponse::not_modified())
+        })
+    }
+}
+
+#[tokio::test]
+async fn committed_cache_ahead_of_live_converges_on_repeated_304() {
+    use ferrum2_rule::{MatchSetBuilder, RuleEngineSnapshotBuilder};
+    let cache = TempDir::new().unwrap();
+    let config = config(&cache);
+    let work = RuleSetCacheWork::new(&config);
+    let stop = WorkStop {
+        cancel: CancellationToken::new(),
+        deadline: None,
+    };
+    work.directory.acquire().unwrap();
+    let mut transaction = crate::cache::CacheTransaction::begin(&work.directory, &stop).unwrap();
+    transaction.write_chunk(AI, &stop).unwrap();
+    let compiled = transaction.compile(&stop).unwrap();
+    transaction
+        .commit(crate::cache::CacheCommit {
+            directory: &work.directory,
+            name: &source("item").cache_name,
+            url: &source("item").url,
+            metadata: crate::cache::DownloadMetadata {
+                etag: Some("\"B\"".into()),
+                last_modified: None,
+            },
+            compiled: &compiled,
+            generation: 2,
+            stop: &stop,
+        })
+        .unwrap();
+    // Same state as cancellation/durability failure after the disk commit:
+    // complete B is readable, but A has never been replaced in the registry.
+    let mut old = MatchSetBuilder::new();
+    old.add_exact_domain("old.example").unwrap();
+    old.add_domain_suffix("old.example").unwrap();
+    old.add_domain_keyword("old").unwrap();
+    let mut builder = RuleEngineSnapshotBuilder::new(1);
+    let matcher = builder.add_match_set(old.build().unwrap()).unwrap();
+    let rule_set = builder.add_rule_set("item", matcher).unwrap();
+    let registry = Arc::new(RuleEngineRegistry::new(builder.build().unwrap()));
+    let downloader = Arc::new(NotModifiedDownloader);
+    let refresh = || {
+        work.execute(
+            Operation::Refresh {
+                source: source("item"),
+                registry: Arc::clone(&registry),
+                rule_set,
+            },
+            Arc::clone(&downloader),
+            config.clone(),
+        )
+    };
+    let (first, second) = tokio::join!(refresh(), refresh());
+    let outcomes = [first.unwrap(), second.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                OperationOutput::Refreshed(RuleSetRefreshOutcome::Updated {
+                    previous_generation: 1,
+                    generation: 2,
+                })
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                OperationOutput::Refreshed(RuleSetRefreshOutcome::NotModified)
+            ))
+            .count(),
+        1
+    );
+    let live = registry.snapshot();
+    let matcher = live
+        .match_set(live.rule_set(rule_set).unwrap().match_set())
+        .unwrap();
+    assert!(
+        matcher.matches_domain(&ferrum2_core::CanonicalDomain::new("api.openai.example").unwrap())
+    );
+    assert!(!matcher.matches_domain(&ferrum2_core::CanonicalDomain::new("old.example").unwrap()));
     work.shutdown().await.unwrap();
 }

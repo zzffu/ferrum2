@@ -937,3 +937,221 @@ async fn policy_response_continuation_reuses_server_scoped_cache_across_transpor
         0
     );
 }
+
+#[tokio::test]
+async fn oversized_policy_answers_preserve_cold_and_warm_upstream_selection() {
+    let _network = TEST_NETWORK.lock().await;
+    for (strategy, qtype, last) in [
+        (
+            DnsStrategy::Ipv4Only,
+            RecordType::A,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 17)),
+        ),
+        (
+            DnsStrategy::Ipv6Only,
+            RecordType::AAAA,
+            IpAddr::V6("2001:db8::11".parse().expect("last IPv6")),
+        ),
+    ] {
+        let local = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("local");
+        let remote = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("remote");
+        let servers = vec![udp_server(&local), udp_server(&remote)];
+        let task = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (request, peer) = receive_request(&local).await;
+                assert_eq!(request.queries[0].query_type(), qtype);
+                let mut response = Message::response(request.metadata.id, OpCode::Query);
+                response.add_queries(request.queries.iter().cloned());
+                for index in 1..=17 {
+                    let data = match qtype {
+                        RecordType::A => RData::A(A(Ipv4Addr::new(10, 0, 0, index))),
+                        RecordType::AAAA => RData::AAAA(AAAA(Ipv6Addr::new(
+                            0x2001,
+                            0xdb8,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            u16::from(index),
+                        ))),
+                        _ => unreachable!(),
+                    };
+                    response.add_answer(Record::from_rdata(
+                        request.queries[0].name().clone(),
+                        300,
+                        data,
+                    ));
+                }
+                send_response(&local, peer, response).await;
+            }
+        });
+        let (resolver, mut owner) = TaggedResolver::direct(
+            servers,
+            Duration::from_millis(200),
+            NonZeroU16::new(1).expect("capacity"),
+        )
+        .expect("resolver");
+        owner.ready().await.expect("ready");
+        let resolver = Arc::new(resolver);
+        let (snapshot, ids) = snapshot(vec![("last-only", ip_set(last))]);
+        let route = DnsPolicyRoute::new(DnsServerId::new(0), strategy);
+        let program = policy(
+            &snapshot,
+            vec![DnsPolicyRule::new(
+                matcher(ids),
+                DnsPolicyAction::Route(route),
+            )],
+            DnsPolicyRoute::new(DnsServerId::new(1), strategy),
+        );
+        let cache =
+            DnsCache::try_new(NonZeroUsize::new(4).expect("cache capacity")).expect("cache");
+        let proxy = DnsProxy::new(
+            Arc::clone(&resolver),
+            program,
+            Arc::new(RuleEngineRegistry::new(snapshot)),
+            0,
+            1,
+        )
+        .with_cache(cache);
+        let domain = CanonicalDomain::new("large.test").expect("domain");
+        let mut cold = None;
+        for network in [Network::Tcp, Network::Udp] {
+            let result = proxy
+                .resolve_application(ApplicationResolveRequest::new(
+                    ApplicationResolveContext::new(0, network),
+                    &domain,
+                    NonZeroU16::new(443).expect("port"),
+                    strategy,
+                ))
+                .await
+                .expect("complete policy selects local");
+            assert_eq!(result.len(), 16, "application candidates remain bounded");
+            assert!(!result.iter().any(|address| address.ip() == last));
+            if let Some(cold) = &cold {
+                assert_eq!(
+                    &result, cold,
+                    "warm cache must not change selected upstream"
+                );
+            } else {
+                cold = Some(result);
+            }
+        }
+        task.await.expect("both oversized upstream queries");
+        let mut wire = [0; 4096];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), remote.recv_from(&mut wire))
+                .await
+                .is_err()
+        );
+        drop((proxy, resolver));
+        assert_eq!(owner.shutdown().await.expect("shutdown").runtime_tasks, 0);
+    }
+}
+
+#[tokio::test]
+async fn negative_alias_cache_expires_with_alias_and_rejects_zero_or_invalid_chains() {
+    let _network = TEST_NETWORK.lock().await;
+    // The public cache clock expires the actual proxy entry without sleeping or
+    // changing the process clock. Zero TTL, cycles and conflicting aliases must
+    // never create an entry in the first place.
+    for case in ["short", "zero", "cycle", "conflict"] {
+        let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("upstream");
+        let server = udp_server(&upstream);
+        let task = tokio::spawn(async move {
+            let (request, peer) = receive_request(&upstream).await;
+            let mut response = negative_response(&request, Some((300, 300)));
+            let name = request.queries[0].name().clone();
+            let target = Name::from_ascii("target.policy.invalid.").expect("target");
+            response.add_answer(Record::from_rdata(
+                name.clone(),
+                if case == "zero" { 0 } else { 1 },
+                RData::CNAME(CNAME(target.clone())),
+            ));
+            if case == "cycle" {
+                response.add_answer(Record::from_rdata(target, 300, RData::CNAME(CNAME(name))));
+            } else if case == "conflict" {
+                response.add_answer(Record::from_rdata(
+                    name,
+                    300,
+                    RData::CNAME(CNAME(
+                        Name::from_ascii("other.policy.invalid.").expect("other target"),
+                    )),
+                ));
+            }
+            send_response(&upstream, peer, response).await;
+            let (request, peer) = receive_request(&upstream).await;
+            send_response(
+                &upstream,
+                peer,
+                address_response(&request, Ipv4Addr::new(192, 0, 2, 99).into()),
+            )
+            .await;
+        });
+        let (resolver, mut owner) = TaggedResolver::direct(
+            vec![server],
+            Duration::from_millis(200),
+            NonZeroU16::new(1).expect("capacity"),
+        )
+        .expect("resolver");
+        owner.ready().await.expect("ready");
+        let resolver = Arc::new(resolver);
+        let cache =
+            DnsCache::try_new(NonZeroUsize::new(4).expect("cache capacity")).expect("cache");
+        let proxy = final_proxy(Arc::clone(&resolver), 7, LOCAL, 0, 1).with_cache(cache.clone());
+        let domain = CanonicalDomain::new("alias.policy.invalid").expect("domain");
+        let request = ApplicationResolveRequest::new(
+            ApplicationResolveContext::new(0, Network::Tcp),
+            &domain,
+            NonZeroU16::new(443).expect("port"),
+            DnsStrategy::Ipv4Only,
+        );
+        assert_eq!(
+            proxy.resolve_application(request).await,
+            Err(DnsError::NxDomain)
+        );
+        let key = DnsCacheKey::new(
+            DnsServerId::new(0),
+            domain.clone(),
+            DnsCacheQtype::A,
+            ResolverGeneration::new(7),
+        );
+        if case == "short" {
+            assert_eq!(
+                cache.get(&key, Instant::now()).expect("fresh cache"),
+                Some(DnsCacheAnswer::Negative)
+            );
+            assert_eq!(
+                proxy.resolve_application(request).await,
+                Err(DnsError::NoData)
+            );
+        } else {
+            assert_eq!(
+                cache.get(&key, Instant::now()).expect("invalid cache"),
+                None
+            );
+        }
+        assert_eq!(
+            cache
+                .get(&key, Instant::now() + Duration::from_secs(2))
+                .expect("expired cache"),
+            None
+        );
+        assert_eq!(
+            proxy
+                .resolve_application(request)
+                .await
+                .expect("alias no longer blocks"),
+            [SocketAddr::new(Ipv4Addr::new(192, 0, 2, 99).into(), 443)]
+        );
+        task.await.expect("upstream join");
+        drop((proxy, resolver));
+        assert_eq!(owner.shutdown().await.expect("shutdown").runtime_tasks, 0);
+    }
+}

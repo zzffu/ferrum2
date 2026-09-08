@@ -486,6 +486,37 @@ async fn capability_shape_change_never_replaces_the_cache_or_live_snapshot() {
     );
 }
 
+#[tokio::test]
+async fn incompatible_disk_cache_is_rejected_on_repeated_304() {
+    let cache = TempDir::new().unwrap();
+    let loader = Arc::new(RuleSetLoader::new(
+        config(&cache),
+        FakeDownloader::new([
+            FakeResult::Download(AI_SRS.to_vec()),
+            FakeResult::Download(CNIP_SRS.to_vec()),
+            FakeResult::NotModified,
+            FakeResult::NotModified,
+        ]),
+    ));
+    let materialized = materialize_rule_sets(&loader, vec![source()], 1)
+        .await
+        .unwrap();
+    let registry = materialized.shared_registry();
+    let service = materialized
+        .into_refresh_service(Arc::clone(&loader))
+        .unwrap();
+    let current = registry.snapshot();
+    loader.load(&source(), 2).await.unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            service.refresh_once(0).await,
+            RuleSetRefreshOutcome::Failed(RuleSetLoadErrorKind::RegistryCompile),
+        );
+        assert!(Arc::ptr_eq(&current, &registry.snapshot()));
+    }
+    service.shutdown().await.unwrap();
+}
+
 #[test]
 fn source_and_cache_paths_reject_implicit_or_unsafe_inputs() {
     for name in ["", ".", "..", "../escape", "has/slash"] {
@@ -540,4 +571,36 @@ fn source_and_cache_paths_reject_implicit_or_unsafe_inputs() {
             .kind(),
         RuleSetLoadErrorKind::InvalidLoaderConfig
     );
+}
+
+#[test]
+fn source_refresh_interval_enforces_shared_limits() {
+    use ferrum2_rule::{MAX_RULE_SET_REFRESH_INTERVAL, MIN_RULE_SET_REFRESH_INTERVAL};
+    for (interval, accepted) in [
+        (Duration::ZERO, false),
+        (Duration::from_nanos(1), false),
+        (MIN_RULE_SET_REFRESH_INTERVAL, true),
+        (MAX_RULE_SET_REFRESH_INTERVAL, true),
+        (
+            MAX_RULE_SET_REFRESH_INTERVAL + Duration::from_nanos(1),
+            false,
+        ),
+        (Duration::from_secs(i64::MAX as u64), false),
+    ] {
+        let result = RuleSetRemoteSource::new(
+            RuleSetCacheName::new("interval").unwrap(),
+            "https://rules.example/a.srs",
+            RuleSetDownloadMode::ClientResolved(RuleSetDownloadResolver::System),
+            None,
+            Some(interval),
+        );
+        if accepted {
+            assert_eq!(result.unwrap().update_interval(), Some(interval));
+        } else {
+            assert_eq!(
+                result.unwrap_err().kind(),
+                RuleSetLoadErrorKind::InvalidSource
+            );
+        }
+    }
 }

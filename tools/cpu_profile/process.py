@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from tools.owned_process import ProcessTree
+
 
 class CommandStatus(Enum):
     COMPLETED = "completed"
@@ -69,38 +71,6 @@ class ProcessOwner:
     def _interrupt(self, _number, _frame):
         self.cancelled = True
 
-    @staticmethod
-    def _signal_group(child, number):
-        try:
-            os.killpg(child.pid, number)
-        except ProcessLookupError:
-            return True
-        except OSError:
-            return False
-        return True
-
-    @staticmethod
-    def _group_live(group: int) -> bool:
-        # A grandchild can outlive/reparent after its leader exits. Check live
-        # members of our group; zombies have already exited and are not running
-        # helpers (only their new parent can reap those process-table entries).
-        with os.scandir("/proc") as entries:
-            for entry in entries:
-                if not entry.name.isdecimal():
-                    continue
-                try:
-                    with open(f"/proc/{entry.name}/stat", "rb") as stream:
-                        raw = stream.read(4097)
-                    if len(raw) > 4096:
-                        raise OSError("unreadable process identity")
-                    fields = raw.rsplit(b") ", 1)[1].split()
-                    if int(fields[2]) == group and fields[0] not in {b"Z", b"X"}:
-                        return True
-                except (FileNotFoundError, ProcessLookupError):
-                    continue
-                except (IndexError, ValueError) as error:
-                    raise OSError("unreadable process identity") from error
-        return False
 
     def run(
         self, argv: list[str], *, deadline: float, stdout: Path, stderr: Path,
@@ -129,11 +99,11 @@ class ProcessOwner:
         with private_file(stdout) as output, private_file(stderr) as errors:
             with selectors.DefaultSelector() as selector:
                 try:
-                    child = subprocess.Popen(
+                    tree = ProcessTree.spawn(
                         argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE, start_new_session=True,
-                        env={**os.environ, "LC_ALL": "C"},
+                        stderr=subprocess.PIPE, env={**os.environ, "LC_ALL": "C"},
                     )
+                    child = tree.process
                     for name, stream, destination in (
                         ("stdout", child.stdout, output), ("stderr", child.stderr, errors),
                     ):
@@ -147,14 +117,14 @@ class ProcessOwner:
                         if now >= deadline and status is CommandStatus.COMPLETED:
                             status = CommandStatus.TIMED_OUT
                         if status is not CommandStatus.COMPLETED and stop_at is None:
-                            self._signal_group(child, signal.SIGINT)
+                            tree.signal(signal.SIGINT)
                             stop_at = now + self.cleanup_grace
                         if soft_stop is not None and now >= soft_stop and not requested_stop:
-                            self._signal_group(child, signal.SIGINT)
+                            tree.signal(signal.SIGINT)
                             requested_stop = True
                         if stop_at is not None and now >= stop_at:
                             if not killed:
-                                self._signal_group(child, signal.SIGKILL)
+                                tree.signal(signal.SIGKILL)
                                 killed = True
                                 stop_at = now + self.cleanup_grace
                             else:
@@ -174,8 +144,7 @@ class ProcessOwner:
                                 status = CommandStatus.OUTPUT_LIMIT
                         # Observe exit without reaping the leader. Retaining its PID
                         # prevents process-group ID reuse before our final group signal.
-                        exited = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                        if exited is not None and not selector.get_map():
+                        if tree.exited() and not selector.get_map():
                             break
                 except OSError:
                     if status is CommandStatus.COMPLETED:
@@ -184,20 +153,7 @@ class ProcessOwner:
                     if child is not None:
                         # The group is owned even if its leader exited while a child
                         # retained a pipe. Never let closing the pipes substitute for reap.
-                        if not self._signal_group(child, signal.SIGKILL):
-                            cleanup = CleanupStatus.UNCONFIRMED
-                        try:
-                            child.wait(timeout=self.cleanup_grace)
-                        except subprocess.TimeoutExpired:
-                            cleanup = CleanupStatus.UNCONFIRMED
-                        cleanup_deadline = time.monotonic() + self.cleanup_grace
-                        try:
-                            while self._group_live(child.pid):
-                                if time.monotonic() >= cleanup_deadline:
-                                    cleanup = CleanupStatus.UNCONFIRMED
-                                    break
-                                time.sleep(0.01)
-                        except OSError:
+                        if not tree.close(self.cleanup_grace):
                             cleanup = CleanupStatus.UNCONFIRMED
                         for stream in (child.stdout, child.stderr):
                             if stream is not None:
