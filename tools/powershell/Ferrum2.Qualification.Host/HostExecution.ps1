@@ -335,7 +335,7 @@ function Get-Ferrum2Metrics {
     param([uint16]$Port, [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4')
     $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily
     $endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Parse($profile.loopback_address), $Port)
-    $text = [string](Invoke-WebRequest -UseBasicParsing -Uri "http://$endpoint/metrics" `
+    $text = [string](Invoke-WebRequest -NoProxy -UseBasicParsing -Uri "http://$endpoint/metrics" `
         -TimeoutSec 2 -ErrorAction Stop).Content
     if ([Text.Encoding]::UTF8.GetByteCount($text) -le 0 -or
         [Text.Encoding]::UTF8.GetByteCount($text) -gt 1MB) {

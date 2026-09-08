@@ -1,9 +1,13 @@
 """Finite loopback ownership and injected startup tests; no adapter or route mutation."""
+import contextlib
+import http.server
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import tempfile
+import threading
 import tomllib
 import unittest
 
@@ -18,7 +22,7 @@ class ListenerReservationTests(unittest.TestCase):
             with self.subTest(address_family=family):
                 self.run_family_script(body, family)
 
-    def run_family_script(self, body: str, family: str) -> dict:
+    def run_family_script(self, body: str, family: str, *, environment: dict[str, str] | None = None) -> dict:
         with tempfile.TemporaryDirectory(prefix="ferrum2-port-contract-") as temporary:
             root = Path(temporary)
             script = root / "test.ps1"
@@ -59,12 +63,56 @@ function Assert-BindState {
             result = subprocess.run(
                 ["pwsh", "-NoProfile", "-File", str(script), str(OWNERS), str(root), family],
                 capture_output=True, text=True, encoding="utf-8", timeout=20, check=False,
+                env=environment,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             return {
                 path.name: tomllib.loads(path.read_text(encoding="utf-8"))
                 for path in root.glob("configs/*/*.toml")
             }
+
+    def test_ipv6_metrics_ignores_inherited_http_proxy(self) -> None:
+        class MetricsHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.server.requests += 1
+                body = self.server.metrics.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        class IPv6Server(http.server.ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+
+        with contextlib.ExitStack() as stack:
+            endpoint = stack.enter_context(IPv6Server(("::1", 0), MetricsHandler))
+            proxy = stack.enter_context(http.server.ThreadingHTTPServer(("127.0.0.1", 0), MetricsHandler))
+            endpoint.metrics = "ferrum2_tun_session_active 1\n"
+            proxy.metrics = "ferrum2_tun_session_active 999\n"
+            threads = []
+            for server in (endpoint, proxy):
+                server.requests = 0
+                thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+                thread.start()
+                threads.append(thread)
+            try:
+                proxy_names = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
+                environment = {key: value for key, value in os.environ.items() if key.upper() not in proxy_names}
+                proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+                environment.update(HTTP_PROXY=proxy_url, HTTPS_PROXY=proxy_url, ALL_PROXY=proxy_url, NO_PROXY="")
+                self.run_family_script(
+                    f'$metrics = Get-Ferrum2Metrics -Port {endpoint.server_port} -AddressFamily IPv6\n'
+                    'if ($metrics -cne "ferrum2_tun_session_active 1`n") { throw "metrics came from inherited proxy" }\n',
+                    "IPv6",
+                    environment=environment,
+                )
+                self.assertEqual({"endpoint": endpoint.requests, "proxy": proxy.requests}, {"endpoint": 1, "proxy": 0})
+            finally:
+                for server in (endpoint, proxy):
+                    server.shutdown()
+                for thread in threads:
+                    thread.join(timeout=2)
 
     def test_dynamic_range_readback_is_closed_and_locale_independent(self) -> None:
         self.run_script(r'''

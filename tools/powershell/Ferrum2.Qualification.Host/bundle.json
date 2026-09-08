@@ -35,8 +35,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/HostExecution.ps1",
-      "bytes": 30628,
-      "sha256": "ff7cbcbe9663b3c2c8e739b40ca45e03cd55ec23cfbb05dedf55e68d019796f4"
+      "bytes": 30637,
+      "sha256": "8338473caa4b5e9dc5ffa37c83190625d77edfe7c3b10c6f7f48e64d2a718077"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/HostFirewall.ps1",

@@ -98,6 +98,8 @@ one exact TUN workload-UDP reply rule. It does not create substitute or widened 
 four `::1` services in each lifetime. Their actual IPv6 loopback communications must succeed under
 unchanged host policy; a policy failure is not bypassed. IPv4 retains its eighteen-rule contract.
 The plan records the selected rule count, and the final supervisor requires exactly that evidence.
+Metrics requests connect directly to the selected loopback endpoint with `-NoProxy`; inherited
+HTTP proxy settings must not redirect readiness or reset evidence.
 
 The client listener uses a closed two-phase rule because Windows cannot resolve an interface alias
 before the product creates that TUN. Before launch, the rule is limited to the exact executable,
