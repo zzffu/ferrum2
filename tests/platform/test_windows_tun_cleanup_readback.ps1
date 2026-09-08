@@ -129,7 +129,7 @@ foreach ($family in @('IPv4', 'IPv6')) {
         $run = 'abcdef123456'
         $network = New-Ferrum2HostNetworkIdentity -RunId $run -AddressFamily $family
         $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $family
-        $index = $(if ($family -ceq 'IPv4') { 7 } else { 1 })
+        $index = 7
         $rows = [Collections.Generic.List[object]]::new()
         $resources = [pscustomobject]@{
             adapter = $null; addresses = @(); routes = @(); processes = @(); ports = @(); firewall_rules = @()
@@ -142,6 +142,12 @@ foreach ($family in @('IPv4', 'IPv6')) {
             ledger = [pscustomobject]@{ address_family = $family; resources = $resources; expected_resources = $expected }
         }
         function Get-Ferrum2LoopbackIdentity { param($AddressFamily) return @{ interface_index = 1 } }
+        function Get-NetAdapter {
+            param([switch]$Physical)
+            return [pscustomobject]@{
+                ifIndex = 7; Status = 'Up'; InterfaceGuid = '11111111-1111-1111-1111-111111111111'
+            }
+        }
         function Get-Ferrum2OwnedInterfaceBinding {
             param($InterfaceIndex, $AddressFamily)
             if ($InterfaceIndex -eq 1) { return $null }
@@ -161,6 +167,10 @@ foreach ($family in @('IPv4', 'IPv6')) {
         }
         function Remove-NetRoute { param($InputObject, $Confirm) [void]$rows.Remove($InputObject) }
         $prefix = "$($network.reset_address)/$($profile.host_prefix_length)"
+        Assert-Rejected {
+            Add-Ferrum2OwnedRoute -Context $context -InterfaceIndex 1 `
+                -DestinationPrefix $prefix -RouteMetric 4094 -Kind qualification-reset-baseline
+        } 'software loopback was admitted as a physical reset probe'
         Assert-Rejected {
             Add-Ferrum2OwnedRoute -Context $context -InterfaceIndex $index `
                 -DestinationPrefix $prefix -RouteMetric 4093 -Kind qualification-reset-change

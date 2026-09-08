@@ -250,8 +250,17 @@ function Add-Ferrum2OwnedRoute {
     Assert-Ferrum2OwnedNetworkRow -Row $row -RunId $Context.run_id -AddressFamily $family -Type route
     $network = New-Ferrum2HostNetworkIdentity -RunId $Context.run_id -AddressFamily $family
     $loopback = Get-Ferrum2LoopbackIdentity -AddressFamily $family
-    if ($Kind -cnotin @('qualification-reset-baseline', 'qualification-reset-change') -or
-        $family -ceq 'IPv6') {
+    if ($Kind -cin @('qualification-reset-baseline', 'qualification-reset-change')) {
+        $physical = @(Get-NetAdapter -Physical -ErrorAction Stop)
+        if ($physical.Count -gt 4096) { throw 'reset physical interface inventory exceeds its bound' }
+        $matches = @($physical | Where-Object {
+            [uint32]$_.ifIndex -eq $InterfaceIndex -and [string]$_.Status -ceq 'Up' -and
+            ([guid]$_.InterfaceGuid).ToString('D') -ceq [string]$row.interface_guid
+        })
+        if ($matches.Count -ne 1) {
+            throw 'reset route requires its exact active physical interface'
+        }
+    } else {
         if ($InterfaceIndex -ne $loopback.interface_index -and (
             $null -eq $Context.ledger.resources.adapter -or
             [string]$Context.ledger.resources.adapter.state -cne 'created' -or

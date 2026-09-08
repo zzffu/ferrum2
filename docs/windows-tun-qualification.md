@@ -128,8 +128,10 @@ retains exact rule and executable identities, and ambiguous ownership never auth
 IPv4 preserves its reset stimulus: two successive `/32` rows for an otherwise unused RFC 2544
 address, first through an existing hardware interface's current gateway and then on-link at a
 lower metric after removing the exact first owned row. IPv6 uses an unused run-owned ULA `/128`
-on the existing loopback interface, replacing an on-link metric-4094 row with metric 4093.
-IPv6 needs no physical IPv6 gateway. Neither path modifies existing routes or interface settings.
+on an existing active physical interface with a usable, preferred IPv6 unicast source, replacing
+an on-link metric-4094 row with metric 4093. IPv6 needs no physical IPv6 gateway. The selectable
+probe must meet the product's hardware-underlay readiness policy; a software-loopback route does
+not. Neither path changes interface addresses, interface metric, existing/default routes or DNS.
 A selector keeps the unused endpoint in the underlay snapshot while retaining the normal proxy
 as selected exit; no workload traffic uses the probe. Both paths must observe an actual session
 generation change, old-TCP retirement and a replaced ingress epoch. A route notification alone

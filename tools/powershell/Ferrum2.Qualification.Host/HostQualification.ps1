@@ -53,6 +53,7 @@ function Get-Ferrum2HostQualificationPlan {
             firewall_rule_count = $family.firewall_rule_count
             loopback_firewall_rules = $family.loopback_firewall_rules
             tun_connected_prefix_length = $family.tun_prefix_length
+            reset_route_interface = 'existing active physical interface; IPv6 requires an existing usable unicast source'
             tcp_ingress_scope = 'exact app, TCP, TUN LUID, local address/port, and remote peer'
             wfp_lifetime = 'process-owned dynamic sessions only'
             tcp_ingress_installation = 'automatic after listener bind and before admission'
@@ -187,20 +188,35 @@ function Initialize-Ferrum2QualificationResetRoute {
         throw 'qualification reset probe route/address baseline must be absent'
     }
     $selected = $null
+    $adapters = @(Get-NetAdapter -Physical -ErrorAction Stop |
+        Where-Object { [string]$_.Status -ceq 'Up' } | Sort-Object ifIndex)
+    if ($adapters.Count -gt 4096) {
+        throw 'qualification physical interface inventory exceeds its bound'
+    }
     if ($family.address_family -ceq 'IPv6') {
-        # The unused fixed egress probe tracks this exact route fingerprint. Changing
-        # its metric exercises semantic reset without a public IPv6 gateway or traffic.
-        $loopback = Get-Ferrum2LoopbackIdentity -AddressFamily IPv6
-        $selected = [pscustomobject]@{
-            InterfaceIndex = $loopback.interface_index
-            NextHop = $family.unspecified_address
+        # Every selectable first hop must have a hardware underlay. The unused
+        # on-link probe needs an existing IPv6 source, but no IPv6 gateway or traffic.
+        foreach ($adapter in $adapters) {
+            $sources = @($inventory.addresses | Where-Object {
+                $source = [Net.IPAddress]::Parse([string]$_.IPAddress)
+                [uint32]$_.InterfaceIndex -eq [uint32]$adapter.ifIndex -and
+                [string]$_.AddressState -ceq 'Preferred' -and -not $_.SkipAsSource -and
+                -not $source.IsIPv6LinkLocal -and -not $source.IsIPv6Multicast -and
+                -not $source.IsIPv4MappedToIPv6 -and -not [Net.IPAddress]::IsLoopback($source) -and
+                -not $source.Equals([Net.IPAddress]::IPv6Any)
+            })
+            if ($sources.Count -ne 0) {
+                $selected = [pscustomobject]@{
+                    InterfaceIndex = [uint32]$adapter.ifIndex
+                    NextHop = $family.unspecified_address
+                }
+                break
+            }
+        }
+        if ($null -eq $selected) {
+            throw 'qualification reset needs an active hardware interface with an existing usable IPv6 source'
         }
     } else {
-        $adapters = @(Get-NetAdapter -Physical -ErrorAction Stop |
-            Where-Object { [string]$_.Status -ceq 'Up' } | Sort-Object ifIndex)
-        if ($adapters.Count -gt 4096) {
-            throw 'qualification physical interface inventory exceeds its bound'
-        }
         foreach ($adapter in $adapters) {
             try {
                 $rows = @(Find-NetRoute -RemoteIPAddress $address `
