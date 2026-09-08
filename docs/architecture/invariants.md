@@ -5,48 +5,22 @@ second implementation. A change updates the owner, evidence, gap, and affected-P
 pull request. `last verified` identifies the source snapshot whose evidence was inspected; `pending`
 means the contract is known but its automated proof is incomplete.
 
-## R0 baseline identity
+## Policy sources
 
-| Field | Baseline |
-|---|---|
-| Git commit | `88d169686a3f87037d968f92f9c143e1e33c1169` |
-| Rust/Cargo | `1.97.1`; edition 2024; resolver 3 |
-| Supported build targets | `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl` |
-| Workspace members | 17 at the baseline commit; the current locked workspace has 19 members |
-| Production Rust | 104 tracked `bins/*/src` and `crates/*/src` files, 109,756 physical lines |
-| Non-vendor repository Rust | 189 files, 171,739 physical lines |
-| Tracked non-vendor code | 217 `.rs/.py/.ps1/.sh/.yml/.yaml` files, 226,247 physical lines |
-| Production `#[cfg` occurrences | 604 |
-| Production lines containing the `unsafe` keyword | 209 |
-| `#[allow(unsafe_code)]` declarations | 1 |
-
-Counts above describe the recorded R0 commit, not the current checkout, and are navigation data
-rather than mechanical acceptance thresholds. Reproduce baseline measurements with
-`git show 88d169686a3f87037d968f92f9c143e1e33c1169:<path>`; use the current committed tree when
-recording a new snapshot. In particular, the current Windows crate has two reviewed unsafe
-allowance boundaries, as recorded by WIN-01 below.
-
-The current `cargo metadata --locked --no-deps` member set and direct internal normal/dev dependency
-declarations reduce to the following graph (a dash means no internal Ferrum2 dependency):
+The root `Cargo.toml`, locked Cargo metadata and the executable policy in
+`tests/m0-harness/tests/workspace_policy/architecture.toml` own current membership and dependency
+boundaries. Inspect them rather than maintaining a second graph or source-line inventory here:
 
 ```text
-core/crypto/net/observability/sniff/m0-harness -> -
-rule -> core                       socks5 -> core
-config -> core, crypto, rule       shadowsocks -> core, crypto
-dns -> core, net, rule             ruleset -> core, dns, rule
-runtime -> core, net               platform-windows -> net
-tun -> net, platform-windows, runtime
-client -> config, core, crypto, dns, net, observability, platform-windows,
-          rule, ruleset, runtime, shadowsocks, sniff, socks5, tun
-server -> config, core, crypto, dns, net, observability, platform-windows,
-          rule, ruleset, runtime, shadowsocks, sniff
-m4-qualification -> core, crypto, shadowsocks, socks5
-rule-qualification -> core, dns, rule
+cargo metadata --locked --no-deps --format-version 1
 ```
 
-The executable declarative policy fails if an unrecorded member appears. Exact internal dependency
-allowlists keep runtime limited to core/net, the Windows platform crate limited to net, RuleSet free
-of runtime/config/platform back-edges, and observability free of all Ferrum2 dependencies.
+Dependency allowlists are upper bounds, not required edge inventories. They keep runtime limited
+to core/net, the Windows platform crate limited to net, RuleSet free of runtime/config/platform
+back-edges, and observability free of Ferrum2 dependencies.
+
+Historical entries marked `baseline` refer to `88d169686a3f87037d968f92f9c143e1e33c1169`,
+not validation of the current checkout. Snapshot counts and audit chronology remain in Git history.
 
 ### Reviewed size exceptions
 
@@ -73,7 +47,7 @@ production-file limit. The latter remains a maintainability gap, not an addition
 | CFG-03A | bins + config | Bare `--check-config` performs prepare only and has no runtime/network side effects | `tests/m0-harness/tests/config_cli.rs` | Side-effect sentinel coverage remains explicit | ordinary m0 | current |
 | CFG-03B/04 | bins + role-local materializers | Materialized check is bounded, starts no steady-state root, joins resources, and retains client/server failure codes 1/2 | `tests/m0-harness/tests/config_materialize.rs` | No shared bootstrap crate: private egress/platform capabilities stay in each binary | ordinary m0 | architecture stabilization |
 | CFG-05/06 | config + role-local materializers | Dependency plan is complete, deterministic and dependency-first; prepare/finish hide no I/O and reject incomplete resources | `crates/ferrum2-config/tests/v2_prepare_contract.rs`; bin `run/materialize` tests | None known | ordinary Rust | current |
-| CFG-07 | config + TUN | Removed aggregate TUN byte-budget fields remain unknown; no aggregate memory formula returns | config contract + TUN fuzz `config_legacy_fields` | Preserve seed provenance | ordinary + hosted fuzz smoke/campaign | baseline |
+| CFG-07 | config + TUN | Unknown and retired fields fail closed; TUN UDP payload and egress buffers use an independent byte budget, not an aggregate process RSS estimate | config contract, TUN budget tests and [current TUN configuration](../config-v2-tun.md#udp-mapping-and-filtering) | Preserve ordinary/TUN budget isolation and seed provenance | ordinary + hosted fuzz smoke/campaign | current |
 | CFG-08 | config `validation/egress_graph` | Existing graph bounds precede DNS/endpoint drafts; typed edges reject cycles and invalid chains; shared successors produce one first-hop/domain summary | adjacent small DAG/cycle/64–65 boundary tests; config/v2 contracts; Windows workspace gates; Quick A/A and A/B 24/24 | Independent core/rule validation retained; both Quick performance guards report REGRESSION, so performance acceptance remains open | ordinary config + m0; explicit qualification | M2a `804f0dc0`, 2026-09-06 |
 | LIFE-01/02/03 | runtime + bins | Prepare-before-activate, reverse rollback, admission/drain/cancel/join order, owner baseline, exactly-once reap and rebind | runtime `lifecycle_{transaction,root_events,accept,relay}.rs` and `shutdown.rs`; m0 `lifecycle_cycles.rs` | Cross-bin rollback matrix remains a characterization task | ordinary; every-push lifecycle stress | current |
 | LIFE-04/05 | bins + runtime | Readiness cannot be spoofed; shared TCP/UDP bind ownership rolls back atomically | bin root/readiness tests; m0 local/UDP lifecycle cohorts | None known | ordinary m0 | current |
@@ -89,7 +63,7 @@ production-file limit. The latter remains a maintainability gap, not an addition
 | WIN-07 | platform + TUN | Ring full is one counted drop with no retry/reset/rebuild | hosted-safe Wintun/TUN unit tests | Live ring saturation is intentionally outside the bounded host check set | ordinary unit | baseline |
 | TUN-01..05 | TUN owner | Lightweight reset versus full rebuild, debounce/audit, transition ordering, same-logical-reset settle and exactly-once events | hosted-safe TUN library suite; host notification/WFP-retention witness | Default tests remain adapter-free; live qualification covers one real notification, not a durability matrix | ordinary Linux/Windows + explicit host qualification | 2026-09-04 host |
 | TUN-06/07 | TUN data plane | Canonical packet validation and strict bounded reassembly; reviewed corpus remains separate from fuzz seeds | `reassembly-v1.hex` + provenance; deterministic smoke; four fuzz targets | Hosted execution remains pure in-memory; live qualification covers transport integration, not corpus replay | ordinary unit + hosted smoke/fuzz | baseline |
-| TUN-08..10 | TUN data plane | Initial-SYN admission, TCP cleanup/backpressure, UDP EIM/EIF/ADF, no live eviction, unmetered exception remains narrow | hosted-safe TUN library suite and fuzz race corpus; live TCP/UDP host probe | Detailed policy evidence remains hosted; the live gate proves basic real-adapter transport | ordinary unit/fuzz + explicit host qualification | 2026-09-04 host |
+| TUN-08..10 | TUN data plane | Initial-SYN admission, system TCP cleanup/backpressure, UDP EIM/EIF/ADF, no live eviction, and independent TUN UDP byte admission | hosted-safe TUN library suite and fuzz race corpus; live TCP/UDP host probe | Detailed policy evidence remains hosted; the live gate proves basic real-adapter transport | ordinary unit/fuzz + explicit host qualification | current contracts; live evidence is revision-bound |
 | ROUTE-01..04 | bins + TUN/runtime/SS | First-valid routing freeze, authenticated server commit, unique concurrent winner, no tagged fallback and fixed admission bounds | m0 UDP/SOCKS cohorts; client/TUN and SS tests; live narrow-route probe before/after notification | Cross-refresh policy breadth remains hosted; live gate proves retained route/WFP identity | ordinary protocol + explicit host qualification | 2026-09-04 host |
 
 ## DNS, RuleSet, protocols and observability
@@ -104,8 +78,8 @@ production-file limit. The latter remains a maintainability gap, not an addition
 | SS-01/02 | `ferrum2-shadowsocks` | Authentication and semantics precede replay/connect/plaintext; UDP prepare is mutation-free and commit-token owned | TCP ordering/replay/negative and UDP replay/session tests | None known | ordinary protocol | baseline |
 | SOCKS-01/02 | `ferrum2-socks5` + client | Exact wire/status and allocation bounds; first-valid UDP source pin and EOF cleanup | crate tests + m0 SOCKS UDP | Client binary remains compile-only on ordinary host | ordinary crate/m0 + host-qualified client | baseline |
 | SNIFF-01 | `ferrum2-sniff` | Bounded, transport-strict, fragmented-input safe and redacted | crate tests | None known | ordinary Rust | baseline |
-| OBS-01/02 | `ferrum2-observability` | Closed low-cardinality schema, deterministic rendering, balanced lifecycle gauges, no global subscriber | observability tests | Module split must not duplicate registration | ordinary Rust | baseline |
-| SEC-01 | all | Errors/logs/evidence retain no config path, endpoint, key, domain, peer, payload or source detail | redaction tests across crates and m0 | Every new evidence schema needs sentinel coverage | all applicable gates | ongoing |
+| OBS-01/02 | `ferrum2-observability` | Closed low-cardinality schema, deterministic rendering, balanced lifecycle gauges, caller-owned globally filtered subscribers and dynamic severity; the crate does not install a global subscriber | observability tests, including nested-event rejection | Module split must not duplicate registration or weaken the log admission boundary | ordinary Rust | current |
+| SEC-01 | all | Ordinary errors/logs/evidence exclude config paths, endpoints, keys, domains, peers, payloads and source detail; authenticated sensitive management operations and opt-in rocom captures have separate explicit contracts | redaction tests across crates and m0; [dashboard](dashboard-design.md) and [recording](rocom-recording-design.md) contracts | Every new evidence schema needs sentinel coverage | all applicable gates | ongoing |
 
 ## Tests, CI, vendor and performance
 
@@ -117,4 +91,4 @@ production-file limit. The latter remains a maintainability gap, not an addition
 | VENDOR-01 | crypto + policy | Normal refactors do not edit vendor; intentional changes replay archive/diff and update both locks | FERRUM_PATCH + workspace policy | No automated archive download in ordinary gate | ordinary policy + explicit qualification | baseline |
 | CI-01/02 | root workflows | Root Actions use immutable SHAs, read-only permissions, exact clean checkout; named gates feed explicit main and fuzz `required` jobs through the sole typed `tools.ci.required_gate` result owner; the fuzz workflow always emits its required context and runs its one-hour pure in-memory campaign when reviewed owner paths change | root workflows + workspace policy mutation tests | Branch-protection must require both contexts; external settings readback pending | hosted CI | pending external |
 | PLAT-01/02 | platform scripts | Privileged correctness uses one fixed host plan with no suites or profiles; one exact candidate build, explicit elevation acknowledgement, run-owned RFC 2544 `/32` resources, real Wintun TCP/UDP, live WFP identity retention, forced process-tree recovery, 900-second bound, and zero residue | host qualification runbook; closed source bundle; plan/build/runtime/worker/cleanup/final schema-v1 evidence | Live evidence is intentionally unavailable in ordinary R0 | ordinary static + explicit host live | 2026-09-04 host |
-| PERF-01..04 | performance host runner/controller | Performance and qualification have separate public execution paths; the closed performance bundle contains no qualification source; real Wintun runs require elevation, explicit acknowledgement, dedicated narrow routes, per-RunId ownership/recovery, raw paired metrics, and zero-residue cleanup; each run selects ClientDirect or EndToEnd; Quick/Confirm use 24/50 trials and Lifecycle uses 20 complete start/probe/stop cycles | host source manifest, PlanOnly/static contracts, recovery/cleanup evidence, and [2026-09-05 Confirm/CPU report](../windows-tun-confirm-cpu-profile-report-2026-09-05.md) | Historical Confirm evidence is A/A at the recorded commits, not a current candidate speedup or Lifecycle qualification; durable retention and reviewed host calibration remain required | ordinary static + explicit host live | 2026-09-05 historical Confirm A/A |
+| PERF-01..04 | performance host runner/controller | Performance and qualification have separate public execution paths; the closed performance bundle contains no qualification source; real Wintun runs require elevation, explicit acknowledgement, dedicated narrow routes, per-RunId ownership/recovery, raw paired metrics, and zero-residue cleanup; each run selects ClientDirect or EndToEnd; Quick/Confirm use 24/50 trials and Lifecycle runs 20 complete start/probe/stop cycles | host source manifest, PlanOnly/static contracts, recovery/cleanup evidence and the [performance evidence contract](../performance-evidence.md) | Same-source A/A cannot prove candidate speedup or Lifecycle qualification; durable retention, reviewed calibration and fresh candidate evidence remain required | ordinary static + explicit host live | historical runs are not current-checkout qualification |

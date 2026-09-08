@@ -222,8 +222,8 @@ python -B -m tools.performance_candidate windows-tun-validate-host-evidence `
 
 Use `Confirm` or `EndToEnd` consistently in both commands when selecting those profiles/topologies.
 After interruption, use the same public runner with `-RecoveryOnly`; removing live network residue
-requires elevation. The [2026-09-05 Confirm and CPU report](windows-tun-confirm-cpu-profile-report-2026-09-05.md)
-records historical A/A runs and their interpretation limits, not current-checkout qualification.
+requires elevation. Historical same-source A/A results describe their recorded builds and host
+conditions; they are not current-checkout qualification or evidence of a code-change speedup.
 
 Windows workload schema 5 and host trial schema 4 retain TCP/UDP p50, p95, and p99
 nanoseconds plus `latency_samples` in `workload_measurements`. All three quantiles use
@@ -257,6 +257,18 @@ Summaries alone cannot reconstruct TCP quantiles or Jain fairness without origin
 latency samples or per-flow counts. Single-flow `cpu_payload_bytes` retains warmup plus active work
 as a total only; warmup bytes never enter the active throughput numerator. New comparisons require
 both members to use the same revised harness and bundles.
+
+### Windows CPU profiling interpretation
+
+Collect CPU traces separately from uninstrumented performance comparisons. Preserve the exact
+sampled executables and matching PDBs, Windows public-symbol resolution, active-workload windows,
+and lost-event/buffer counts. Prefer a bounded, single-scene steady-state trace to a mixed-scene
+capture. Profiler overhead must not enter the performance verdict.
+
+Kernel, driver, DPC and interrupt samples attributed to a product process are not automatically
+product user-space or syscall costs. Unresolved kernel symbols support only module-level
+attribution; symbol-prefix and leaf-sample summaries are not inclusive call-tree costs.
+Keep raw traces, symbols and workload evidence private and outside tracked source.
 
 ## Rule qualification evidence
 
@@ -313,6 +325,24 @@ before analysis-qualified capture can be introduced. Until then these diagnostic
 workload overlap, loss-free sampling, symbol quality, or optimization acceptance. Offline tests
 are under the existing `tests/ci/test_cpu_profile*.py` discovery gate; finite fake helpers and
 synthetic containers do not count as real profiler evidence.
+
+## Open qualification and optimization questions
+
+Removing historical reports does not close their unverified work. Earlier architecture changes
+have not established overall performance non-regression; new acceptance requires current-source
+identities, reviewed A/A calibration and uninstrumented paired A/B evidence under the same workload.
+
+- RuleSet refresh batching and per-resource indexes remain unmeasured design options. Preserve
+  complete-successor construction, per-resource atomic disk replacement and snapshot consistency.
+- Incremental TLS sniffing, sparse/dense rule-candidate representations, cache sharding and a wider
+  process worker budget require current profiles. Preserve parse bounds, metadata re-evaluation,
+  budget isolation, fairness and tail latency rather than treating smaller allocations as throughput.
+- Removing the SOCKS ready-stream mutex remains conditional on a real relay profile and a design
+  preserving exactly-once replies and UDP control lifetime; synthetic ready-poll timings are not
+  sufficient adoption evidence.
+- Same-source Windows A/A verdict labeling and strict boolean/integer distinctions across Windows
+  evidence schemas remain carried-forward review questions, not newly verified defects or completed
+  fixes. CPU build/workload/window/loss/symbol qualification also remains explicit work.
 
 ## Ordinary and privileged boundaries
 

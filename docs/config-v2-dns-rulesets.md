@@ -52,6 +52,10 @@ versions fail validation; there is no legacy runtime or automatic conversion.
 An unconfigured Direct has the explicit, stable system-resolver behavior
 described below, independent of the presence of `[dns]`.
 
+Rule matchers use flat schema-v2 fields, for example `host = "example.com"` and `port = 443`
+inside a rule table. Unknown or removed fields fail validation rather than selecting a
+compatibility interpretation.
+
 ## Domain resolution and detours
 
 A fixed domain endpoint must state how it is bootstrapped:

@@ -77,15 +77,12 @@ cargo run -p ferrum2-client --locked -- --config client.toml --dashboard-listen 
 - [文档索引](docs/README.md)：配置、架构、验证流程和性能证据。
 - [DNS 与 RuleSet 配置](docs/config-v2-dns-rulesets.md)。
 - [F2P 设计、配置与验证](docs/architecture/f2p-design.md)：TLS 1.3/TCP 承载，`balanced`／`realtime` 调度；[客户端](docs/examples/client-v2-f2p.toml)与[服务端](docs/examples/server-v2-f2p.toml)配置示例。UDP over TCP 不消除队头阻塞，尚无 WAN 性能优势结论。
-- [Windows TUN 配置](docs/config-v2-tun.md)与[旧网络模型迁移说明](docs/network-model-v2-migration.md)。
+- [Windows TUN 配置](docs/config-v2-tun.md)：当前 schema-v2 字段、系统 TCP、原生 UDP 和网络生命周期。
 - [内嵌 rocom 录制与离线解码](docs/architecture/rocom-recording-design.md)：自动识别 TSF4G 连接，每条连接独立保存原始数据/key JSONL，普通 TCP 不录制；敏感录制须显式开启。
 - [Windows TUN 正确性验证](docs/windows-tun-qualification.md)：真实网卡验证的专用流程。
 - [性能证据说明](docs/performance-evidence.md)：Linux 配对测量和 Windows 主机性能流程。
 - [Rule 性能控制器](tools/performance_rule/README.md)：校准前置检查、请求绑定与有界证据保留。
-- [全量工程审查](docs/architecture/engineering-audit-2026-09-05.md)：当前按 crate 审查进度及后续架构/性能阶段。
-- [整改架构设计](docs/architecture/engineering-design-2026-09-05.md)：全量审查后的所有权、接口、取舍与实施验收顺序。
 - [TUN 系统 TCP 设计](docs/architecture/tun-system-tcp-design.md)：TCP 交给 Windows、UDP 保持原生；已选定最小临时入站放行与受管宿主机验证。
-- [工程整改记录](docs/architecture/engineering-remediation-2026-09-05.md)：审查覆盖、故障修复与验证缺口；[逐批证据](docs/architecture/engineering-remediation-evidence-2026-09-05.md)保留失败、撤回和性能数据。
 
 ## 开发与验证
 

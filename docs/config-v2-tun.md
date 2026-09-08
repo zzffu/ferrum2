@@ -10,8 +10,8 @@ Privileged Windows acceptance runs through the bounded, explicitly authorized ho
 
 A complete dual-stack direct-egress example is available at
 [`docs/examples/client-v2-tun.toml`](examples/client-v2-tun.toml).
-Deployments upgrading from the removed compatibility model should follow the
-[`network model v2 breaking migration`](network-model-v2-migration.md).
+Only `schema_version = 2` is accepted; unknown or removed fields are rejected without aliases.
+Validate a complete configuration with `--check-config` before deployment.
 
 ```toml
 schema_version = 2
@@ -293,26 +293,3 @@ Terminal UDP response removal increments both the general rejection counter and 
 `injection_rejected`, `session_reset`, `shutdown`, and `owner_fatal`; no endpoint, association,
 route, outbound, or adapter identity is exposed as a label.
 
-## Breaking migration
-
-- This release accepts `schema_version = 2` only. Version 1, a missing version, and future versions
-  fail before a partially validated configuration can be produced; there is no automatic migration.
-- Replace legacy composite matchers with the flat schema-v2 matcher fields documented in the
-  breaking migration guide.
-- The removed legacy `tun.max_udp_buffered_bytes` spelling remains rejected; the new
-  `tun.udp_buffered_bytes_limit` is an exact independent UDP capacity budget, not an estimated
-  aggregate process-memory budget.
-- Existing dual-stack address fields and IPv4 synthetic DNS remain valid.
-- `strict_route` is new and defaults to `false`. Its requested value is retained, but it is
-  effective only with `auto_route = true`; requesting it without automatic routing requires a
-  fixed startup warning and installs no WFP rules.
-- `[route].auto_detect_interface` and `[route].default_interface` are new and default to `false`
-  and absent respectively. They may coexist; automatic detection has priority over the named
-  fallback.
-- `udp_filtering` now defaults to `endpoint_independent` when omitted. Set it to
-  `address_dependent` explicitly to retain source-address filtering.
-- Ferrum2 does not estimate aggregate TUN-owned or process memory. The independent TUN UDP
-  byte ceiling covers the owned UDP payload and egress-buffer domain described above; flow,
-  association, fragment, timeout, and protocol-length bounds remain mandatory.
-- There are intentionally no `route_guard`, `on_network_change`, `dns_mode`, or `udp_mapping`
-  settings.
