@@ -92,6 +92,13 @@ port, and exact synthetic peer. The product's WFP session and sublayer remain pr
 dynamic. Runner-owned firewall rules are separate: they use Windows PersistentStore and must be
 deleted by normal cleanup or recovery, not mistaken for kernel-dynamic rules.
 
+Windows NetSecurity rejects IPv6 `::1` firewall address scopes. IPv6 therefore installs six real
+rules: two exact ULA support rules, one exact TUN client-ingress rule per product lifetime, and
+one exact TUN workload-UDP reply rule. It does not create substitute or widened rules for the
+four `::1` services in each lifetime. Their actual IPv6 loopback communications must succeed under
+unchanged host policy; a policy failure is not bypassed. IPv4 retains its eighteen-rule contract.
+The plan records the selected rule count, and the final supervisor requires exactly that evidence.
+
 The client listener uses a closed two-phase rule because Windows cannot resolve an interface alias
 before the product creates that TUN. Before launch, the rule is limited to the exact executable,
 run-owned local address, synthetic peer and observed dynamic TCP port range, without an

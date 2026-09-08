@@ -50,6 +50,8 @@ function Get-Ferrum2HostQualificationPlan {
             automatic_elevation = $false
             live_address_family = if ($AddressFamily -ceq 'IPv4') { 'IPv4 only (RFC2544 198.18.0.0/15)' } else { 'IPv6 only (run-owned ULA)' }
             route_scope = if ($AddressFamily -ceq 'IPv4') { 'run-owned /32 only' } else { 'run-owned /128 routes; /126 connected route on owned TUN only' }
+            firewall_rule_count = $family.firewall_rule_count
+            loopback_firewall_rules = $family.loopback_firewall_rules
             tun_connected_prefix_length = $family.tun_prefix_length
             tcp_ingress_scope = 'exact app, TCP, TUN LUID, local address/port, and remote peer'
             wfp_lifetime = 'process-owned dynamic sessions only'

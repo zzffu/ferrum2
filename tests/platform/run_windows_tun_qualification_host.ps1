@@ -239,7 +239,7 @@ try {
     $strictRoute = $workerResult.strict_route_wfp
     Assert-Ferrum2QualificationWorkloadWitness -Witness $workerResult.data_path -AddressFamily $AddressFamily
     Assert-Ferrum2QualificationResetReady -Witness $strictRoute.notification.active_work_ready -AddressFamily $AddressFamily
-    if (@($workerResult.firewall_rules).Count -ne 18) {
+    if (@($workerResult.firewall_rules).Count -ne $family.firewall_rule_count) {
         throw 'qualification fixed firewall rule set evidence is incomplete'
     }
     Assert-Ferrum2FirewallEvidence -Expected @($workerResult.firewall_rules) `

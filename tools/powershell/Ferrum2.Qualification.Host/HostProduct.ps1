@@ -41,16 +41,20 @@ function Start-Ferrum2HostProduct {
             -Protocol TCP -LocalAddress $Network.tun_address -LocalPort $tcpRange `
             -RemoteAddress $Network.peer_address -InterfaceAlias $adapterName `
             -Purpose "client-ingress-$Sequence" -DeferInterface
-        foreach ($entry in @(
-            @{ executable = $Member.client; port = $clientMetrics; protocol = 'TCP'; purpose = 'client-metrics' },
-            @{ executable = $Member.server; port = $serverPort; protocol = 'TCP'; purpose = 'server-tcp' },
-            @{ executable = $Member.server; port = $serverPort; protocol = 'UDP'; purpose = 'server-udp' },
-            @{ executable = $Member.server; port = $serverMetrics; protocol = 'TCP'; purpose = 'server-metrics' }
-        )) {
-            [void](Add-Ferrum2OwnedFirewallRule -Context $Context -Executable $entry.executable `
-                -Protocol $entry.protocol -LocalAddress $profile.loopback_address -LocalPort ([string]$entry.port) `
-                -RemoteAddress $profile.loopback_address -InterfaceAlias $Loopback.interface_alias `
-                -Purpose "$($entry.purpose)-$Sequence")
+        # NetSecurity rejects IPv6 ::1 scopes. Keep those local communications under
+        # unchanged host policy; only actual, representable rules enter the ledger.
+        if ($profile.loopback_firewall_rules) {
+            foreach ($entry in @(
+                @{ executable = $Member.client; port = $clientMetrics; protocol = 'TCP'; purpose = 'client-metrics' },
+                @{ executable = $Member.server; port = $serverPort; protocol = 'TCP'; purpose = 'server-tcp' },
+                @{ executable = $Member.server; port = $serverPort; protocol = 'UDP'; purpose = 'server-udp' },
+                @{ executable = $Member.server; port = $serverMetrics; protocol = 'TCP'; purpose = 'server-metrics' }
+            )) {
+                [void](Add-Ferrum2OwnedFirewallRule -Context $Context -Executable $entry.executable `
+                    -Protocol $entry.protocol -LocalAddress $profile.loopback_address -LocalPort ([string]$entry.port) `
+                    -RemoteAddress $profile.loopback_address -InterfaceAlias $Loopback.interface_alias `
+                    -Purpose "$($entry.purpose)-$Sequence")
+            }
         }
         $configOptions = @{}
         if ($null -ne $ResetProbeEndpoint) {

@@ -60,7 +60,7 @@ function Assert-Ferrum2FirewallRow {
             $parsed.IsIPv4MappedToIPv6 -or
             $parsed.Equals([Net.IPAddress]::Any) -or $parsed.Equals([Net.IPAddress]::IPv6Any) -or
             ($parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6 -and
-                ($parsed.ScopeId -ne 0 -or $parsed.IsIPv6Multicast)) -or
+                ($parsed.ScopeId -ne 0 -or $parsed.IsIPv6Multicast -or [Net.IPAddress]::IsLoopback($parsed))) -or
             ($null -ne $family -and $parsed.AddressFamily -ne $family)) {
             throw 'Firewall addresses must be canonical, non-wildcard addresses of one family.'
         }

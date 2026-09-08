@@ -16,6 +16,8 @@ function Get-Ferrum2AddressFamilyProfile {
         netsh_family = $AddressFamily.ToLowerInvariant()
         wfp_layer = $(if ($v6) { 'FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6' } else { 'FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4' })
         wfp_address_type = $(if ($v6) { 'FWP_BYTE_ARRAY16_TYPE' } else { 'FWP_UINT32' })
+        loopback_firewall_rules = -not $v6
+        firewall_rule_count = $(if ($v6) { 6 } else { 18 })
     }
 }
 

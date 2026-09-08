@@ -311,10 +311,10 @@ class WindowsTunFirewallTests(unittest.TestCase):
         self.run_script(r'''
 $script:Context.address_family = 'IPv6'
 $row = Add-Ferrum2OwnedFirewallRule -Context $script:Context -Executable $script:Executable `
-    -Protocol TCP -LocalAddress '::1' -LocalPort '49152-65535' -RemoteAddress '::1' `
+    -Protocol TCP -LocalAddress 'fd00:abcd:ef12:3456:1::1' -LocalPort '49152-65535' -RemoteAddress 'fd00:abcd:ef12:3456:1::1' `
     -InterfaceAlias 'Loopback Pseudo-Interface 1' -Purpose 'support'
 Assert-Ferrum2FirewallEvidence -Expected @($row) -EvidenceDirectory $script:Context.evidence_directory
-foreach ($address in @('::', '::1/128', '::1-::2', '127.0.0.1', '::ffff:127.0.0.1', '0:0:0:0:0:0:0:1')) {
+foreach ($address in @('::', '::1', '::1/128', '::1-::2', '127.0.0.1', '::ffff:127.0.0.1', '0:0:0:0:0:0:0:1')) {
     $changed = Copy-Rule $row
     $changed.remote_address = $address
     Assert-Rejected { Assert-Ferrum2FirewallRow -Row $changed }
@@ -323,7 +323,7 @@ $rule = @($script:Stores.ActiveStore | Where-Object Name -EQ $row.name)[0]
 $rule.Address.RemoteAddress = @('::/0')
 Assert-Rejected { Remove-Ferrum2OwnedFirewallRule -Row $row }
 Assert-True ($script:Removed.Count -eq 0) 'widened IPv6 rule allowed deletion'
-$rule.Address.RemoteAddress = @('::1')
+$rule.Address.RemoteAddress = @('fd00:abcd:ef12:3456:1::1')
 Remove-Ferrum2OwnedFirewallRule -Row $row
 Assert-UnrelatedSurvives
 ''')

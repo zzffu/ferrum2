@@ -10,13 +10,13 @@
     },
     {
       "path": "tests/platform/run_windows_tun_qualification_host.ps1",
-      "bytes": 16586,
-      "sha256": "ca66ffe88e4ee385f7b0c87512fe94f6159fce3b32440a814f4e39e07b74760e"
+      "bytes": 16611,
+      "sha256": "84bc10917623b4a8f2dc4816871890572aec5220e44ab4d2cf922338b7f2f6b5"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/AddressFamily.ps1",
-      "bytes": 2180,
-      "sha256": "21980e39a3420f1cc340c381dd5834b5fa42cc0e0a78916a09be1ab8ddd59ff5"
+      "bytes": 2283,
+      "sha256": "e6db335a2ab640b0eadc8025abfc24d752bc6077ddd09187d51b28b06f1538f5"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/Ferrum2.Qualification.Host.psd1",
@@ -40,8 +40,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/HostFirewall.ps1",
-      "bytes": 32483,
-      "sha256": "2686e177d9a730360662a27c4ef98426460b531aefdee82883720c94f162c9ec"
+      "bytes": 32524,
+      "sha256": "dd6c4b36252bf11982335629a059b6b71919f3fd467511a9724f080fd398f857"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/HostNetwork.ps1",
@@ -60,13 +60,13 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/HostProduct.ps1",
-      "bytes": 10942,
-      "sha256": "1f87285eef7e26e07d2384642b872ab5684d3bc726b23f3a15dad1c7db7f5157"
+      "bytes": 11213,
+      "sha256": "0e6dc6f6a4e859f088af76fd801e74e90aff6ca04678e8e33e1cbec74faaf95c"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/HostQualification.ps1",
-      "bytes": 38040,
-      "sha256": "0456d092067afb69f51e17f8b43585bec5a8b8a6b2281405b85370a77c25f3fd"
+      "bytes": 38172,
+      "sha256": "2c1341a649db9d580ef5b17aa4ebd098c135a8fac537f8fb6619e774b3bfe4c9"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/QualificationRouteNotification.cs",
