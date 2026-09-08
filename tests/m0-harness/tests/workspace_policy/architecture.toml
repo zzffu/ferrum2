@@ -12,6 +12,7 @@ workspace_members = [
     "ferrum2-m4-qualification",
     "ferrum2-net",
     "ferrum2-observability",
+    "ferrum2-rocom",
     "ferrum2-rule",
     "ferrum2-rule-qualification",
     "ferrum2-ruleset",
@@ -42,6 +43,10 @@ allowed = []
 [[internal_dependency_allowlists]]
 package = "ferrum2-f2p"
 allowed = ["ferrum2-core"]
+
+[[internal_dependency_allowlists]]
+package = "ferrum2-rocom"
+allowed = []
 
 [unsafe_boundary]
 allow_declarations = 2

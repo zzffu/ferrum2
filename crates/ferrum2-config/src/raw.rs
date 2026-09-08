@@ -27,12 +27,25 @@ pub(super) struct RawClientRoot {
     pub(super) dns: Option<RawDns>,
     pub(super) rule_set_loader: Option<RawRuleSetLoader>,
     pub(super) tun: Option<RawTun>,
+    pub(super) rocom: Option<RawRocom>,
     #[serde(default)]
     pub(super) runtime: RawRuntime,
     pub(super) udp: Option<RawUdp>,
     #[serde(default)]
     pub(super) logging: RawLogging,
     pub(super) metrics: Option<RawMetrics>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RawRocom {
+    pub(super) record_path: PathBuf,
+    #[serde(default = "default_rocom_max_bytes")]
+    pub(super) max_bytes: u64,
+}
+
+const fn default_rocom_max_bytes() -> u64 {
+    268_435_456
 }
 
 #[derive(Deserialize)]

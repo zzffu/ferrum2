@@ -21,12 +21,28 @@ pub struct ValidatedClientConfig {
     pub route: CompiledRoute,
     pub route_network: RouteNetworkConfig,
     pub tun: Option<TunConfig>,
+    pub rocom: Option<RocomConfig>,
     pub dns: Option<DnsConfig>,
     pub dns_route: Option<ClientDnsRoute>,
     pub runtime: RuntimeConfig,
     pub udp: Option<UdpConfig>,
     pub logging: LoggingConfig,
     pub metrics: Option<MetricsConfig>,
+}
+
+/// Explicitly enabled sensitive evidence recording for recognized TSF4G connections.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RocomConfig {
+    /// Directory auto-created at normal startup, never during offline validation.
+    pub record_path: std::path::PathBuf,
+    /// Maximum bytes per connection file; reaching it does not stop other captures.
+    pub max_bytes: u64,
+}
+
+impl std::fmt::Debug for RocomConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RocomConfig([redacted])")
+    }
 }
 
 /// Validated family-neutral Windows TUN configuration.

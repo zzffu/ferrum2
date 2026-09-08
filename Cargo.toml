@@ -15,6 +15,7 @@ members = [
     "crates/ferrum2-dns",
     "crates/ferrum2-observability",
     "crates/ferrum2-sniff",
+    "crates/ferrum2-rocom",
     "crates/ferrum2-tun",
     "crates/ferrum2-platform-windows",
     "tests/m0-harness",
@@ -45,6 +46,7 @@ ferrum2-config = { path = "crates/ferrum2-config", version = "=0.1.0" }
 ferrum2-dns = { path = "crates/ferrum2-dns", version = "=0.1.0" }
 ferrum2-observability = { path = "crates/ferrum2-observability", version = "=0.1.0" }
 ferrum2-sniff = { path = "crates/ferrum2-sniff", version = "=0.1.0" }
+ferrum2-rocom = { path = "crates/ferrum2-rocom", version = "=0.1.0" }
 ferrum2-tun = { path = "crates/ferrum2-tun", version = "=0.1.0", default-features = false }
 ferrum2-platform-windows = { path = "crates/ferrum2-platform-windows", version = "=0.1.0", default-features = false }
 shadowsocks-crypto = { version = "=0.7.0", default-features = false, features = ["aws-lc", "v2"] }
@@ -77,6 +79,7 @@ tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json", "env-filter"] }
 prometheus-client = { version = "=0.25.0", default-features = false }
 aes = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
+aws-lc-rs = { version = "=1.16.3", default-features = false, features = ["non-fips", "prebuilt-nasm"] }
 aes-gcm = { version = "=0.11.0", default-features = false, features = ["aes", "bytes", "zeroize"] }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["bytes", "zeroize"] }
 blake3 = { version = "=1.8.5", default-features = false, features = ["std", "zeroize"] }
@@ -91,6 +94,8 @@ hex = "=0.4.3"
 serde_json = "=1.0.151"
 tempfile = "=3.27.0"
 proc-macro2 = { version = "=1.0.107", default-features = false }
+prost-reflect = { version = "=0.16.5", features = ["serde"] }
+protox = "=0.9.1"
 
 [patch.crates-io]
 shadowsocks-crypto = { path = "vendor/shadowsocks-crypto" }

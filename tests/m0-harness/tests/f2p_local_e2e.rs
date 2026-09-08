@@ -434,3 +434,89 @@ fn sparse_f2p_associations_forward_within_one_mib_client_budget() {
     }
     stop(server);
 }
+
+#[test]
+fn rocom_records_application_bytes_across_f2p_without_changing_half_close() {
+    let credentials = Credentials::new();
+    let server_address = unused_loopback();
+    let server_config = credentials.server(server_address, "");
+    let client_address = unused_tcp_udp_loopback();
+    let client_config = credentials.client(
+        client_address,
+        server_address,
+        "balanced",
+        "token",
+        "resolver.test",
+    );
+    let captures = credentials.directory.path().join("captures");
+    let source = std::fs::read_to_string(&client_config).unwrap();
+    std::fs::write(
+        &client_config,
+        format!(
+            "{source}\n[rocom]\nrecord_path = \"{}\"\n",
+            credentials.path("captures")
+        ),
+    )
+    .unwrap();
+    let mut server =
+        ChildGuard::spawn_signallable("ferrum2-server", &server_config, "F2P recording");
+    wait_for_listener(&mut server, server_address);
+    let mut client =
+        ChildGuard::spawn_signallable("ferrum2-client", &client_config, "F2P recording");
+    wait_for_listener(&mut client, client_address);
+    let (target, echo) = tcp_support::start_echo();
+    let (mut stream, reply) =
+        tcp_support::socks_connect_wire(client_address, &target_wire(target.into()));
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    let mut wire = vec![0x33, 0x66, 0, 1, 0, 1, 0x10, 1, 0];
+    wire.extend_from_slice(&1_u32.to_be_bytes());
+    wire.extend_from_slice(&23_u32.to_be_bytes());
+    wire.extend_from_slice(&0_u32.to_be_bytes());
+    wire.extend_from_slice(&[2, 3]);
+    wire.extend_from_slice(b"opaque tail must remain exact\0\xff");
+    stream.write_all(&wire[..7]).unwrap();
+    stream.write_all(&wire[7..]).unwrap();
+    stream.shutdown(Shutdown::Write).unwrap();
+    let mut returned = Vec::new();
+    stream.read_to_end(&mut returned).unwrap();
+    assert_eq!(returned, wire);
+    assert_eq!(echo.join().unwrap(), wire);
+    drop(stream);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let records = loop {
+        let finalized = std::fs::read_dir(&captures).unwrap().find_map(|entry| {
+            let text = std::fs::read_to_string(entry.ok()?.path()).ok()?;
+            let records = text
+                .lines()
+                .map(serde_json::from_str::<serde_json::Value>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            records
+                .iter()
+                .any(|record| record["kind"] == "stopped" && record["complete"] == true)
+                .then_some(records)
+        });
+        if let Some(records) = finalized {
+            break records;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "recording did not finalize"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    for direction in ["upload", "download"] {
+        let captured: Vec<u8> = records
+            .iter()
+            .filter(|record| record["kind"] == "data" && record["direction"] == direction)
+            .flat_map(|record| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(record["bytes"].as_str().unwrap())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(captured, wire, "{direction}");
+    }
+    stop(client);
+    stop(server);
+}

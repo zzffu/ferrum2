@@ -146,6 +146,22 @@ pub(crate) fn validate_client_prepared(
     });
     let runtime = validate_runtime(raw.runtime)?;
     let udp = raw.udp.map(validate_udp).transpose()?;
+    let rocom = raw
+        .rocom
+        .map(|raw| {
+            if raw.record_path.as_os_str().is_empty() {
+                return Err(ConfigError::semantic(ConfigField::RocomRecordPath));
+            }
+            // Bound each connection file to 1 TiB, independent of platform usize width.
+            if !(65_536..=1_099_511_627_776).contains(&raw.max_bytes) {
+                return Err(ConfigError::semantic(ConfigField::RocomMaxBytes));
+            }
+            Ok(crate::model::RocomConfig {
+                record_path: raw.record_path,
+                max_bytes: raw.max_bytes,
+            })
+        })
+        .transpose()?;
     let logging = validate_logging(raw.logging)?;
     let mut listens: Vec<_> = inbounds.iter().map(|inbound| inbound.listen).collect();
     if let Some(dns) = &dns {
@@ -168,6 +184,7 @@ pub(crate) fn validate_client_prepared(
             route_network,
             tun: tun.map(|tun| tun.config),
             dns,
+            rocom,
             dns_route,
             runtime,
             udp,

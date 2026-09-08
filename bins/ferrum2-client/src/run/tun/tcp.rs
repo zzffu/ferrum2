@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ferrum2_core::TargetAddr;
-use ferrum2_runtime::{ProcessCancellation, relay_lifecycle};
+use ferrum2_runtime::ProcessCancellation;
 use ferrum2_shadowsocks::tokio::TokioFramed;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -118,19 +118,21 @@ pub(super) async fn run_tcp<IO>(
             };
             let mut opened = TokioFramed::new(opened);
             let mut process_cancelled = cancellation.clone();
-            let _ = relay_lifecycle(
-                &mut flow,
-                &mut opened,
-                context.runtime.idle_timeout,
-                &context.registry,
-                async {
-                    tokio::select! {
-                        () = process_cancelled.forced() => {},
-                        () = wait_for_session_cancellation(&session_cancellation) => {},
-                    }
-                },
-            )
-            .await;
+            let _ = context
+                .relay_tcp(
+                    &mut flow,
+                    &mut opened,
+                    // TcpFlow exposes only the original destination, not the application source.
+                    None,
+                    &target,
+                    async {
+                        tokio::select! {
+                            () = process_cancelled.forced() => {},
+                            () = wait_for_session_cancellation(&session_cancellation) => {},
+                        }
+                    },
+                )
+                .await;
         }
     }
 }
