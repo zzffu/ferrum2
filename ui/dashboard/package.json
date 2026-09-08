@@ -1,0 +1,34 @@
+{
+  "name": "@ferrum2/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "engines": {
+    "bun": "1.4.2"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "build": "bun run typecheck && vite build && bun scripts/embed.ts",
+    "build:check": "bun run typecheck && vite build && bun scripts/embed.ts --check",
+    "format": "prettier --write src scripts package.json tsconfig.json vite.config.ts index.html",
+    "format:check": "prettier --check src scripts package.json tsconfig.json vite.config.ts index.html"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router-dom": "7.18.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "5.1.4",
+    "prettier": "3.9.6",
+    "rollup": "4.59.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.1",
+    "vite-plugin-singlefile": "2.3.3"
+  }
+}

@@ -16,6 +16,23 @@ pub(crate) struct Cli {
     /// Resolve and compile all schema-v2 resources during validation.
     #[arg(long, requires = "check_config")]
     pub(crate) materialize: bool,
+
+    /// Serve the embedded dashboard on this loopback socket.
+    #[arg(
+        long,
+        value_name = "IP:PORT",
+        requires = "dashboard_token_file",
+        conflicts_with = "check_config"
+    )]
+    pub(crate) dashboard_listen: Option<std::net::SocketAddr>,
+
+    /// Private file containing a 32–256 character dashboard bearer token.
+    #[arg(long, value_name = "PATH", requires = "dashboard_listen")]
+    pub(crate) dashboard_token_file: Option<PathBuf>,
+
+    /// Expose sensitive connection endpoints in authenticated local snapshots.
+    #[arg(long, requires = "dashboard_listen")]
+    pub(crate) dashboard_details: bool,
 }
 
 /// Pure compile-target gate used before either offline success or runtime setup.

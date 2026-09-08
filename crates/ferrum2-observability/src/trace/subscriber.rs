@@ -1,6 +1,6 @@
 use tracing::Metadata;
 use tracing_subscriber::Layer as _;
-use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::filter::dynamic_filter_fn;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -56,12 +56,15 @@ const STRICT_ROUTE_TRACE_FIELDS: &[&str] =
 const INTERFACE_RESOLUTION_TRACE_FIELDS: &[&str] =
     &["event", "role", "stage", "source", "result", "cache"];
 
-/// Builds a caller-owned newline JSON subscriber without installing it globally.
-pub fn json_subscriber<W>(writer: W, max_level: LogLevel) -> impl tracing::Subscriber + Send + Sync
+/// Builds a caller-owned closed JSON subscriber; severity is sampled for every event.
+/// A dynamic severity source may change without widening the approved metadata policy.
+pub fn json_subscriber<W, L>(writer: W, max_level: L) -> impl tracing::Subscriber + Send + Sync
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+    L: Fn() -> LogLevel + Send + Sync + 'static,
 {
-    let filter = filter_fn(move |metadata| approved_trace_metadata(metadata, max_level));
+    let filter =
+        dynamic_filter_fn(move |metadata, _| approved_trace_metadata(metadata, max_level()));
     let format = tracing_subscriber::fmt::layer()
         .json()
         .with_writer(writer)

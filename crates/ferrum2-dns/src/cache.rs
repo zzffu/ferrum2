@@ -314,6 +314,12 @@ impl DnsCache {
         Ok(state.entry_count(now))
     }
 
+    /// Removes every cached answer atomically, retaining capacity and the observer.
+    /// Concurrent in-flight queries may populate the cache again after this returns.
+    pub fn clear(&self) -> Result<usize, DnsCacheError> {
+        Ok(self.lock()?.clear())
+    }
+
     fn insert(
         &self,
         key: DnsCacheKey,

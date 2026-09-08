@@ -97,6 +97,7 @@ final = "resolver"
     let registry = OwnerRegistry::new();
     let context = Arc::new(ClientContext {
         inbound: Socks5Inbound::new(),
+        dashboard: None,
         recorder: None,
         egress: Arc::new(ClientEgressEngine::new(
             outbounds,
@@ -198,6 +199,7 @@ final = "resolver"
     });
     let direct_context = Arc::new(ClientContext {
         inbound: Socks5Inbound::new(),
+        dashboard: None,
         recorder: None,
         egress: Arc::new(ClientEgressEngine::new(
             direct_outbounds,

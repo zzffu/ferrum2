@@ -122,10 +122,8 @@ pub(crate) fn run_prepared(prepared: PreparedServerV2) -> Result<(), RunError> {
                     Arc::clone(&network_sockets),
                 );
                 let materialized = materializer.materialize(prepared).await?;
-                let subscriber = json_subscriber(
-                    std::io::stderr,
-                    log_level(materialized.config().logging.level),
-                );
+                let level = log_level(materialized.config().logging.level);
+                let subscriber = json_subscriber(std::io::stderr, move || level);
                 if tracing::subscriber::set_global_default(subscriber).is_err() {
                     drop(materialized.into_validated_config());
                     return Err(RunError::StartupObservability);

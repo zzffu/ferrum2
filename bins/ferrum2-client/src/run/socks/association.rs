@@ -104,6 +104,8 @@ pub(super) async fn classify_udp_association<IO: AsyncRead + AsyncWrite + Unpin>
         match terminal {
             ClientTerminalRoute::Reject => return,
             ClientTerminalRoute::Route(plan) => {
+                let observed_target = context.dashboard.as_ref().map(|_| candidate.target.clone());
+                let observed_plan = context.dashboard.as_ref().map(|_| plan.clone());
                 let prepared = {
                     let preparing = context.egress.prepare_udp_for_ingress(
                         ClientRequestOrigin::Socks,
@@ -133,6 +135,19 @@ pub(super) async fn classify_udp_association<IO: AsyncRead + AsyncWrite + Unpin>
                 };
                 match admit_request(&mut endpoint, &mut prepared, context, routing, candidate) {
                     RequestDisposition::Admitted(first) => {
+                        endpoint.observation = context.observe(
+                            "udp",
+                            "socks5",
+                            endpoint.source_addr(),
+                            observed_target.as_ref(),
+                        );
+                        if let Some(plan) = &observed_plan {
+                            crate::run::context::observe_route(
+                                endpoint.observation.as_ref(),
+                                plan,
+                                route_scratch.selected_rule_index(),
+                            );
+                        }
                         relay_admitted(
                             &mut endpoint,
                             &mut prepared,
@@ -167,7 +182,7 @@ pub(super) async fn classify_udp_association<IO: AsyncRead + AsyncWrite + Unpin>
                     inbound,
                     &proxy,
                     candidate,
-                    context.runtime.idle_timeout,
+                    context,
                 )
                 .await
                 {

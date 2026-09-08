@@ -19,7 +19,7 @@ pub(super) fn bind_listener(
     socket.listen(backlog).map_err(|_| RunError::StartupBind)
 }
 
-pub(super) async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     #[cfg(windows)]
     {
         let Ok(mut ctrl_break) = tokio::signal::windows::ctrl_break() else {
@@ -39,7 +39,20 @@ pub(super) async fn shutdown_signal() {
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        // Without a working shutdown watcher, quiesce rather than run unmanaged.
+        let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        else {
+            return;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
     if tokio::signal::ctrl_c().await.is_err() {
         std::future::pending::<()>().await;
     }

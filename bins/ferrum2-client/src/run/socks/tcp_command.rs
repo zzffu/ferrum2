@@ -96,6 +96,7 @@ pub(super) async fn client_connection(
         initial_payload: _,
         reply,
     } = session;
+    let observation = context.observe("tcp", "socks5", peer_addr, Some(&target));
     let Ok(mut route_scratch) = routing.route_scratch() else {
         let _ = reply.failed(ConnectErrorKind::Other).await;
         return;
@@ -112,12 +113,26 @@ pub(super) async fn client_connection(
         return;
     };
     let plan = match terminal {
-        ClientTerminalRoute::Route(plan) => plan,
+        // Attribution is from this one selected path, never a second evaluation.
+        ClientTerminalRoute::Route(plan) => {
+            crate::run::context::observe_route(
+                observation.as_ref(),
+                &plan,
+                route_scratch.selected_rule_index(),
+            );
+            plan
+        }
         ClientTerminalRoute::Reject => {
+            if let Some(observation) = &observation {
+                observation.finish("rejected");
+            }
             let _ = reply.failed(ConnectErrorKind::PolicyDenied).await;
             return;
         }
         ClientTerminalRoute::HijackDns => {
+            if let Some(observation) = &observation {
+                observation.set_route(Some("hijack_dns".into()), None);
+            }
             let Some(proxy) = context
                 .dns
                 .as_ref()
@@ -140,12 +155,17 @@ pub(super) async fn client_connection(
                 &proxy,
                 context.runtime.idle_timeout,
                 cancellation.cancelled(),
+                observation.as_ref(),
             )
             .await;
             return;
         }
     };
     let opened = tokio::select! {
+        () = crate::run::context::observation_cancelled(observation.as_ref()) => {
+            if let Some(observation) = &observation { observation.finish("cancelled"); }
+            return;
+        },
         _ = cancellation.cancelled() => return,
         result = context.egress.open_tcp_for_ingress(
             ClientRequestOrigin::Socks,
@@ -160,6 +180,9 @@ pub(super) async fn client_connection(
     let flow = match opened {
         Ok(flow) => flow,
         Err(ClientOpenFailure::Plan(failure)) => {
+            if let Some(observation) = &observation {
+                observation.finish("connect_error");
+            }
             let kind = match failure {
                 ClientPlanFailure::Invalid => ConnectErrorKind::Other,
             };
@@ -167,11 +190,17 @@ pub(super) async fn client_connection(
             return;
         }
         Err(ClientOpenFailure::Connect(kind)) => {
+            if let Some(observation) = &observation {
+                observation.finish("connect_error");
+            }
             record_failure(&context, Stage::Relay, Reason::RelayIo, Outcome::Failed);
             let _ = reply.failed(kind).await;
             return;
         }
         Err(ClientOpenFailure::Protocol(error)) => {
+            if let Some(observation) = &observation {
+                observation.finish("protocol_error");
+            }
             let (stage, outcome, reason) = observation_for_error(error);
             record_failure(&context, stage, reason, outcome);
             let kind = match error {
@@ -184,6 +213,9 @@ pub(super) async fn client_connection(
             return;
         }
         Err(ClientOpenFailure::HandshakeTimeout) => {
+            if let Some(observation) = &observation {
+                observation.finish("handshake_timeout");
+            }
             record_failure(
                 &context,
                 Stage::Shadowsocks,
@@ -221,6 +253,7 @@ pub(super) async fn client_connection(
             peer_addr,
             &target,
             cancellation.cancelled(),
+            observation.as_ref(),
         )
         .await;
     context

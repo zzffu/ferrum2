@@ -270,12 +270,41 @@ pub struct SelectorControl {
     pub(super) state: Arc<SelectorState>,
 }
 
+/// Owned view of a selector and its immediate members from one locked snapshot.
+pub struct SelectorSnapshot {
+    pub name: String,
+    pub selected: usize,
+    pub members: Vec<String>,
+}
+
 impl SelectorControl {
     /// Constructs an empty selector control for direct, non-selector routes.
     pub fn empty() -> Self {
         Self {
             state: Arc::default(),
         }
+    }
+
+    /// Copies the graph's current immediate choices without changing its generation.
+    pub fn snapshot(&self) -> Vec<SelectorSnapshot> {
+        let _update = self
+            .state
+            .update
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.state
+            .selectors
+            .iter()
+            .map(|selector| SelectorSnapshot {
+                name: selector.tag.to_string(),
+                selected: selector.selected.load(Ordering::SeqCst),
+                members: selector
+                    .members
+                    .iter()
+                    .map(|member| member.tag.to_string())
+                    .collect(),
+            })
+            .collect()
     }
 
     /// Returns a selector's current immediate member tag.

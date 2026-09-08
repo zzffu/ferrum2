@@ -9,6 +9,33 @@ use super::super::{
 };
 
 #[test]
+fn clearing_a_shared_cache_removes_answers_and_preserves_reuse() {
+    let cache = DnsCache::try_new(NonZeroUsize::new(2).unwrap()).unwrap();
+    let shared = cache.clone();
+    let key = DnsCacheKey::new(
+        DnsServerId::new(0),
+        CanonicalDomain::new("clear.example").unwrap(),
+        DnsCacheQtype::A,
+        ResolverGeneration::new(1),
+    );
+    let now = Instant::now();
+    cache
+        .insert_negative(key.clone(), Duration::from_secs(60), now)
+        .unwrap();
+    assert_eq!(shared.clear(), Ok(1));
+    assert_eq!(cache.get(&key, now), Ok(None));
+    cache
+        .insert_negative(key.clone(), Duration::from_secs(120), now)
+        .unwrap();
+    assert_eq!(
+        shared.get(&key, now + Duration::from_secs(61)),
+        Ok(Some(DnsCacheAnswer::Negative))
+    );
+    assert_eq!(cache.entry_count(now + Duration::from_secs(121)), Ok(0));
+    assert_eq!(shared.clear(), Ok(0));
+}
+
+#[test]
 fn bounded_churn_preserves_fifo_and_exact_expiry_against_a_reference() {
     let keys: Vec<_> = (0..37)
         .map(|index| {

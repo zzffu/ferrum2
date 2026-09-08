@@ -277,7 +277,9 @@ impl ClientV2RuntimeRoot {
         }
     }
 
-    fn service(&self) -> Result<Arc<RuleSetRefreshService<Arc<dyn RuleSetDownloader>>>, RunError> {
+    pub(in crate::run) fn service(
+        &self,
+    ) -> Result<Arc<RuleSetRefreshService<Arc<dyn RuleSetDownloader>>>, RunError> {
         match &self.state {
             ClientRuntimeRootState::Prepared { service, .. } => Ok(Arc::clone(service)),
             ClientRuntimeRootState::Cleaned => Err(RunError::StartupProtocol),

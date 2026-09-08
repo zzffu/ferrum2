@@ -22,7 +22,7 @@ pub use model::{
     PreparedRuleSet, PreparedRuleSetDownloadMode, PreparedServerOutboundDescriptor,
     PreparedServerV2, RuleSetLoaderConfig,
 };
-pub use prepare::{prepare_client, prepare_server};
+pub use prepare::{prepare_client, prepare_client_source, prepare_server};
 pub use resources::{
     ClientV2Resources, CompiledRuleSetResource, ResolvedDnsEndpoint, ResolvedOutboundEndpoint,
     ServerV2Resources,

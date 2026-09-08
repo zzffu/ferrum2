@@ -41,11 +41,14 @@ fn indexed_continue_recomputes_active_fields_after_metadata_changes() {
             evaluation.next(RouteMetadata::new(None, None)),
             Some(RouteProgramAction::Continue(&"sniff")),
         );
+        assert_eq!(evaluation.selected_rule_index(), Some(0));
         let action = evaluation.next(RouteMetadata::new(protocol, Some(&detected)));
         if protocol.is_some() {
             assert_eq!(action, Some(RouteProgramAction::Terminal(&expected)));
+            assert_eq!(evaluation.selected_rule_index(), Some(64));
         } else {
             assert_eq!(action, Some(RouteProgramAction::Final(&expected)));
+            assert_eq!(evaluation.selected_rule_index(), None);
         }
     }
 }

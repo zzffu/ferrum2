@@ -249,6 +249,7 @@ pub struct RuleEvaluationScratch {
     candidates: Vec<u64>,
     matched: Vec<u64>,
     candidate_visits: usize,
+    pub(super) selected_rule: Option<usize>,
 }
 
 impl RuleEvaluationScratch {
@@ -274,6 +275,7 @@ impl RuleEvaluationScratch {
             candidates,
             matched,
             candidate_visits: 0,
+            selected_rule: None,
         })
     }
 
@@ -286,6 +288,12 @@ impl RuleEvaluationScratch {
     /// This is a deterministic benchmark and selectivity-regression seam.
     pub const fn candidate_visits(&self) -> usize {
         self.candidate_visits
+    }
+
+    /// Original ordered-rule index selected by the latest step; `None` for default egress.
+    /// The result survives evaluation drop and is reset when this scratch is reused.
+    pub const fn selected_rule_index(&self) -> Option<usize> {
+        self.selected_rule
     }
 
     pub(super) fn assert_words(&self, words: usize) {

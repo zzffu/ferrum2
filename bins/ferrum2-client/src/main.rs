@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod dashboard;
 mod run;
 
 use std::process::ExitCode;
@@ -19,6 +20,22 @@ fn main() -> ExitCode {
             return ExitCode::from(code as u8);
         }
     };
+    if let Some(listen) = cli.dashboard_listen {
+        let options = dashboard::Options {
+            listen,
+            token_file: cli
+                .dashboard_token_file
+                .expect("clap requires authentication"),
+            details: cli.dashboard_details,
+        };
+        return match dashboard::run(cli.config, options) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(code) => {
+                eprintln!("error[{code}] dashboard: management failed");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let prepared = match prepare_client(&cli.config) {
         Ok(prepared) => prepared,
         Err(error) => {

@@ -23,9 +23,16 @@ pub(super) async fn answer_tun_udp_dns(
         biased;
         () = forced.forced() => return false,
         () = services.session_cancellation.cancelled() => return false,
+        () = crate::run::context::observation_cancelled(services.observation.as_ref()) => {
+            if let Some(observation) = &services.observation { observation.finish("cancelled"); }
+            return false;
+        },
         () = wait_for_optional_udp_route_generation_change(generation.as_mut().map(|generation| &mut generation.changed)) => return false,
         response = proxy.answer(ProxyIngress::Ordinary(services.inbound), ProxyTransport::Udp, datagram.payload()) => response,
     };
+    if let Some(observation) = &services.observation {
+        observation.upload(datagram.payload().len());
+    }
     if !services.current(generation.as_deref()) {
         return false;
     }
@@ -39,7 +46,11 @@ pub(super) async fn answer_tun_udp_dns(
         if !services.current(generation.as_deref()) {
             return false;
         }
-        record_tun_udp_response_outcome(outcome);
+        if record_tun_udp_response_outcome(outcome)
+            && let Some(observation) = &services.observation
+        {
+            observation.download(response.len());
+        }
     }
     true
 }

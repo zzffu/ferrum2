@@ -21,6 +21,7 @@ pub(super) struct ClientRouting {
 
 pub(super) struct ClientContext {
     pub(super) inbound: Socks5Inbound,
+    pub(super) dashboard: Option<ferrum2_dashboard::Dashboard>,
     pub(super) recorder: Option<ferrum2_rocom::Recorder>,
     pub(super) egress: Arc<ClientEgressEngine>,
     #[cfg(test)]
@@ -33,8 +34,69 @@ pub(super) struct ClientContext {
 }
 
 impl ClientContext {
+    pub(super) fn observe(
+        &self,
+        protocol: &'static str,
+        inbound: &'static str,
+        source: Option<std::net::SocketAddr>,
+        target: Option<&ferrum2_core::TargetAddr>,
+    ) -> Option<ferrum2_dashboard::Connection> {
+        self.dashboard.as_ref().map(|dashboard| {
+            dashboard.begin(ferrum2_dashboard::ConnectionMetadata {
+                protocol,
+                inbound,
+                source: source.map(|source| source.to_string()),
+                target: target.map(render_target),
+            })
+        })
+    }
+
     /// Observes ordinary TCP only; routing and DNS hijack remain with ingress owners.
     pub(super) async fn relay_tcp<A, B, C>(
+        &self,
+        application: &mut A,
+        upstream: &mut B,
+        source: Option<std::net::SocketAddr>,
+        target: &ferrum2_core::TargetAddr,
+        cancellation: C,
+        observation: Option<&ferrum2_dashboard::Connection>,
+    ) -> Result<ferrum2_runtime::RelayStats, ferrum2_runtime::RelayFailure>
+    where
+        A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+        B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+        C: Future<Output = ()>,
+    {
+        if let Some(observation) = observation {
+            use ferrum2_dashboard::{Direction, ObservedIo};
+            let result = self
+                .relay_recorded(
+                    &mut ObservedIo::new(application, observation.clone(), Direction::Download),
+                    &mut ObservedIo::new(upstream, observation.clone(), Direction::Upload),
+                    source,
+                    target,
+                    async {
+                        tokio::select! {
+                            () = cancellation => {},
+                            () = observation.cancelled() => {},
+                        }
+                    },
+                )
+                .await;
+            observation.finish(match &result {
+                Ok(_) => "completed",
+                Err(failure) => match failure.kind {
+                    ferrum2_runtime::RelayRunError::Io => "io",
+                    ferrum2_runtime::RelayRunError::IdleTimeout => "idle_timeout",
+                    ferrum2_runtime::RelayRunError::Cancelled => "cancelled",
+                },
+            });
+            return result;
+        }
+        self.relay_recorded(application, upstream, source, target, cancellation)
+            .await
+    }
+
+    async fn relay_recorded<A, B, C>(
         &self,
         application: &mut A,
         upstream: &mut B,
@@ -85,5 +147,32 @@ impl ClientContext {
             },
         });
         result
+    }
+}
+
+pub(super) fn render_target(target: &ferrum2_core::TargetAddr) -> String {
+    match target.host() {
+        ferrum2_core::TargetHostRef::Ip(ip) => {
+            std::net::SocketAddr::new(ip, target.port().get()).to_string()
+        }
+        ferrum2_core::TargetHostRef::Domain(domain) => format!("{domain}:{}", target.port()),
+    }
+}
+
+pub(super) fn observe_route(
+    observation: Option<&ferrum2_dashboard::Connection>,
+    plan: &ferrum2_core::route::EgressPlanSnapshot,
+    rule_index: Option<usize>,
+) {
+    if let Some(observation) = observation {
+        let rule = rule_index.map_or_else(|| "final".to_owned(), |index| format!("rule[{index}]"));
+        observation.set_route(Some(rule), Some(format!("{:?}", plan.hops())));
+    }
+}
+
+pub(super) async fn observation_cancelled(observation: Option<&ferrum2_dashboard::Connection>) {
+    match observation {
+        Some(observation) => observation.cancelled().await,
+        None => std::future::pending().await,
     }
 }

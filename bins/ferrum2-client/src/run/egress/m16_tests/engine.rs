@@ -534,10 +534,9 @@ async fn m16_direct_pre_socket_and_m16_redaction_classify_without_side_effects()
         reason,
     );
     let trace = Arc::new(TraceCapture::default());
-    let subscriber = ferrum2_observability::json_subscriber(
-        Arc::clone(&trace),
-        ferrum2_observability::LogLevel::Trace,
-    );
+    let subscriber = ferrum2_observability::json_subscriber(Arc::clone(&trace), || {
+        ferrum2_observability::LogLevel::Trace
+    });
     let dispatch = tracing::Dispatch::new(subscriber);
     tracing::dispatcher::with_default(&dispatch, || {
         ferrum2_observability::emit(

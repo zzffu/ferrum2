@@ -20,6 +20,7 @@ pub(in crate::run::socks) struct SocksUdpEndpoint {
     source: SocksUdpSourcePin,
     wire: Vec<u8>,
     last_valid: Instant,
+    pub(in crate::run::socks) observation: Option<ferrum2_dashboard::Connection>,
     #[cfg(test)]
     io_fault: Option<Arc<UdpIoFaultPlan>>,
 }
@@ -34,6 +35,10 @@ pub(in crate::run::socks) enum SocksUdpPacket<'a> {
 }
 
 impl SocksUdpEndpoint {
+    pub(in crate::run::socks) fn source_addr(&self) -> Option<SocketAddr> {
+        self.source.destination().ok()
+    }
+
     pub(in crate::run::socks) async fn bind<F, Fut>(
         local_ip: Ipv4Addr,
         peer_ip: IpAddr,
@@ -48,6 +53,7 @@ impl SocksUdpEndpoint {
             socket: bind(SocketAddrV4::new(local_ip, 0).into()).await?,
             source: SocksUdpSourcePin::new(peer_ip, requested_port),
             wire: vec![0; MAX_SOCKS_UDP_DATAGRAM_BYTES],
+            observation: None,
             last_valid: Instant::now(),
             #[cfg(test)]
             io_fault: None,
