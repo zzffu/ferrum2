@@ -116,6 +116,11 @@ Show configured listeners/upstreams, current policy and available request/cache 
 
 Use the existing closed JSON tracing subscriber with a bounded tee, preserving stderr redaction and configured severity across restarts. Closed supervisor reports are also retained for startup/cleanup diagnosis. Export version, state, fixed-category metrics and closed logs, excluding source configuration, connection details, captures and keys. TUN diagnostics are read-only. Recording shows configured state and per-file budget; recording failures follow the existing explicit-shutdown reporting contract. No capture/file/key browsing or download is added.
 
+The shared subscriber applies its metadata and live-severity predicate as a global filter, before
+event fields are evaluated. Per-layer rejection is not the privacy boundary: a dependency can emit
+nested tracing events while constructing a field, resetting the outer event's per-layer rejection
+state. Foreign events must remain excluded even under nested dispatch and after severity changes.
+
 ### Configuration/settings
 
 Read the one configured file, not arbitrary paths. Raw source is a separate explicit sensitive operation. Offline validate reuses the production parser and size limit. Save checks a source revision to detect concurrent external edits, validates first, then atomically replaces the same file using a private temporary file. Preserve restrictive file permissions. Redacted text is never round-tripped into the actual configuration.

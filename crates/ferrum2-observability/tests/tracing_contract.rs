@@ -248,6 +248,23 @@ fn changing_severity_does_not_cache_old_callsite_interest_or_admit_foreign_event
 }
 
 #[test]
+fn nested_foreign_events_cannot_leak_rejected_outer_fields() {
+    let capture = Captured::default();
+    let subscriber = json_subscriber(capture.clone(), || LogLevel::Info);
+    tracing::dispatcher::with_default(&Dispatch::new(subscriber), || {
+        tracing::debug!(
+            target: "foreign_dependency",
+            message = {
+                tracing::trace!(target: "foreign_dependency", "nested decoding event");
+                "PRIVATE_QUERY_SENTINEL"
+            },
+        );
+    });
+
+    assert_eq!(capture.text(), "");
+}
+
+#[test]
 fn sniff_trace_has_one_exact_closed_tuple_and_no_identity_channel() {
     let capture = Captured::default();
     let subscriber = json_subscriber(capture.clone(), move || LogLevel::Trace);

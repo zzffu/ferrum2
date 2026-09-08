@@ -1,5 +1,4 @@
 use tracing::Metadata;
-use tracing_subscriber::Layer as _;
 use tracing_subscriber::filter::dynamic_filter_fn;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -76,9 +75,10 @@ where
         .with_thread_names(false)
         .flatten_event(true)
         .with_current_span(false)
-        .with_span_list(false)
-        .with_filter(filter);
-    tracing_subscriber::registry().with(format)
+        .with_span_list(false);
+    // Reject events before evaluating their fields, which may emit nested events.
+    // Per-layer filtering can lose the outer rejection when nested dispatch resets its state.
+    tracing_subscriber::registry().with(filter).with(format)
 }
 
 fn approved_trace_metadata(metadata: &Metadata<'_>, max_level: LogLevel) -> bool {

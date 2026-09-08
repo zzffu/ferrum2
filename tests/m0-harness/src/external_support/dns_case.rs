@@ -294,24 +294,35 @@ pub(super) fn run_external_dns_case(case: DnsCaseSpec) {
         socks_address.to_string(),
         shadowsocks_address.to_string(),
     ];
-    for sentinel in [
-        "qualification.test",
-        "resolver.test",
-        "dns-hop",
-        "dns-in",
-        "server-dns-direct",
-        "server-app-direct",
+    for (kind, sentinel) in [
+        ("query_domain", "qualification.test"),
+        ("tls_server_name", "resolver.test"),
+        ("outbound_tag", "dns-hop"),
+        ("inbound_tag", "dns-in"),
+        ("outbound_tag", "server-dns-direct"),
+        ("outbound_tag", "server-app-direct"),
     ]
     .into_iter()
-    .chain(addresses.iter().map(String::as_str))
-    .chain(server_target_sentinel.iter().map(String::as_str))
-    {
-        assert!(
-            !client_stderr.contains(sentinel)
-                && !server_stderr.contains(sentinel)
-                && !coredns_stderr.contains(sentinel),
-            "DNS child stderr leaked a sentinel"
-        );
+    .chain(
+        addresses
+            .iter()
+            .map(|address| ("socket_address", address.as_str())),
+    )
+    .chain(
+        server_target_sentinel
+            .iter()
+            .map(|target| ("server_target", target.as_str())),
+    ) {
+        for (child, stderr) in [
+            ("client", &client_stderr),
+            ("server", &server_stderr),
+            ("coredns", &coredns_stderr),
+        ] {
+            assert!(
+                !stderr.contains(sentinel),
+                "DNS child stderr leaked a sentinel: child={child}, kind={kind}"
+            );
+        }
     }
     for address in [
         upstream_address,
