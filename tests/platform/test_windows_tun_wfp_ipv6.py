@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OWNERS = ROOT / "tools/powershell/Ferrum2.Qualification.Host"
 HARNESS = r'''
 param([string]$Owners)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $ErrorActionPreference = 'Stop'
 $PSModuleAutoLoadingPreference = 'None'
 Import-Module Microsoft.PowerShell.Management
@@ -41,9 +42,9 @@ $rows = foreach ($identity in @(Get-Ferrum2QualificationStrictFilterIdentities -
     "<item><displayData><name>$($identity.name)</name></displayData><subLayerKey>$script:QualificationSublayerKey</subLayerKey><filterId>1</filterId><filterKey>$($identity.key)</filterKey><filterCondition>$conditions</filterCondition></item>"
 }
 $conditions = $app + $luid + (Condition 'IP_PROTOCOL' 'FWP_UINT8' 'uint8' '6') +
-    (Condition 'IP_LOCAL_ADDRESS' 'FWP_BYTE_ARRAY16_TYPE' 'byteArray16' 'fd00012345abcdef0000000000000002') +
+    (Condition 'IP_LOCAL_ADDRESS' 'FWP_BYTE_ARRAY16_TYPE' 'byteArray16' 'fd00:123:45ab:cdef::2') +
     (Condition 'IP_LOCAL_PORT' 'FWP_UINT16' 'uint16' '50000') +
-    (Condition 'IP_REMOTE_ADDRESS' 'FWP_BYTE_ARRAY16_TYPE' 'byteArray16' 'fd00012345abcdef0000000000000001')
+    (Condition 'IP_REMOTE_ADDRESS' 'FWP_BYTE_ARRAY16_TYPE' 'byteArray16' 'fd00:123:45ab:cdef::1')
 $text = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' + '<wfpstate><items>' + ($rows -join '') + @"
 <item><displayData><name>Ferrum2 strict route</name></displayData><subLayerKey>$script:QualificationSublayerKey</subLayerKey><weight>32767</weight></item>
 <item><displayData><name>Ferrum2 strict route dynamic session</name></displayData><sessionKey>$script:QualificationSessionKey</sessionKey><processId>321</processId></item>
@@ -72,24 +73,26 @@ class WindowsTunWfpIpv6Tests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_native_hex_bytes_are_exact_and_canonical(self) -> None:
+    def test_native_ipv6_literals_are_exact_and_canonical(self) -> None:
         self.run_script(r'''
 $witness = Read-Ingress $text
 Assert-True ($witness.address_family -ceq 'IPv6' -and $witness.filter.layer -ceq 'FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6' -and $witness.peer_address -ceq $network.peer_address) 'selected family lost'
-$spaced = Read-Ingress ($text.Replace('fd00012345abcdef0000000000000002', 'FD00 0123 45AB CDEF 0000 0000 0000 0002'))
-$local = @($spaced.filter.conditions | Where-Object field_key -CEQ 'FWPM_CONDITION_IP_LOCAL_ADDRESS')[0]
+$expanded = Read-Ingress ($text.Replace('fd00:123:45ab:cdef::2', 'FD00:0123:45AB:CDEF:0000:0000:0000:0002'))
+$local = @($expanded.filter.conditions | Where-Object field_key -CEQ 'FWPM_CONDITION_IP_LOCAL_ADDRESS')[0]
 Assert-True ($local.type -ceq 'FWP_BYTE_ARRAY16_TYPE' -and $local.value -ceq 'fd00012345abcdef0000000000000002') 'native bytes not canonicalized'
 ''')
 
     def test_ipv6_wrong_bytes_family_layer_peer_and_unknown_forms_rejected(self) -> None:
         mutations = [
-            ("fd00012345abcdef0000000000000002", "fd00012345abcdef0000000000000003"),
-            ("fd00012345abcdef0000000000000001", "fd00012345abcdef0000000000000009"),
+            ("fd00:123:45ab:cdef::2", "fd00:123:45ab:cdef::3"),
+            ("fd00:123:45ab:cdef::1", "fd00:123:45ab:cdef::9"),
             ("FWP_BYTE_ARRAY16_TYPE", "FWP_UINT32"),
             ("FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6", "FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4"),
-            ("fd00012345abcdef0000000000000002", "42535295865117307932921825928971026434"),
-            ("fd00012345abcdef0000000000000002", "fd00:123:45ab:cdef::2"),
-            ("fd00012345abcdef0000000000000002", "<item>fd00012345abcdef0000000000000002</item>"),
+            ("fd00:123:45ab:cdef::2", "fd00012345abcdef0000000000000002"),
+            ("fd00:123:45ab:cdef::2", "127.0.0.1"),
+            ("fd00:123:45ab:cdef::2", "::ffff:127.0.0.1"),
+            ("fd00:123:45ab:cdef::2", "fd00:123:45ab:cdef::2%0"),
+            ("fd00:123:45ab:cdef::2", "<item>fd00:123:45ab:cdef::2</item>"),
             ("byteArray16", "unknownArray"),
         ]
         for old, new in mutations:

@@ -118,11 +118,16 @@ function Get-Ferrum2QualificationWfpTypedValue {
             @($arrays[0].SelectNodes("./*")).Count -ne 0) {
             throw "host qualification $Identity WFP IPv6 byte array form is unknown"
         }
-        $hex = $arrays[0].InnerText.Trim() -replace '\s', ''
-        if ($hex -cnotmatch '\A[0-9a-fA-F]{32}\z') {
-            throw "host qualification $Identity WFP IPv6 byte array must contain exactly sixteen bytes"
+        # netsh renders this sixteen-byte value as an IPv6 literal, not a hex dump.
+        $literal = $arrays[0].InnerText.Trim()
+        $address = $null
+        if (-not [Net.IPAddress]::TryParse($literal, [ref]$address) -or
+            $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetworkV6 -or
+            $address.IsIPv4MappedToIPv6 -or $literal.Contains('%')) {
+            throw "host qualification $Identity WFP IPv6 byte array must be an unscoped IPv6 literal"
         }
-        return [pscustomobject][ordered]@{ type = 'FWP_BYTE_ARRAY16_TYPE'; value = $hex.ToLowerInvariant() }
+        $hex = [Convert]::ToHexString($address.GetAddressBytes()).ToLowerInvariant()
+        return [pscustomobject][ordered]@{ type = 'FWP_BYTE_ARRAY16_TYPE'; value = $hex }
     }
     $valueNodes = if ($typeNode.InnerText.Trim() -ceq 'FWP_BYTE_BLOB_TYPE') {
         @($Node.SelectNodes(".//*[local-name()='byteBlob']/*[local-name()='data']"))

@@ -85,8 +85,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/WfpEvidence.ps1",
-      "bytes": 32095,
-      "sha256": "28ae5135dfc2433c02223bafefc505a7b012cf337199eb2186992fa1a8a29349"
+      "bytes": 32430,
+      "sha256": "2f1d6821515681418fa1874f0ab9c20834faeaab1bfbaf698990c479a2e1b561"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/WorkloadEvidence.ps1",

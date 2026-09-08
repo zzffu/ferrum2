@@ -91,6 +91,9 @@ candidate application ID, TCP protocol, run-owned TUN LUID, exact listener addre
 port, and exact synthetic peer. The product's WFP session and sublayer remain process-owned and
 dynamic. Runner-owned firewall rules are separate: they use Windows PersistentStore and must be
 deleted by normal cleanup or recovery, not mistaken for kernel-dynamic rules.
+IPv6 address conditions retain the native `FWP_BYTE_ARRAY16_TYPE` type. The decoder parses netsh's
+IPv6-literal representation and compares all sixteen network-order bytes against the exact owned
+local address and peer; an IPv4 type, scoped/mapped address or unknown XML form fails closed.
 
 Windows NetSecurity rejects IPv6 `::1` firewall address scopes. IPv6 therefore installs six real
 rules: two exact ULA support rules, one exact TUN client-ingress rule per product lifetime, and
