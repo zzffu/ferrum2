@@ -3,7 +3,7 @@
 ## 状态与范围
 
 设计基线：`e1f103015d38892a62b184511b1e596e2e55b8d3`。
-系统 TCP 已完成原子切换，Windows IPv4 宿主机正确性资格已通过；本文件保留设计基线与验收合同，并在末节记录实施证据。尚未进行新旧实现的性能对比。
+系统 TCP 已完成原子切换。末节保留的历史资格只对应其指定提交，不能证明当前源码；现行持续传输、重置和自动防火墙规则合同见 [Windows TUN 资格指南](../windows-tun-qualification.md)，内部性能见 [TUN-only 基准](../performance-evidence.md#tun-only-mock-io-performance)。
 
 已确认需求：
 
@@ -131,6 +131,8 @@ Interface 的行为合同：
 - shutdown 成功表示 Windows 接受写半关闭，不再承诺“FIN 已经被 Ferrum2 写入 Wintun”。
   原来依赖 smoltcp FIN 发包时刻的测试不应重新钉到另一个实现时刻。
 - drop、timeout、reset 和 owner 退出都释放实际 socket；仅释放计数器不算关闭。
+- generation fence 对仍拥有的系统 socket 使用 abortive close；正常 drop 与半关闭不因此变成 abort。
+  旧 tuple／ingress guard 保留到内核 RST 成功送回应用；历史 FIN 不能满足新 reset 的通知义务。
 - 连接数／OwnerRegistry lease 跟随真实资源生命周期，不因 pending publish 提前归零。
 - 保留原始目标和现有路由身份；不引入与用户需求无关的进程识别或新匹配字段。
 
@@ -159,9 +161,10 @@ TCP 映射不能照搬 UDP 的 idle-only 回收。
 ResetNetwork 顺序：
 
 1. 停止新准入、暂停正常包轮询，fence 当前 generation 及所有公开／待发布流。
-2. 取消 listener accept 工作；通过既有 reset barrier 取消／排空 TCP handlers，
-   关闭旧 socket，join 实际工作，退役旧映射与输出。只 abort task 而未 join 不算完成。
-3. 按既有合同清理 UDP／分片 generation 状态；保持 adapter、受管路由和 strict-route WFP 身份。
+2. 在旧映射与 ingress guard 仍有效时，有界地转译、送出内核关闭报文；不接纳新连接或应用 payload，
+   不伪造 TCP 序号。未实际送达不能发布 reset 完成，ring-full 不重试。
+3. 停止并 join 旧 listener 工作，撤销 ingress guard，再通过既有 reset barrier 取消／排空 handlers、
+   退役旧 TCP／UDP／分片状态；保持 adapter、受管路由及 strict-route WFP 身份。
 4. 刷新接口快照，重新验证内部 peer 路由，准备新 epoch 的 listeners 和映射表。
 5. 现有 stack/router/outbound/inbound hooks 全部接受新 generation 后恢复准入。
 
@@ -175,8 +178,8 @@ listener 创建、第二地址族绑定或任务启动失败必须回滚已经�
 会给当前可执行文件添加所有 profile 的入站 TCP allow 规则。
 Ferrum2 不照搬这种应用级宽泛放行，也不关闭防火墙、不修改默认 action。
 
-[Windows TUN 资格合同](../windows-tun-qualification.md#safety-boundary)将随实施更新，
-只增加受管 TCP listener 所需的临时入站放行授权，不允许任意持久防火墙规则。
+[Windows TUN 资格合同](../windows-tun-qualification.md#safety-boundary)保留严格限定的产品动态 WFP 放行，
+并在明确授权的测试运行中管理本轮 EXE 对应的窄范围 Windows Firewall 规则；不允许任意永久例外。
 现有 strict_route 不能被当作已具备 listener 入站放行能力；
 listener 绑定成功不证明 Wintun 注入的连接能够通过实际入站过滤。
 
@@ -197,6 +200,11 @@ weight 必须读回，进程终止自动释放，正常退出显式关闭。针�
 不能绕过更高优先级阻断、callout veto 或其他层策略；受策略阻止必须报告真实失败，
 不得扩大匹配范围或关闭防火墙。详见
 [Windows WFP action arbitration](https://learn.microsoft.com/en-us/windows/win32/fwp/filter-arbitration)。
+
+资格 runner 的测试规则与产品 WFP session 是不同的所有权：前者在启动新路径 EXE 前配置，
+按专用地址、协议、端口及接口限定；TUN 尚未创建时采用记录在账本里的两阶段接口绑定。
+保存接口名称／GUID／LUID，清理只接受这些已验证身份。规则必须撤销并独立读回为零，
+不得靠复用旧授权、点击弹窗、关闭通知或修改已有规则让测试通过。
 
 ## 模块所有权与 clean cutover
 
@@ -248,7 +256,7 @@ UDP 相关行为测试保留，调用方仅做公共构造和时钟类型迁移�
 普通测试不得创建真实 adapter、修改路由、DNS、WFP 或防火墙。
 没有真实执行的项目必须明确标记未验证，不能写成已完成资格。
 
-## 实施与验证结果
+## 历史实施与验证结果
 
 2026-09-07 完成以下分阶段提交：
 
@@ -296,7 +304,6 @@ TUN／Windows platform 两个安全 library suite 共 211 passed；普通 worksp
 768 passed、5 ignored；client 仅编译测试。Python 分别 144／9 passed。
 生成的 reset selector 配置也已通过真实 client 的 `--check-config`，该检查不创建网络资源。
 
-边界仍然成立：IPv6 仅有确定性包／状态覆盖，未作真实宿主机资格；没有吞吐、CPU 或延迟
-成对测量，不宣称提速。本机包含操作员手动允许的防火墙应用规则，runner 未创建或修改这些
-持久规则，不承诺其他宿主策略下没有首次弹窗。未引入固定路径安装器、安装状态文件或新的
-二进制路径参数；最终使用原有公开 runner。
+上述历史运行没有新旧实现的吞吐、CPU 或延迟对比，也没有证明其他宿主策略或真实 IPv6。
+当时存在操作员手动允许的防火墙规则。当前资格已改为按每轮 EXE 路径自动管理窄范围测试规则，
+并要求规则零残留；历史报告不能替代这套新合同的完整运行证据。

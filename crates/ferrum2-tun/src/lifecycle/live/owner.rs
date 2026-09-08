@@ -856,8 +856,16 @@ pub(crate) fn owner_main(
                 session_exit = SessionExit::Terminal(OwnerExit::RuntimeFailed);
             } else {
                 tcp_epoch_stop_attempted = true;
+                let notified = super::tcp_epoch::drain_fenced(
+                    &mut stack,
+                    &mut adapter,
+                    supervisor_origin,
+                    &events,
+                );
                 if stop_tcp_epoch(&mut stack, &mut adapter).is_err() {
                     session_exit = SessionExit::Terminal(OwnerExit::CleanupFailed);
+                } else if notified.is_err() {
+                    session_exit = SessionExit::Terminal(OwnerExit::RuntimeFailed);
                 } else {
                     session_cancel_handle.cancel();
                     match complete_ordinary_reset(OrdinaryResetRequest {
@@ -898,13 +906,28 @@ pub(crate) fn owner_main(
         {
             session_exit = SessionExit::Terminal(OwnerExit::RuntimeFailed);
         }
+        session_cancel_handle.cancel();
+        if !tcp_epoch_stop_attempted {
+            let notified = super::tcp_epoch::drain_fenced(
+                &mut stack,
+                &mut adapter,
+                supervisor_origin,
+                &events,
+            );
+            if stop_tcp_epoch(&mut stack, &mut adapter).is_err() {
+                session_exit = SessionExit::Terminal(OwnerExit::CleanupFailed);
+            } else if notified.is_err()
+                && !matches!(
+                    session_exit,
+                    SessionExit::Terminal(OwnerExit::CleanupFailed)
+                )
+            {
+                session_exit = SessionExit::Terminal(OwnerExit::RuntimeFailed);
+            }
+        }
         let teardown_now =
             i64::try_from(supervisor_origin.elapsed().as_millis()).unwrap_or(i64::MAX);
         let _ = stack.expire_deadlines(teardown_now);
-        session_cancel_handle.cancel();
-        if !tcp_epoch_stop_attempted && stop_tcp_epoch(&mut stack, &mut adapter).is_err() {
-            session_exit = SessionExit::Terminal(OwnerExit::CleanupFailed);
-        }
         let response_drop_reason =
             if underlay_failed || matches!(session_exit, SessionExit::Terminal(_)) {
                 UdpResponseDropReason::OwnerFatal

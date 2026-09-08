@@ -1,18 +1,25 @@
 use std::io;
-use std::net::{Shutdown, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "benchmark"
+))]
 use ferrum2_runtime::OwnerRegistry;
 use ferrum2_runtime::TunTcpFlowOwner;
-use socket2::SockRef;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+#[cfg(test)]
 use tokio::net::TcpStream;
 
 use crate::OwnerWake;
+
+mod socket;
+pub(crate) use socket::FlowSocket;
 
 /// One non-cloneable application-side TUN TCP stream with an immutable original target.
 pub struct TcpFlow {
@@ -118,13 +125,13 @@ impl AsyncWrite for TcpFlow {
         if shared.write_shutdown.swap(true, Ordering::AcqRel) {
             return Poll::Ready(Ok(()));
         }
-        let socket = shared.stream.lock().expect("TUN TCP flow socket");
-        let Some(stream) = socket.as_ref() else {
+        let mut socket = shared.stream.lock().expect("TUN TCP flow socket");
+        let Some(stream) = socket.as_mut() else {
             return Poll::Ready(Err(connection_reset()));
         };
-        let result = SockRef::from(stream).shutdown(Shutdown::Write);
+        let result = stream.shutdown(_context);
         if shared.valid.load(Ordering::Acquire) {
-            Poll::Ready(result)
+            result
         } else {
             Poll::Ready(Err(connection_reset()))
         }
@@ -140,16 +147,24 @@ impl Drop for TcpFlow {
     }
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "benchmark"
+))]
 /// Owner-side lease for fencing and closing the real system socket.
 pub(crate) struct TcpSocketLease {
     shared: Arc<FlowShared>,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "benchmark"
+))]
 impl TcpSocketLease {
-    pub(crate) fn fence(&self) {
-        self.shared.invalidate();
+    pub(crate) fn fence(&self) -> io::Result<()> {
+        self.shared.invalidate()
     }
 
     pub(crate) fn flow_dropped(&self) -> bool {
@@ -161,8 +176,12 @@ impl TcpSocketLease {
 }
 
 struct FlowShared {
-    stream: Mutex<Option<TcpStream>>,
-    #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+    stream: Mutex<Option<FlowSocket>>,
+    #[cfg(any(
+        all(windows, target_arch = "x86_64", feature = "live-backend"),
+        test,
+        feature = "benchmark"
+    ))]
     generation: u64,
     valid: AtomicBool,
     write_shutdown: AtomicBool,
@@ -206,17 +225,30 @@ impl FlowShared {
 
     fn close_socket(&self) {
         if let Some(stream) = self.stream.lock().expect("TUN TCP flow socket").take() {
-            let _ = SockRef::from(&stream).shutdown(Shutdown::Both);
+            stream.close();
         }
         self.registry_owner
             .lock()
             .expect("TUN TCP flow registry owner")
             .take();
     }
-    #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
-    fn invalidate(&self) {
+    #[cfg(any(
+        all(windows, target_arch = "x86_64", feature = "live-backend"),
+        test,
+        feature = "benchmark"
+    ))]
+    fn invalidate(&self) -> io::Result<()> {
         self.valid.store(false, Ordering::Release);
-        self.close_socket();
+        let result = self
+            .stream
+            .lock()
+            .expect("TUN TCP flow socket")
+            .take()
+            .map_or(Ok(()), FlowSocket::abort);
+        self.registry_owner
+            .lock()
+            .expect("TUN TCP flow registry owner")
+            .take();
         let wakers = {
             let mut wakers = self.wakers.lock().expect("TUN TCP flow wakers");
             [wakers.read.take(), wakers.write.take()]
@@ -225,6 +257,7 @@ impl FlowShared {
             waker.wake();
         }
         self.owner_wake.signal();
+        result
     }
 
     fn map_io_error(&self, error: io::Error) -> io::Error {
@@ -245,7 +278,7 @@ impl Drop for FlowShared {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
         {
-            let _ = SockRef::from(&stream).shutdown(Shutdown::Both);
+            stream.close();
         }
         self.registry_owner
             .get_mut()
@@ -260,16 +293,20 @@ struct FlowWakers {
     write: Option<Waker>,
 }
 
-#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "benchmark"
+))]
 pub(crate) fn tcp_flow_from_stream(
-    stream: TcpStream,
+    stream: impl Into<FlowSocket>,
     target: SocketAddr,
     generation: u64,
     registry: &OwnerRegistry,
     owner_wake: OwnerWake,
 ) -> (TcpFlow, TcpSocketLease) {
     let shared = Arc::new(FlowShared {
-        stream: Mutex::new(Some(stream)),
+        stream: Mutex::new(Some(stream.into())),
         generation,
         valid: AtomicBool::new(true),
         write_shutdown: AtomicBool::new(false),
@@ -402,6 +439,120 @@ mod tests {
         assert_eq!(&byte, b"b");
     }
 
+    async fn exhaust_write_capacity(flow: &mut super::TcpFlow) -> (usize, Arc<ReadinessWake>) {
+        {
+            let socket = flow.shared.stream.lock().expect("socket");
+            socket
+                .as_ref()
+                .expect("live socket")
+                .set_send_buffer_size(4096)
+                .expect("bounded socket send buffer");
+        }
+        flow.write_all(b"x")
+            .await
+            .expect("initial writable transition");
+        let wake = Arc::new(ReadinessWake(tokio::sync::Notify::new()));
+        let waker = Waker::from(Arc::clone(&wake));
+        let mut context = Context::from_waker(&waker);
+        let block = [b'x'; 16384];
+        let mut accepted = 1;
+        loop {
+            match tokio::io::AsyncWrite::poll_write(Pin::new(&mut *flow), &mut context, &block) {
+                Poll::Ready(Ok(count)) => {
+                    assert!(count > 0);
+                    accepted += count;
+                    assert!(
+                        accepted < 64 * 1024 * 1024,
+                        "bounded kernel queue must backpressure"
+                    );
+                }
+                Poll::Ready(Err(error)) => panic!("socket write: {error}"),
+                Poll::Pending => return (accepted, wake),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn exhausted_write_readiness_recovers_after_peer_drains() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (mut flow, mut peer, _lease) =
+                tcp_flow_for_test("192.0.2.1:443".parse().expect("target"))
+                    .await
+                    .expect("flow");
+            let (accepted, wake) = exhaust_write_capacity(&mut flow).await;
+            let mut received = vec![0; accepted];
+            peer.read_exact(&mut received)
+                .await
+                .expect("drain bounded socket queue");
+            assert!(received.iter().all(|byte| *byte == b'x'));
+            wake.0.notified().await;
+            flow.write_all(b"recovered")
+                .await
+                .expect("write after capacity returns");
+            flow.shutdown().await.expect("FIN follows recovered bytes");
+            let mut remainder = Vec::new();
+            peer.read_to_end(&mut remainder)
+                .await
+                .expect("peer observes FIN");
+            assert_eq!(remainder, b"recovered");
+            peer.write_all(b"duplex")
+                .await
+                .expect("reverse half remains live");
+            let mut response = [0; 6];
+            flow.read_exact(&mut response)
+                .await
+                .expect("read after write half close");
+            assert_eq!(&response, b"duplex");
+        })
+        .await
+        .expect("reactor must recover without a timer retry");
+    }
+
+    #[tokio::test]
+    async fn fence_wakes_a_capacity_blocked_writer_and_prevents_revival() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (mut flow, mut peer, lease) =
+                tcp_flow_for_test("192.0.2.1:443".parse().expect("target"))
+                    .await
+                    .expect("flow");
+            let (_, wake) = exhaust_write_capacity(&mut flow).await;
+            // Consume any coalesced reactor wake before registering the fence witness.
+            let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+            let waker = Waker::from(Arc::clone(&flag));
+            let mut context = Context::from_waker(&waker);
+            loop {
+                match tokio::io::AsyncWrite::poll_write(
+                    Pin::new(&mut flow),
+                    &mut context,
+                    &[b'x'; 16384],
+                ) {
+                    Poll::Pending => break,
+                    Poll::Ready(Ok(count)) => assert!(count > 0),
+                    Poll::Ready(Err(error)) => panic!("socket write: {error}"),
+                }
+            }
+            flag.0.store(false, Ordering::Release);
+            lease.fence().expect("abortive generation fence");
+            assert!(
+                flag.0.load(Ordering::Acquire),
+                "fence must wake pending writer"
+            );
+            assert_eq!(
+                flow.write(b"late").await.expect_err("fenced write").kind(),
+                io::ErrorKind::ConnectionReset
+            );
+            let mut queued = Vec::new();
+            let error = peer
+                .read_to_end(&mut queued)
+                .await
+                .expect_err("peer observes reset without draining before fence");
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+            drop(wake);
+        })
+        .await
+        .expect("bounded fence transition");
+    }
+
     #[tokio::test]
     async fn dropping_flow_closes_the_real_socket_even_while_owner_lease_exists() {
         let (flow, mut peer, _lease) = tcp_flow_for_test("192.0.2.1:443".parse().expect("target"))
@@ -428,9 +579,15 @@ mod tests {
             Poll::Pending
         ));
 
-        lease.fence();
+        lease.fence().expect("abortive generation fence");
         assert!(wake.0.load(Ordering::Acquire), "pending read was not woken");
-        assert_eq!(peer.read(&mut byte).await.expect("peer EOF after fence"), 0);
+        assert_eq!(
+            peer.read(&mut byte)
+                .await
+                .expect_err("peer reset after fence")
+                .kind(),
+            io::ErrorKind::ConnectionReset
+        );
         let error = flow.read(&mut byte).await.expect_err("fenced read");
         assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
         let error = flow.write(b"x").await.expect_err("fenced write");

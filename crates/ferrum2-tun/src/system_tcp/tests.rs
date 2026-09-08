@@ -26,7 +26,7 @@ fn ipv4_options_and_ipv6_extension_offsets_round_trip_with_valid_checksums() {
     let quarantine = Arc::new(Mutex::new(PortQuarantine::default()));
     let (mut system, _flows) = test_system(4, 60_000, Arc::clone(&quarantine));
     system
-        .configure_bindings_for_test(
+        .configure_packet_bindings(
             (
                 Some((LOCAL_V4, 30)),
                 Some(("2001:db8::2".parse().expect("IPv6 local"), 126)),
@@ -99,7 +99,7 @@ fn same_source_port_to_distinct_targets_uses_distinct_reverse_identities() {
     let quarantine = Arc::new(Mutex::new(PortQuarantine::default()));
     let (mut system, _flows) = test_system(2, 60_000, quarantine);
     system
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect("test binding");
 
     let mut https = ipv4_syn(443, 1);
@@ -140,7 +140,7 @@ fn unknown_reverse_tuple_is_rejected_without_mutation() {
     let quarantine = Arc::new(Mutex::new(PortQuarantine::default()));
     let (mut system, _flows) = test_system(1, 60_000, quarantine);
     system
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect("test binding");
     let mut packet = ipv4_syn(443, 1);
     packet[12..16].copy_from_slice(&LOCAL_V4.octets());
@@ -165,7 +165,7 @@ fn exhausted_translation_identity_space_rejects_admission() {
     let quarantine = Arc::new(Mutex::new(PortQuarantine::default()));
     let (mut system, _flows) = test_system(1, 60_000, Arc::clone(&quarantine));
     system
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect("test binding");
     {
         let mut quarantine = quarantine.lock().expect("quarantine");
@@ -191,7 +191,7 @@ fn duplicate_syn_limit_retirement_and_quarantine_are_deterministic() {
     let quarantine = Arc::new(Mutex::new(PortQuarantine::default()));
     let (mut system, _flows) = test_system(1, 1_000, Arc::clone(&quarantine));
     system
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect("test binding");
 
     let original = ipv4_syn(443, 0x1020_3040);
@@ -269,7 +269,7 @@ fn bidirectional_fin_enters_fixed_retirement_without_losing_final_tuple_rewrite(
     let quarantine = Arc::new(Mutex::new(PortQuarantine::default()));
     let (mut system, _flows) = test_system(1, 1_000, quarantine);
     system
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect("test binding");
 
     let original = ipv4_syn(443, 6);
@@ -306,7 +306,7 @@ fn shared_quarantine_prevents_reset_generation_port_reuse() {
     let quarantine = Arc::new(Mutex::new(PortQuarantine::default()));
     let (mut first, _flows) = test_system(1, 1_000, Arc::clone(&quarantine));
     first
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect("first binding");
     let mut packet = ipv4_syn(443, 1);
     let parsed = parse_complete(&packet);
@@ -320,7 +320,7 @@ fn shared_quarantine_prevents_reset_generation_port_reuse() {
 
     let (mut second, _flows) = test_system_with_generation(1, 1_000, 2, Arc::clone(&quarantine));
     let error = second
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect_err("old listener identity remains quarantined");
     assert_eq!(error.kind(), io::ErrorKind::AddrNotAvailable);
     assert_eq!(
@@ -332,7 +332,7 @@ fn shared_quarantine_prevents_reset_generation_port_reuse() {
         "pending retirement must request a fresh supervisor-clock observation"
     );
     second
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(40_003), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(40_003), None))
         .expect("second binding");
     let mut packet = ipv4_syn(8443, 2);
     let parsed = parse_complete(&packet);
@@ -355,7 +355,7 @@ async fn expired_half_open_mapping_cannot_be_revived_by_a_late_accept() {
     let (mut system, mut flows) =
         test_system(1, 1_000, Arc::new(Mutex::new(PortQuarantine::default())));
     system
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect("test binding");
     let mut syn = ipv4_syn(443, 3);
     let parsed = parse_complete(&syn);
@@ -368,7 +368,7 @@ async fn expired_half_open_mapping_cannot_be_revived_by_a_late_accept() {
             epoch: system.bindings[0].epoch,
             local: SocketAddr::new(translated.destination, LISTENER_V4_PORT),
             peer: SocketAddr::new(translated.source, u16::from_be_bytes([syn[24], syn[25]])),
-            stream: accepted,
+            stream: accepted.into(),
         })
         .expect("queue late accept");
 
@@ -397,7 +397,7 @@ fn terminal_generation_retires_flows_without_reopening_the_stack() {
         Arc::new(Mutex::new(PortQuarantine::default())),
     );
     system
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect("test binding");
     let mut syn = ipv4_syn(443, 3);
     let parsed = parse_complete(&syn);
@@ -418,7 +418,7 @@ fn poisoned_quarantine_keeps_cleanup_failure_visible_without_panicking() {
     let quarantine = Arc::new(Mutex::new(PortQuarantine::default()));
     let (mut system, _flows) = test_system(1, 1_000, Arc::clone(&quarantine));
     system
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect("test binding");
     let mut syn = ipv4_syn(443, 3);
     let parsed = parse_complete(&syn);
@@ -441,7 +441,7 @@ async fn accept_requires_current_epoch_and_exact_peer_before_publication() {
     let quarantine = Arc::new(Mutex::new(PortQuarantine::default()));
     let (mut system, mut flows) = test_system(1, 60_000, quarantine);
     system
-        .configure_bindings_for_test((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
         .expect("test binding");
     let mut syn = ipv4_syn(443, 3);
     let parsed = parse_complete(&syn);
@@ -460,7 +460,7 @@ async fn accept_requires_current_epoch_and_exact_peer_before_publication() {
             epoch: epoch.wrapping_add(1),
             local: reverse.listener,
             peer: reverse.peer,
-            stream: accepted,
+            stream: accepted.into(),
         })
         .expect("queue bad epoch");
     assert!(system.expire(11));
@@ -476,7 +476,7 @@ async fn accept_requires_current_epoch_and_exact_peer_before_publication() {
             epoch,
             local: reverse.listener,
             peer: SocketAddr::new(reverse.peer.ip(), reverse.peer.port().wrapping_add(1)),
-            stream: accepted,
+            stream: accepted.into(),
         })
         .expect("queue wrong peer");
     assert!(system.expire(12));
@@ -492,7 +492,7 @@ async fn accept_requires_current_epoch_and_exact_peer_before_publication() {
             epoch,
             local: reverse.listener,
             peer: reverse.peer,
-            stream: accepted,
+            stream: accepted.into(),
         })
         .expect("queue accepted socket");
     assert!(system.expire(13));
@@ -510,7 +510,7 @@ async fn accept_requires_current_epoch_and_exact_peer_before_publication() {
             epoch,
             local: reverse.listener,
             peer: reverse.peer,
-            stream: duplicate,
+            stream: duplicate.into(),
         })
         .expect("queue duplicate");
     assert!(system.expire(14));
@@ -531,7 +531,7 @@ async fn accept_requires_current_epoch_and_exact_peer_before_publication() {
             epoch,
             local: reverse.listener,
             peer: reverse.peer,
-            stream: late,
+            stream: late.into(),
         })
         .expect("queue late accept");
     assert!(system.expire(15));
@@ -539,6 +539,171 @@ async fn accept_requires_current_epoch_and_exact_peer_before_publication() {
         flows.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
     ));
+}
+
+#[tokio::test]
+async fn fenced_abort_after_delivered_fin_keeps_original_tuple_until_reset_delivery() {
+    let (mut system, mut flows) =
+        test_system(3, 60_000, Arc::new(Mutex::new(PortQuarantine::default())));
+    system
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .expect("packet binding");
+    let original = ipv4_syn(443, 7);
+    let mut translated = original.clone();
+    system
+        .rewrite(&mut translated, parse_complete(&original), true, 0)
+        .expect("SYN");
+    let parsed = parse_complete(&translated);
+    let crate::packet::TransportMetadata::Tcp(tcp) = parsed.transport else {
+        unreachable!()
+    };
+    let (accepted, mut peer) = connected_pair().await.expect("real accepted socket");
+    system
+        .accepted_sender
+        .try_send(AcceptedSocket {
+            epoch: system.bindings[0].epoch,
+            local: SocketAddr::new(parsed.destination, tcp.destination_port),
+            peer: SocketAddr::new(parsed.source, tcp.source_port),
+            stream: accepted.into(),
+        })
+        .expect("accept");
+    system.expire(1);
+    let mut flow = flows.try_recv().expect("published flow");
+    flow.shutdown().await.expect("listener write half shutdown");
+    let mut byte = [0];
+    assert_eq!(peer.read(&mut byte).await.expect("peer EOF"), 0);
+    peer.write_all(b"x")
+        .await
+        .expect("application half remains open");
+    assert_eq!(flow.read_u8().await.expect("read half remains open"), b'x');
+
+    let mut fin = reverse_packet(translated.clone(), 24, TCP_FIN | TCP_ACK);
+    let parsed = parse_complete(&fin);
+    system
+        .rewrite(&mut fin, parsed, true, 2)
+        .expect("ordinary FIN");
+    let old_fin = parse_complete(&fin);
+    system.reset_output_sent(old_fin);
+    assert!(
+        !system.has_reset_output(),
+        "ordinary FIN is not a reset notification"
+    );
+
+    // A second owned socket has completed both FIN directions; a third mapping
+    // has never owned an accepted socket. Neither can owe a new reset packet.
+    let closed_original = ipv4_syn(444, 8);
+    let mut closed_translated = closed_original.clone();
+    system
+        .rewrite(
+            &mut closed_translated,
+            parse_complete(&closed_original),
+            true,
+            3,
+        )
+        .expect("second SYN");
+    let parsed = parse_complete(&closed_translated);
+    let crate::packet::TransportMetadata::Tcp(closed_tcp) = parsed.transport else {
+        unreachable!()
+    };
+    let (accepted, mut closed_peer) = connected_pair().await.expect("second real socket");
+    system
+        .accepted_sender
+        .try_send(AcceptedSocket {
+            epoch: system.bindings[0].epoch,
+            local: SocketAddr::new(parsed.destination, closed_tcp.destination_port),
+            peer: SocketAddr::new(parsed.source, closed_tcp.source_port),
+            stream: accepted.into(),
+        })
+        .expect("second accept");
+    system.expire(4);
+    let mut closed_flow = flows.try_recv().expect("second flow");
+    closed_flow.shutdown().await.expect("second listener FIN");
+    closed_peer
+        .shutdown()
+        .await
+        .expect("second application FIN");
+    assert_eq!(
+        closed_flow.read(&mut byte).await.expect("second flow EOF"),
+        0
+    );
+    assert_eq!(
+        closed_peer.read(&mut byte).await.expect("second peer EOF"),
+        0
+    );
+    let mut closed_fin = reverse_packet(closed_translated, 24, TCP_FIN | TCP_ACK);
+    let parsed = parse_complete(&closed_fin);
+    system
+        .rewrite(&mut closed_fin, parsed, true, 5)
+        .expect("second reverse FIN");
+    let mut application_fin = closed_original;
+    application_fin[37] = TCP_FIN | TCP_ACK;
+    repair_transport_checksum(&mut application_fin, 24, IP_PROTOCOL_TCP);
+    let parsed = parse_complete(&application_fin);
+    system
+        .rewrite(&mut application_fin, parsed, true, 5)
+        .expect("second forward FIN");
+    let mut unaccepted = ipv4_syn(445, 9);
+    let parsed = parse_complete(&unaccepted);
+    system
+        .rewrite(&mut unaccepted, parsed, true, 5)
+        .expect("unaccepted mapping");
+    system.fence(2).expect("generation fence");
+    assert_eq!(system.pending_close_notifications(), 1);
+    system.reset_output_sent(old_fin);
+    assert_eq!(
+        system.pending_close_notifications(),
+        1,
+        "an old queued FIN cannot satisfy abort delivery"
+    );
+
+    let mut new_syn = ipv4_syn(446, 10);
+    let parsed = parse_complete(&new_syn);
+    assert_eq!(
+        system.rewrite(&mut new_syn, parsed, true, 60_001),
+        Err(TunRejectReason::StaleGeneration)
+    );
+    let mut repeated_syn = original.clone();
+    let parsed = parse_complete(&repeated_syn);
+    assert_eq!(
+        system.rewrite(&mut repeated_syn, parsed, false, 60_001),
+        Err(TunRejectReason::StaleGeneration)
+    );
+
+    // This is the kernel-to-application packet that previously vanished:
+    // fence rejected it, and deadline/drop maintenance could erase its map.
+    let mut reset = reverse_packet(translated, 24, TCP_RST | TCP_ACK);
+    let parsed = parse_complete(&reset);
+    system
+        .rewrite(&mut reset, parsed, false, 60_001)
+        .expect("terminal translation survives fence and old deadline");
+    let delivered = parse_complete(&reset);
+    assert_eq!(
+        (delivered.source, delivered.destination),
+        (IpAddr::V4(TARGET_V4), IpAddr::V4(LOCAL_V4))
+    );
+    let crate::packet::TransportMetadata::Tcp(tcp) = delivered.transport else {
+        unreachable!()
+    };
+    assert_eq!(
+        (tcp.source_port, tcp.destination_port, tcp.flags),
+        (443, 10000, TCP_RST | TCP_ACK)
+    );
+    assert_eq!(
+        system.pending_close_notifications(),
+        1,
+        "rewriting is not delivery"
+    );
+    assert!(system.has_reset_output());
+    system.reset_output_sent(old_fin);
+    assert!(
+        system.has_reset_output(),
+        "FIN cannot discharge the pending RST"
+    );
+    assert_eq!(system.pending_close_notifications(), 1);
+    system.reset_output_sent(delivered);
+    assert_eq!(system.pending_close_notifications(), 0);
+    assert!(!system.has_reset_output());
+    assert_eq!(system.retire(2), 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

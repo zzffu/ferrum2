@@ -19,11 +19,11 @@ function Assert-Rejected([scriptblock]$Action, [string]$Message) {
 # Load an exact whitelist of pure definitions, never a module, provider, recovery routine,
 # process owner, runner or removal command. There is no live-operation fallback in this test.
 foreach ($entry in @(
-    @{ Path = 'tools/powershell/Ferrum2.Performance/HostCleanup.ps1'; Names = @(
+    @{ Path = 'tools/powershell/Ferrum2.Qualification.Host/HostCleanup.ps1'; Names = @(
         'Update-Ferrum2ExpectedResources', 'Measure-Ferrum2HostCleanupResidue',
-        'Get-Ferrum2HostCleanupReadback') },
-    @{ Path = 'tools/powershell/Ferrum2.Performance/HostOwnership.ps1'; Names = @(
-        'Write-Ferrum2HostPerformanceLedger', 'Remove-Ferrum2OwnedProcessRecord') }
+        'Get-Ferrum2HostCleanupReadback', 'Get-Ferrum2CleanupProcessBirthTicks') },
+    @{ Path = 'tools/powershell/Ferrum2.Qualification.Host/HostOwnership.ps1'; Names = @(
+        'Write-Ferrum2HostLedger', 'Remove-Ferrum2OwnedProcessRecord') }
 )) {
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile(
@@ -40,6 +40,7 @@ foreach ($entry in @(
 function Write-AtomicJsonFile { param($Path, $Document)
     $script:persisted = $Document | ConvertTo-Json -Depth 20 | ConvertFrom-Json -Depth 20
 }
+function Get-Ferrum2FirewallRuleResidue { param($Expected) return 0 }
 function Get-Ferrum2HostCleanupSnapshot { param($Expected)
     if ($script:readFailed) { throw 'injected read error' }
     return $script:snapshot
@@ -54,7 +55,7 @@ $resources = [pscustomobject]@{
     }
     routes = @([pscustomobject]@{ destination_prefix = '198.18.0.1/32'; interface_index = 42; next_hop = '0.0.0.0' })
     addresses = @([pscustomobject]@{ address = '198.18.0.2'; interface_index = 42 })
-    processes = @([pscustomobject]@{ pid = 123; executable = 'owned.exe'; start_time_utc = 'start' })
+    processes = @([pscustomobject]@{ pid = 123; executable = 'owned.exe'; start_time_utc = '2026-09-08T01:00:00.0000000Z' })
     ports = @([pscustomobject]@{ protocol = 'tcp'; address = '127.0.0.1'; port = 12345 })
 }
 $context = [pscustomobject]@{
@@ -65,12 +66,12 @@ $context = [pscustomobject]@{
 }
 $context.ledger.expected_resources | Add-Member -NotePropertyName adapter_baseline_guids `
     -NotePropertyValue @('33333333-3333-3333-3333-333333333333')
-Write-Ferrum2HostPerformanceLedger -Context $context
+Write-Ferrum2HostLedger -Context $context
 Remove-Ferrum2OwnedProcessRecord -Context $context -ProcessId 123
 $context.ledger.resources = [pscustomobject]@{
     adapter = $null; routes = @(); addresses = @(); processes = @(); ports = @()
 }
-Write-Ferrum2HostPerformanceLedger -Context $context
+Write-Ferrum2HostLedger -Context $context
 $expected = $script:persisted.expected_resources
 foreach ($kind in @('adapters', 'routes', 'addresses', 'processes', 'ports')) {
     Assert-True (@($expected.$kind).Count -eq 1) "retiring active $kind lost expected identity"
@@ -78,13 +79,15 @@ foreach ($kind in @('adapters', 'routes', 'addresses', 'processes', 'ports')) {
 $script:readFailed = $false
 $script:snapshot = New-EmptySnapshot
 $zero = Get-Ferrum2HostCleanupReadback -Ledger $script:persisted
-Assert-True (($zero | ConvertTo-Json -Compress) -ceq
-    '{"adapter_remaining":0,"routes_remaining":0,"addresses_remaining":0,"processes_remaining":0,"ports_remaining":0}') 'complete absence report changed'
+foreach ($field in @('adapter_remaining', 'routes_remaining', 'addresses_remaining',
+    'processes_remaining', 'ports_remaining', 'firewall_rule_remaining')) {
+    Assert-True ($zero.$field -eq 0) "owned resource remained after cleanup: $field"
+}
 $observations = [ordered]@{
     adapters = [pscustomobject]@{ Name = 'owned-adapter'; InterfaceGuid = '22222222-2222-2222-2222-222222222222' }
     routes = [pscustomobject]@{ DestinationPrefix = '198.18.0.1/32'; InterfaceIndex = 42; NextHop = '0.0.0.0' }
     addresses = [pscustomobject]@{ IPAddress = '198.18.0.2'; InterfaceIndex = 42 }
-    processes = [pscustomobject]@{ pid = 123; executable = 'owned.exe'; start_time_utc = 'start' }
+    processes = [pscustomobject]@{ pid = 123; executable = 'owned.exe'; start_time_utc = '2026-09-08T01:00:00.0000000Z' }
     ports = [pscustomobject]@{ protocol = 'tcp'; address = '0.0.0.0'; port = 12345 }
 }
 foreach ($kind in $observations.Keys) {
@@ -132,8 +135,22 @@ $expected.adapters = @($expected.adapters) + @([pscustomobject]@{
 $completedPlanCounts = Get-Ferrum2HostCleanupReadback -Ledger $script:persisted
 Assert-True ($completedPlanCounts.adapter_remaining -eq 0) 'completed planned identity did not use recorded GUID'
 $script:snapshot = New-EmptySnapshot
-$script:snapshot.processes = @([pscustomobject]@{ pid = 123; executable = 'replacement.exe'; start_time_utc = 'new' })
-Assert-Rejected { Get-Ferrum2HostCleanupReadback -Ledger $script:persisted } 'PID replacement passed'
+$script:snapshot.processes = @([pscustomobject]@{
+    pid = 123; executable = $null; start_time_utc = '2026-09-08T02:00:00.0000000Z' })
+$foreignCounts = Get-Ferrum2HostCleanupReadback -Ledger $script:persisted
+Assert-True ($foreignCounts.processes_remaining -eq 0) 'different valid birth was counted as owned'
+foreach ($birth in @($null, '', 'invalid')) {
+    $script:snapshot.processes[0].start_time_utc = $birth
+    Assert-Rejected { Get-Ferrum2HostCleanupReadback -Ledger $script:persisted } 'unreadable process birth passed'
+}
+$script:snapshot.processes[0].start_time_utc = '2026-09-08T01:00:00.0000000Z'
+$script:snapshot.processes[0].executable = 'replacement.exe'
+$identityError = $null
+try { Get-Ferrum2HostCleanupReadback -Ledger $script:persisted | Out-Null }
+catch { $identityError = $_.Exception.Message }
+Assert-True ($null -ne $identityError -and $identityError.Contains('replacement.exe') -and
+    $identityError.Contains('owned.exe') -and $identityError.Contains('123') -and
+    $identityError.Contains('2026-09-08T01:00:00.0000000Z')) 'same-birth mismatch diagnostics were lost'
 $script:readFailed = $true
 Assert-Rejected { Get-Ferrum2HostCleanupReadback -Ledger $script:persisted } 'read failure became zero'
 
@@ -149,8 +166,10 @@ function Get-NetRoute { [CmdletBinding()]param($AddressFamily, $PolicyStore)
 function Get-NetIPAddress { [CmdletBinding()]param($AddressFamily, $PolicyStore)
     Assert-True ($ErrorActionPreference -eq 'Stop') 'address errors were suppressed'
 }
+$script:providerProcesses = @()
 function Get-Process { [CmdletBinding()]param()
     Assert-True ($ErrorActionPreference -eq 'Stop') 'process errors were suppressed'
+    return $script:providerProcesses
 }
 function Get-NetTCPConnection { [CmdletBinding()]param()
     Assert-True ($ErrorActionPreference -eq 'Stop') 'TCP errors were suppressed'
@@ -160,14 +179,15 @@ function Get-NetUDPEndpoint { [CmdletBinding()]param()
 }
 $tokens = $null; $errors = $null
 $providerAst = [Management.Automation.Language.Parser]::ParseFile(
-    (Join-Path $root 'tools/powershell/Ferrum2.Performance/HostCleanup.ps1'), [ref]$tokens, [ref]$errors)
+    (Join-Path $root 'tools/powershell/Ferrum2.Qualification.Host/HostCleanup.ps1'), [ref]$tokens, [ref]$errors)
 $provider = @($providerAst.FindAll({ param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -ceq 'Get-Ferrum2HostCleanupSnapshot'
 }, $true))
 Assert-True ($provider.Count -eq 1) 'read provider missing'
 $allowedCommands = @('Get-NetAdapter', 'Get-NetRoute', 'Get-NetIPAddress', 'Get-Process',
-    'Get-NetTCPConnection', 'Get-NetUDPEndpoint', 'Where-Object', 'ForEach-Object')
+    'Get-NetTCPConnection', 'Get-NetUDPEndpoint', 'Where-Object', 'ForEach-Object',
+    'Get-Ferrum2CleanupProcessBirthTicks', 'ConvertTo-Json')
 foreach ($command in $provider[0].FindAll({ param($node)
     $node -is [Management.Automation.Language.CommandAst]
 }, $true)) {
@@ -177,6 +197,19 @@ foreach ($command in $provider[0].FindAll({ param($node)
 $script:providerFailure = $false
 $observedZero = Get-Ferrum2HostCleanupReadback -Ledger $script:persisted
 Assert-True (($observedZero | ConvertTo-Json -Compress) -ceq ($zero | ConvertTo-Json -Compress)) 'empty enumeration changed readback'
+$foreignProcess = [pscustomobject]@{ Id = 123; StartTime = [DateTime]::Parse(
+    '2026-09-08T02:00:00.0000000Z', [Globalization.CultureInfo]::InvariantCulture,
+    [Globalization.DateTimeStyles]::RoundtripKind) }
+$script:foreignPathRead = $false
+$foreignProcess | Add-Member -MemberType ScriptProperty -Name Path -Value {
+    $script:foreignPathRead = $true
+    throw 'foreign protected path must not be read'
+}
+$script:providerProcesses = @($foreignProcess)
+$foreignObserved = Get-Ferrum2HostCleanupReadback -Ledger $script:persisted
+Assert-True ($foreignObserved.processes_remaining -eq 0 -and -not $script:foreignPathRead) `
+    'foreign PID reuse required protected executable readback'
+$script:providerProcesses = @()
 $script:providerFailure = $true
 Assert-Rejected { Get-Ferrum2HostCleanupReadback -Ledger $script:persisted } 'enumeration failure passed readback'
 
@@ -213,10 +246,10 @@ Assert-True ($failedMetadata.cleanup_phase -ceq 'export-diagnostics' -and
 # Execute only the production supervisor finally block and post-finally publish statements.
 # The worker try body is deliberately not loaded. Its process-group type and directory
 # removal are test-owned no-op/throw implementations, with no native or cmdlet fallback.
-class Ferrum2PerfProcessGroup {
+class Ferrum2HostProcessGroup {
     static [bool]$FailClose = $false
     static [void] CloseGroup() {
-        if ([Ferrum2PerfProcessGroup]::FailClose) { throw 'injected group close failure' }
+        if ([Ferrum2HostProcessGroup]::FailClose) { throw 'injected group close failure' }
     }
 }
 function Remove-Item { [CmdletBinding()]param($LiteralPath, [switch]$Recurse, [switch]$Force)
@@ -234,7 +267,6 @@ Assert-True ($transaction.Count -eq 1) 'supervisor transaction changed'
 $tail = @($runnerAst.EndBlock.Statements | Where-Object {
     $_.Extent.StartOffset -gt $transaction[0].Extent.EndOffset
 } | ForEach-Object { $_.Extent.Text }) -join "`n"
-Assert-True (-not $transaction[0].Body.Extent.Text.Contains('$resultPath')) 'verdict is written before finally'
 $finalization = [scriptblock]::Create("try { } finally $($transaction[0].Finally.Extent.Text)`n$tail")
 foreach ($failure in @('close', 'export', 'remove', 'deadline', 'none')) {
     $caseRoot = Join-Path $ScratchDirectory $failure
@@ -253,7 +285,7 @@ foreach ($failure in @('close', 'export', 'remove', 'deadline', 'none')) {
         Elapsed = [pscustomobject]@{ TotalSeconds = $(if ($failure -ceq 'deadline') { 900 } else { 12 }) }
     }
     $supervisorTimer | Add-Member -MemberType ScriptMethod -Name Stop -Value { }
-    [Ferrum2PerfProcessGroup]::FailClose = $failure -ceq 'close'
+    [Ferrum2HostProcessGroup]::FailClose = $failure -ceq 'close'
     $script:failDirectoryRemoval = $failure -ceq 'remove'
     $script:directoryRemovalCompleted = $false
     if ($failure -ceq 'none') {

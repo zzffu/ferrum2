@@ -24,6 +24,9 @@ impl SystemTcp {
         let Some(mapping) = self.slots[slot].take() else {
             return;
         };
+        if mapping.reset_notification == super::ResetNotification::AwaitingDelivery {
+            self.reset_outputs_pending -= 1;
+        }
         if mapping.pending_flow.is_some() {
             self.pending_slots.retain(|pending| *pending != slot);
         }
@@ -31,8 +34,10 @@ impl SystemTcp {
         let removed_reverse = self.reverse.remove(&mapping.reverse);
         debug_assert_eq!(removed_forward, Some(slot));
         debug_assert_eq!(removed_reverse, Some(slot));
-        if let Some(socket) = &mapping.socket {
-            socket.fence();
+        if let Some(socket) = &mapping.socket
+            && socket.fence().is_err()
+        {
+            self.listener_failed.store(true, Ordering::Release);
         }
         let expires_at = now_millis.saturating_add(PORT_QUARANTINE_MILLIS);
         if preserve_rewrite && self.retired_forward.len() < MAX_RETIRED_IDENTITIES {

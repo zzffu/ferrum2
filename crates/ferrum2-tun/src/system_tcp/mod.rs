@@ -2,6 +2,7 @@ mod listener;
 mod packet_rewrite;
 mod quarantine;
 mod retirement;
+mod teardown;
 
 #[cfg(test)]
 mod tests;
@@ -14,11 +15,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ferrum2_runtime::OwnerRegistry;
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
-use self::listener::{AcceptedSocket, ListenerSet};
-#[cfg(test)]
+use self::listener::AcceptedSocket;
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+use self::listener::ListenerSet;
+#[cfg(any(test, feature = "benchmark"))]
 use self::listener::{derive_ipv4_peer, derive_ipv6_peer};
 use self::packet_rewrite::{is_initial_syn, rewrite_tuple, tcp_sequence};
 pub(crate) use self::quarantine::PortQuarantine;
@@ -79,8 +83,17 @@ struct Mapping {
     application_fin: bool,
     listener_fin: bool,
     closing: bool,
+    reset_notification: ResetNotification,
     socket: Option<TcpSocketLease>,
     pending_flow: Option<TcpFlow>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResetNotification {
+    NotRequired,
+    AwaitingKernelReset,
+    AwaitingDelivery,
+    Delivered,
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +122,7 @@ pub(crate) struct SystemTcp {
     next_epoch: u64,
     fenced: bool,
     active: usize,
+    reset_outputs_pending: usize,
     active_deadline_millis: Option<i64>,
     pending_slots: VecDeque<usize>,
     slots: Box<[Option<Mapping>]>,
@@ -119,12 +133,14 @@ pub(crate) struct SystemTcp {
     retired_reverse: HashMap<ReverseTuple, FlowTuple>,
     retired_deadline_millis: Option<i64>,
     bindings: Vec<Binding>,
+    #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
     listener: Option<ListenerSet>,
     accepted_sender: mpsc::Sender<AcceptedSocket>,
     accepted_receiver: mpsc::Receiver<AcceptedSocket>,
     flow_sender: mpsc::Sender<TcpFlow>,
     flow_count: Arc<AtomicUsize>,
     registry: OwnerRegistry,
+    #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
     owner_wake: OwnerWake,
     socket_wake: OwnerWake,
     flow_changed: Arc<AtomicBool>,
@@ -136,6 +152,26 @@ pub(crate) struct SystemTcp {
 }
 
 impl SystemTcp {
+    #[cfg(feature = "benchmark")]
+    pub(crate) fn accept_packet_socket(
+        &mut self,
+        source: SocketAddr,
+        target: SocketAddr,
+        stream: tokio::io::DuplexStream,
+    ) {
+        let slot = self.forward[&FlowTuple { source, target }];
+        let mapping = self.slots[slot].as_ref().expect("live packet mapping");
+        let binding = self.binding(mapping.family).expect("listener identity");
+        self.accepted_sender
+            .try_send(AcceptedSocket {
+                epoch: binding.epoch,
+                local: mapping.reverse.listener,
+                peer: mapping.reverse.peer,
+                stream: crate::tcp::FlowSocket::Memory(stream),
+            })
+            .unwrap_or_else(|_| panic!("bounded accept queue"));
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         max_flows: usize,
@@ -165,6 +201,7 @@ impl SystemTcp {
                 next_epoch: generation,
                 fenced: false,
                 active: 0,
+                reset_outputs_pending: 0,
                 active_deadline_millis: None,
                 pending_slots: VecDeque::with_capacity(max_flows),
                 slots: std::iter::repeat_with(|| None)
@@ -178,12 +215,14 @@ impl SystemTcp {
                 retired_reverse: HashMap::with_capacity(max_flows),
                 retired_deadline_millis: None,
                 bindings: Vec::with_capacity(2),
+                #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
                 listener: None,
                 accepted_sender,
                 accepted_receiver,
                 flow_sender,
                 flow_count,
                 registry,
+                #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
                 owner_wake,
                 socket_wake,
                 flow_changed,
@@ -197,6 +236,7 @@ impl SystemTcp {
         )
     }
 
+    #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
     pub(crate) fn start(
         &mut self,
         addresses: InterfaceAddresses,
@@ -239,8 +279,10 @@ impl SystemTcp {
         endpoints
     }
 
-    #[cfg(test)]
-    pub(crate) fn configure_bindings_for_test(
+    /// Installs externally supplied listener identities without opening sockets.
+    /// The caller owns the packet-only adapter; ports still obey real quarantine.
+    #[cfg(any(test, feature = "benchmark"))]
+    pub(crate) fn configure_packet_bindings(
         &mut self,
         addresses: InterfaceAddresses,
         listener_ports: (Option<u16>, Option<u16>),
@@ -251,7 +293,7 @@ impl SystemTcp {
                 "system TCP generation is fenced",
             ));
         }
-        if self.listener.is_some() || !self.bindings.is_empty() {
+        if !self.bindings.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "system TCP bindings already configured",
@@ -267,7 +309,7 @@ impl SystemTcp {
                 epoch: self.next_epoch,
             }),
             (None, None) => {}
-            _ => return Err(invalid_test_binding()),
+            _ => return Err(invalid_packet_binding()),
         }
         match (addresses.1, listener_ports.1) {
             (Some((local, prefix)), Some(port)) if port != 0 => bindings.push(Binding {
@@ -277,10 +319,10 @@ impl SystemTcp {
                 epoch: self.next_epoch,
             }),
             (None, None) => {}
-            _ => return Err(invalid_test_binding()),
+            _ => return Err(invalid_packet_binding()),
         }
         if bindings.is_empty() {
-            return Err(invalid_test_binding());
+            return Err(invalid_packet_binding());
         }
         let mut claimed = 0;
         {
@@ -313,10 +355,11 @@ impl SystemTcp {
         // The owner services accepts, publication and quarantine once per control
         // rotation. Packets only force maintenance when a live mapping may have
         // expired or a socket was dropped; neither may be revived by traffic.
-        if self
-            .active_deadline_millis
-            .is_some_and(|deadline| deadline <= now_millis)
-            || self.flow_changed.load(Ordering::Acquire)
+        if !self.fenced
+            && (self
+                .active_deadline_millis
+                .is_some_and(|deadline| deadline <= now_millis)
+                || self.flow_changed.load(Ordering::Acquire))
         {
             self.expire(now_millis);
         }
@@ -411,6 +454,7 @@ impl SystemTcp {
             application_fin: false,
             listener_fin: false,
             closing: false,
+            reset_notification: ResetNotification::NotRequired,
             socket: None,
             pending_flow: None,
         });
@@ -508,6 +552,7 @@ impl SystemTcp {
         self.events = events;
     }
 
+    #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
     pub(crate) fn failed(&self) -> bool {
         self.listener_failed.load(Ordering::Acquire)
             || self.listener.as_ref().is_some_and(ListenerSet::failed)
@@ -519,15 +564,29 @@ impl SystemTcp {
         {
             return Err(());
         }
+        let first_fence = !self.fenced;
         self.fenced = true;
-        for mapping in self.slots.iter().flatten() {
+        let mut result = Ok(());
+        for mapping in self.slots.iter_mut().flatten() {
+            if first_fence
+                && !mapping.closing
+                && mapping
+                    .socket
+                    .as_ref()
+                    .is_some_and(|socket| !socket.flow_dropped())
+            {
+                mapping.reset_notification = ResetNotification::AwaitingKernelReset;
+            }
             if let Some(socket) = &mapping.socket {
                 debug_assert_eq!(socket.generation(), self.generation);
-                socket.fence();
+                if socket.fence().is_err() {
+                    self.listener_failed.store(true, Ordering::Release);
+                    result = Err(());
+                }
             }
         }
         while self.accepted_receiver.try_recv().is_ok() {}
-        Ok(())
+        result
     }
 
     pub(crate) fn retire(&mut self, next_generation: u64) -> usize {
@@ -547,16 +606,24 @@ impl SystemTcp {
 
     pub(crate) fn stop_and_join(&mut self) -> Result<(), ()> {
         self.fenced = true;
+        let mut result = Ok(());
         for mapping in self.slots.iter().flatten() {
-            if let Some(socket) = &mapping.socket {
-                socket.fence();
+            if let Some(socket) = &mapping.socket
+                && socket.fence().is_err()
+            {
+                self.listener_failed.store(true, Ordering::Release);
+                result = Err(());
             }
         }
-        let mut result = self
-            .listener
-            .as_mut()
-            .map_or(Ok(()), ListenerSet::stop_and_join);
-        self.listener = None;
+        #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+        {
+            if let Some(listener) = &mut self.listener
+                && listener.stop_and_join().is_err()
+            {
+                result = Err(());
+            }
+            self.listener = None;
+        }
         let bindings = std::mem::take(&mut self.bindings);
         match self.quarantine.lock() {
             Ok(mut quarantine) => {
@@ -583,7 +650,35 @@ impl SystemTcp {
         now_millis: i64,
     ) -> Result<(), TunRejectReason> {
         if self.fenced {
-            return Err(TunRejectReason::StaleGeneration);
+            let mapping = self.slots[slot].as_ref().expect("live tuple");
+            let ack_only = matches!(parsed.transport, TransportMetadata::Tcp(tcp)
+                if tcp.flags == TCP_ACK && parsed.total_len == parsed.transport_offset + tcp.header_len);
+            if !matches!(
+                mapping.reset_notification,
+                ResetNotification::AwaitingKernelReset | ResetNotification::AwaitingDelivery
+            ) || (application_direction && !ack_only)
+            {
+                return Err(TunRejectReason::StaleGeneration);
+            }
+            let plan = if application_direction {
+                RewritePlan {
+                    source: mapping.reverse.peer,
+                    destination: mapping.reverse.listener,
+                }
+            } else {
+                RewritePlan {
+                    source: mapping.forward.target,
+                    destination: mapping.forward.source,
+                }
+            };
+            if !application_direction && flags & TCP_RST != 0 {
+                let mapping = self.slots[slot].as_mut().expect("live tuple");
+                if mapping.reset_notification == ResetNotification::AwaitingKernelReset {
+                    mapping.reset_notification = ResetNotification::AwaitingDelivery;
+                    self.reset_outputs_pending += 1;
+                }
+            }
+            return rewrite_tuple(packet, parsed, plan);
         }
         let mapping = self.slots[slot]
             .as_mut()
@@ -739,7 +834,10 @@ impl SystemTcp {
 
 impl Drop for SystemTcp {
     fn drop(&mut self) {
-        if self.listener.is_some() || !self.bindings.is_empty() {
+        let needs_stop = !self.bindings.is_empty();
+        #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+        let needs_stop = needs_stop || self.listener.is_some();
+        if needs_stop {
             let _ = self.stop_and_join();
         }
         self.fenced = true;
@@ -751,10 +849,10 @@ fn deadline(now_millis: i64, timeout_millis: i64) -> i64 {
     now_millis.saturating_add(timeout_millis)
 }
 
-#[cfg(test)]
-fn invalid_test_binding() -> io::Error {
+#[cfg(any(test, feature = "benchmark"))]
+fn invalid_packet_binding() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "system TCP test binding families and non-zero ports must match",
+        "system TCP packet binding families and non-zero ports must match",
     )
 }

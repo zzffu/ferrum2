@@ -1,989 +1,238 @@
-use super::contract::ActiveWindowMarkers;
-use super::diagnostic::{
-    ASSOCIATIONS, FRAGMENT_ACK_LEN, FRAGMENT_ACK_TAG, FRAGMENT_ACK_WINDOW, FRAGMENT_BATCH,
-    FRAGMENT_PAYLOAD, FRAGMENT_REPLY_BUFFER, FRAGMENT_REQUEST_TAG,
-    FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS, FragmentAckBatch, FragmentPhase,
-    FragmentWorkloadAccounting, IO_TIMEOUT, SUPPORT_TCP_IDLE_TIMEOUT, TCP_FAIRNESS_FLOWS,
-    TCP_FAIRNESS_PAYLOAD, TCP_FAIRNESS_READINESS_PAYLOAD, TCP_REQUEST_LATENCY_SAMPLE_CAP,
-    TCP_REQUEST_MINIMUM_TRANSACTIONS, TCP_REQUEST_PAYLOAD, TCP_SINGLE_MINIMUM_BYTES,
-    TCP_SINGLE_PAYLOAD, UDP_BATCH, UDP_LATENCY_SAMPLE_CAP, UDP_MINIMUM_DATAGRAMS,
-    UDP_PACKET_TIMEOUT, UDP_PAYLOAD, UDP_RECEIVE_ATTEMPTS, UdpAssociationSourceArgs,
-};
-use super::latency::{latency_percentiles, record_latency_sample};
-use super::measurement::{
-    ActiveWorkWindow, MeasuredWork, elapsed_nanoseconds, elapsed_rate, fairness_measurements,
+use super::contract::{Args, parse};
+use super::socket_io::{
+    BULK, FRAGMENT, IO_LIMIT, connect, datagram, duplex, exchange, pause_reader, payload, publish,
+    runtime, udp,
 };
 use serde_json::{Value, json};
-use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, mpsc};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::ffi::OsString;
+use std::io::ErrorKind;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub(crate) fn checked_payload_byte(index: usize, seed: u64) -> u8 {
-    ((index as u64).wrapping_mul(131).wrapping_add(seed) & 0xff) as u8
-}
-
-pub(crate) fn checked_payload(length: usize, seed: u64) -> Vec<u8> {
-    (0..length)
-        .map(|index| checked_payload_byte(index, seed))
-        .collect()
-}
-
-pub(crate) fn configure_tcp_with_read_timeout(
-    stream: &TcpStream,
-    read_timeout: Duration,
-) -> Result<(), String> {
-    stream
-        .set_nodelay(true)
-        .map_err(|error| format!("set TCP_NODELAY failed: {error}"))?;
-    stream
-        .set_read_timeout(Some(read_timeout))
-        .map_err(|error| format!("set TCP read timeout failed: {error}"))?;
-    stream
-        .set_write_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| format!("set TCP write timeout failed: {error}"))?;
-    Ok(())
-}
-
-pub(crate) fn configure_tcp(stream: &TcpStream) -> Result<(), String> {
-    configure_tcp_with_read_timeout(stream, IO_TIMEOUT)
-}
-
-pub(crate) fn configure_support_tcp(stream: &TcpStream) -> Result<(), String> {
-    configure_tcp_with_read_timeout(stream, SUPPORT_TCP_IDLE_TIMEOUT)
-}
-
-pub(crate) fn tcp_round_trip(
-    stream: &mut TcpStream,
-    payload: &[u8],
-    reply: &mut [u8],
-) -> Result<(), String> {
-    stream
-        .write_all(payload)
-        .map_err(|error| format!("TCP workload write failed: {error}"))?;
-    stream
-        .read_exact(reply)
-        .map_err(|error| format!("TCP workload read failed: {error}"))?;
-    if reply != payload {
-        return Err("TCP workload payload mismatch".to_owned());
-    }
-    Ok(())
-}
-
-pub(crate) fn wait_for_active_release(markers: Option<&ActiveWindowMarkers>) -> Result<(), String> {
-    let Some(marker) = markers.map(|markers| &markers.ready) else {
-        return Ok(());
-    };
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(marker)
-        .map_err(|error| format!("create active-window ready marker failed: {error}"))?;
-    let write_result = output
-        .write_all(b"ready\n")
-        .and_then(|()| output.sync_all())
-        .map_err(|error| format!("write active-window ready marker failed: {error}"));
-    drop(output);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(marker);
-        return Err(error);
-    }
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        match fs::metadata(marker) {
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(error) if error.kind() == ErrorKind::PermissionDenied => {}
-            Err(error) => {
-                return Err(format!(
-                    "inspect active-window ready marker failed: {error}"
-                ));
-            }
-        }
-        if Instant::now() >= deadline {
-            let _ = fs::remove_file(marker);
-            return Err("active-window ready marker was not released within 30 seconds".to_owned());
-        }
-        thread::sleep(Duration::from_millis(1));
-    }
-}
-
-pub(crate) fn signal_active_complete(markers: Option<&ActiveWindowMarkers>) -> Result<(), String> {
-    let Some(marker) = markers.map(|markers| &markers.complete) else {
-        return Ok(());
-    };
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(marker)
-        .map_err(|error| format!("create active-window complete marker failed: {error}"))?;
-    let write_result = output
-        .write_all(b"complete\n")
-        .and_then(|()| output.sync_all())
-        .map_err(|error| format!("write active-window complete marker failed: {error}"));
-    drop(output);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(marker);
-        return Err(error);
-    }
-    Ok(())
-}
-
-pub(crate) fn tcp_single(
-    address: SocketAddr,
-    warmup: Duration,
-    active: Duration,
-    active_markers: Option<&ActiveWindowMarkers>,
+async fn flow(
+    args: &Args,
+    generation: u8,
+    flow: u8,
+    established: &tokio::sync::Barrier,
 ) -> Result<Value, String> {
-    let mut stream = TcpStream::connect_timeout(&address, IO_TIMEOUT)
-        .map_err(|error| format!("TCP single-flow connect failed: {error}"))?;
-    configure_tcp(&stream)?;
-    let payload = checked_payload(TCP_SINGLE_PAYLOAD, 1);
-    let mut reply = vec![0; payload.len()];
-    let warmup_deadline = Instant::now() + warmup;
-    let mut warmup_bytes = 0_u64;
-    while Instant::now() < warmup_deadline {
-        tcp_round_trip(&mut stream, &payload, &mut reply)?;
-        warmup_bytes = warmup_bytes
-            .checked_add(payload.len() as u64)
-            .ok_or_else(|| "TCP single-flow warmup byte count overflow".to_owned())?;
+    let mut tcp = connect(args.tcp).await?;
+    let local = tcp.local_addr().map_err(|e| e.to_string())?;
+    exchange(&mut tcp, &payload(1024, generation, flow, 1)).await?;
+    let bulk = payload(BULK, generation, flow, 2);
+    established.wait().await;
+    let paused = pause_reader(&tcp, &bulk).await?;
+    // Both datagram classes complete while this TCP connection has outstanding
+    // checked data and its application reader remains paused.
+    let udp = udp(args.udp).await?;
+    for sequence in 0..4 {
+        datagram(&udp, &payload(256, generation, flow, 10 + sequence)).await?;
+        datagram(&udp, &payload(FRAGMENT, generation, flow, 20 + sequence)).await?;
     }
-    wait_for_active_release(active_markers)?;
-    let start = Instant::now();
-    let mut window = ActiveWorkWindow::new(active);
-    loop {
-        let started = start.elapsed();
-        if !window.admits(started) {
-            break;
+    duplex(&mut tcp, &bulk, paused).await?;
+    exchange(&mut tcp, &payload(1024, generation, flow, 3)).await?;
+    // FIN is sent with data outstanding: read the final checked response after
+    // shutting down only the write half, then require remote termination.
+    let last = payload(1024, generation, flow, 4);
+    tokio::time::timeout(IO_LIMIT, async {
+        tcp.write_all(&last).await.map_err(|e| e.to_string())?;
+        tcp.shutdown().await.map_err(|e| e.to_string())?;
+        let mut reply = vec![0; last.len()];
+        tcp.read_exact(&mut reply)
+            .await
+            .map_err(|e| e.to_string())?;
+        if reply != last {
+            return Err("half-close payload mismatch".to_owned());
         }
-        tcp_round_trip(&mut stream, &payload, &mut reply)?;
-        window.complete(started, start.elapsed(), payload.len() as u64)?;
-    }
-    signal_active_complete(active_markers)?;
-    let measured = window.finish(TCP_SINGLE_MINIMUM_BYTES, "TCP single-flow")?;
-    let checked_bytes = measured.checked_units;
-    let cpu_payload_bytes = warmup_bytes
-        .checked_add(checked_bytes)
-        .ok_or_else(|| "TCP single-flow total byte count overflow".to_owned())?;
-    let transactions = checked_bytes / (TCP_SINGLE_PAYLOAD as u64);
-    let io_completions = transactions
-        .checked_mul(2)
-        .ok_or_else(|| "TCP single-flow I/O completion count overflow".to_owned())?;
+        let mut extra = [0];
+        if tcp.read(&mut extra).await.map_err(|e| e.to_string())? != 0 {
+            return Err("TCP sent unexpected data after half-close".into());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "half-close termination deadline")??;
     Ok(json!({
-        "measurements": {
-            "throughput": elapsed_rate(checked_bytes, measured.elapsed, "TCP throughput")?,
-            "active_elapsed_nanoseconds": elapsed_nanoseconds(measured.elapsed)?,
-            "tail_checked_units": measured.tail_checked_units,
-            "cpu_payload_bytes": cpu_payload_bytes,
-            "io_completions": io_completions
-        },
-        "checked_units": checked_bytes,
-        "checks": {
-            "single_flow_only": true,
-            "payload_exact": true,
-            "no_gso": true
-        }
-    }))
-}
-pub(crate) fn tcp_request_latency(
-    address: SocketAddr,
-    warmup: Duration,
-    active: Duration,
-    active_markers: Option<&ActiveWindowMarkers>,
-) -> Result<Value, String> {
-    let mut stream = TcpStream::connect_timeout(&address, IO_TIMEOUT)
-        .map_err(|error| format!("TCP request connect failed: {error}"))?;
-    configure_tcp(&stream)?;
-    let payload = checked_payload(TCP_REQUEST_PAYLOAD, 7);
-    let mut reply = vec![0; payload.len()];
-    let warmup_deadline = Instant::now() + warmup;
-    while Instant::now() < warmup_deadline {
-        tcp_round_trip(&mut stream, &payload, &mut reply)?;
-    }
-    let mut latencies = Vec::with_capacity(TCP_REQUEST_LATENCY_SAMPLE_CAP);
-    let mut transactions = 0_u64;
-    wait_for_active_release(active_markers)?;
-    let start = Instant::now();
-    let mut window = ActiveWorkWindow::new(active);
-    loop {
-        let started = Instant::now();
-        if !window.admits(started.duration_since(start)) {
-            break;
-        }
-        tcp_round_trip(&mut stream, &payload, &mut reply)?;
-        let completed = Instant::now();
-        window.complete(
-            started.duration_since(start),
-            completed.duration_since(start),
-            1,
-        )?;
-        let latency = u64::try_from(completed.duration_since(started).as_nanos())
-            .map_err(|_| "TCP request latency overflow".to_owned())?;
-        record_latency_sample(
-            &mut latencies,
-            transactions,
-            latency,
-            TCP_REQUEST_LATENCY_SAMPLE_CAP,
-        )?;
-        transactions = transactions
-            .checked_add(1)
-            .ok_or_else(|| "TCP request transaction count overflow".to_owned())?;
-    }
-    signal_active_complete(active_markers)?;
-    let measured = window.finish(TCP_REQUEST_MINIMUM_TRANSACTIONS, "TCP request")?;
-    let latency = latency_percentiles(latencies, "TCP request")?;
-    let io_completions = transactions
-        .checked_mul(2)
-        .ok_or_else(|| "TCP request I/O completion count overflow".to_owned())?;
-    Ok(json!({
-        "measurements": {
-            "p50_nanoseconds": latency.p50,
-            "p95_nanoseconds": latency.p95,
-            "p99_nanoseconds": latency.p99,
-            "latency_samples": latency.samples,
-            "active_elapsed_nanoseconds": elapsed_nanoseconds(measured.elapsed)?,
-            "tail_checked_units": measured.tail_checked_units,
-            "io_completions": io_completions
-        },
-        "checked_units": transactions,
-        "checks": {
-            "single_flow_only": true,
-            "payload_exact": true,
-            "bounded_latency_samples": true,
-            "no_gso": true
-        }
+        "flow": flow, "generation": generation, "local_endpoint": local.to_string(),
+        "same_connection_phases": ["request_before", "paused_reader", "full_duplex", "request_after", "half_close"],
+        "bulk_bytes": BULK, "paused_bytes_sent": paused, "paused_unwritable_milliseconds": 100,
+        "resumed_bytes_sent": BULK - paused, "checked_tcp_bytes": BULK + 3072,
+        "udp_replies_during_tcp": 4, "fragment_replies_during_tcp": 4,
+        "fragment_request_bytes": FRAGMENT, "payload_exact": true,
+        "half_close_reply_checked": true, "remote_eof": true
     }))
 }
 
-pub(crate) fn tcp_fairness(
-    address: SocketAddr,
-    warmup: Duration,
-    active: Duration,
-    active_markers: Option<&ActiveWindowMarkers>,
-) -> Result<Value, String> {
-    let start = Arc::new(OnceLock::new());
-    let active_start = Arc::new(OnceLock::<Instant>::new());
-    let cancel = Arc::new(AtomicBool::new(false));
-    let (warmup_ready, warmup_completed) = mpsc::sync_channel(TCP_FAIRNESS_FLOWS);
-    let mut streams = Vec::with_capacity(TCP_FAIRNESS_FLOWS);
-    for flow in 0..TCP_FAIRNESS_FLOWS {
-        let mut stream = TcpStream::connect_timeout(&address, IO_TIMEOUT)
-            .map_err(|error| format!("fairness connect failed: {error}"))?;
-        configure_tcp(&stream)?;
-        let readiness = checked_payload(TCP_FAIRNESS_READINESS_PAYLOAD, flow as u64);
-        let mut reply = vec![0; readiness.len()];
-        tcp_round_trip(&mut stream, &readiness, &mut reply)
-            .map_err(|error| format!("fairness readiness flow {flow} failed: {error}"))?;
-        streams.push(stream);
-    }
-    let mut workers = Vec::with_capacity(TCP_FAIRNESS_FLOWS);
-    for (flow, mut stream) in streams.into_iter().enumerate() {
-        let worker_start = Arc::clone(&start);
-        let worker_active_start = Arc::clone(&active_start);
-        let worker_cancel = Arc::clone(&cancel);
-        let worker_ready = warmup_ready.clone();
-        let worker = thread::Builder::new()
-            .name(format!("tun-fairness-{flow:03}"))
-            .spawn(move || -> Result<MeasuredWork, String> {
-                let payload = checked_payload(TCP_FAIRNESS_PAYLOAD, flow as u64);
-                let mut reply = vec![0; payload.len()];
-                let common_start = loop {
-                    if let Some(start) = worker_start.get() {
-                        break *start;
-                    }
-                    if worker_cancel.load(Ordering::Acquire) {
-                        return Err("fairness start was cancelled".to_owned());
-                    }
-                    thread::sleep(Duration::from_millis(1));
-                };
-                let warmup_deadline = common_start + warmup;
-                let warmed = (|| {
-                    while Instant::now() < warmup_deadline {
-                        if worker_cancel.load(Ordering::Acquire) {
-                            return Err("fairness warmup was cancelled".to_owned());
-                        }
-                        tcp_round_trip(&mut stream, &payload, &mut reply)?;
-                    }
-                    Ok(())
-                })();
-                let reported = worker_ready.send(warmed.clone());
-                // A failed worker must not leave the coordinator waiting on
-                // senders retained by successful workers awaiting active_start.
-                drop(worker_ready);
-                warmed?;
-                reported.map_err(|_| "fairness warmup coordinator ended".to_owned())?;
-                let active_start = loop {
-                    if let Some(start) = worker_active_start.get() {
-                        break *start;
-                    }
-                    if worker_cancel.load(Ordering::Acquire) {
-                        return Err("fairness active window was cancelled".to_owned());
-                    }
-                    thread::sleep(Duration::from_millis(1));
-                };
-                let mut window = ActiveWorkWindow::new(active);
-                loop {
-                    let started = active_start.elapsed();
-                    if !window.admits(started) {
-                        break;
-                    }
-                    tcp_round_trip(&mut stream, &payload, &mut reply)?;
-                    window.complete(started, active_start.elapsed(), payload.len() as u64)?;
-                }
-                window.finish(1, "fairness flow")
-            });
-        match worker {
-            Ok(worker) => workers.push(worker),
-            Err(error) => {
-                cancel.store(true, Ordering::Release);
-                for worker in workers {
-                    let _ = worker.join();
-                }
-                return Err(format!("spawn fairness worker failed: {error}"));
-            }
-        }
-    }
-    drop(warmup_ready);
-    let common_start = Instant::now() + Duration::from_millis(100);
-    start
-        .set(common_start)
-        .map_err(|_| "fairness start was already set".to_owned())?;
-    let mut active_release = wait_for_fairness_warmup(warmup_completed)
-        .and_then(|()| wait_for_active_release(active_markers));
-    if active_release.is_ok() && active_start.set(Instant::now()).is_err() {
-        active_release = Err("fairness active start was already set".to_owned());
-    }
-    if active_release.is_err() {
-        cancel.store(true, Ordering::Release);
-    }
-    let mut values = Vec::with_capacity(TCP_FAIRNESS_FLOWS);
-    let mut first_failure = None;
-    for worker in workers {
-        match worker.join() {
-            Ok(Ok(value)) => values.push(value),
-            Ok(Err(error)) => {
-                first_failure.get_or_insert(error);
-            }
-            Err(_) => {
-                first_failure.get_or_insert("fairness worker panicked".to_owned());
-            }
-        }
-    }
-    if let Err(error) = active_release {
-        return Err(match first_failure {
-            Some(worker_error) => format!("{error}; worker: {worker_error}"),
-            None => error,
-        });
-    }
-    signal_active_complete(active_markers)?;
-    if let Some(error) = first_failure {
-        return Err(error);
-    }
-    fairness_measurements(&values)
-}
-
-pub(super) fn wait_for_fairness_warmup(
-    completed: mpsc::Receiver<Result<(), String>>,
-) -> Result<(), String> {
-    for _ in 0..TCP_FAIRNESS_FLOWS {
-        completed
-            .recv()
-            .map_err(|_| "fairness workers ended before warmup completed".to_owned())??;
-    }
-    Ok(())
-}
-
-pub(crate) fn connected_udp(address: SocketAddr) -> Result<UdpSocket, String> {
-    let bind = match address {
-        SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-        SocketAddr::V6(_) => "[::]:0"
-            .parse::<SocketAddr>()
-            .map_err(|_| "internal IPv6 wildcard is invalid".to_owned())?,
-    };
-    let socket =
-        UdpSocket::bind(bind).map_err(|error| format!("UDP workload bind failed: {error}"))?;
-    socket
-        .connect(address)
-        .map_err(|error| format!("UDP workload connect failed: {error}"))?;
-    socket
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| format!("set UDP read timeout failed: {error}"))?;
-    socket
-        .set_write_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| format!("set UDP write timeout failed: {error}"))?;
-    Ok(socket)
-}
-
-pub(crate) fn udp_association_source_endpoint(
-    arguments: &UdpAssociationSourceArgs,
-    association_index: usize,
-) -> Result<SocketAddr, String> {
-    if association_index >= ASSOCIATIONS {
-        return Err(format!(
-            "UDP association index is outside the source range: index={association_index}"
-        ));
-    }
-    let offset = u16::try_from(association_index).map_err(|_| {
-        format!("UDP association source offset overflow: index={association_index}")
-    })?;
-    let port = arguments
-        .source_port_first
-        .checked_add(offset)
-        .ok_or_else(|| {
-            format!("UDP association source port overflow: index={association_index}")
-        })?;
-    let endpoint = SocketAddr::new(arguments.source_ip, port);
-    if port > arguments.source_port_last {
-        return Err(format!(
-            "UDP association source endpoint is outside the fixed range: index={association_index} endpoint={endpoint}"
-        ));
-    }
-    Ok(endpoint)
-}
-
-pub(crate) fn connected_udp_association(
-    address: SocketAddr,
-    arguments: &UdpAssociationSourceArgs,
-    association_index: usize,
-) -> Result<UdpSocket, String> {
-    let endpoint = udp_association_source_endpoint(arguments, association_index)?;
-    let socket = UdpSocket::bind(endpoint).map_err(|error| {
-        format!(
-            "UDP association fixed-source bind failed: index={association_index} endpoint={endpoint} error={error}"
-        )
-    })?;
-    socket.connect(address).map_err(|error| {
-        format!(
-            "UDP association fixed-source connect failed: index={association_index} endpoint={endpoint} target={address} error={error}"
-        )
-    })?;
-    socket
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| {
-            format!(
-                "set UDP association fixed-source read timeout failed: index={association_index} endpoint={endpoint} error={error}"
-            )
-        })?;
-    socket
-        .set_write_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| {
-            format!(
-                "set UDP association fixed-source write timeout failed: index={association_index} endpoint={endpoint} error={error}"
-            )
-        })?;
-    let local = socket.local_addr().map_err(|error| {
-        format!(
-            "read UDP association fixed-source local address failed: index={association_index} endpoint={endpoint} error={error}"
-        )
-    })?;
-    if local != endpoint {
-        return Err(format!(
-            "UDP association fixed-source local address mismatch: index={association_index} endpoint={endpoint} actual={local}"
-        ));
-    }
-    Ok(socket)
-}
-
-pub(crate) fn unconnected_udp(address: IpAddr) -> Result<UdpSocket, String> {
-    let bind = match address {
-        IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-        IpAddr::V6(_) => "[::]:0"
-            .parse::<SocketAddr>()
-            .map_err(|_| "internal IPv6 wildcard is invalid".to_owned())?,
-    };
-    let socket = UdpSocket::bind(bind)
-        .map_err(|error| format!("multi-target UDP workload bind failed: {error}"))?;
-    socket
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| format!("set multi-target UDP read timeout failed: {error}"))?;
-    socket
-        .set_write_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| format!("set multi-target UDP write timeout failed: {error}"))?;
-    Ok(socket)
-}
-
-pub(crate) fn udp_round_trip(
-    socket: &UdpSocket,
-    payload: &[u8],
-    reply: &mut [u8],
-) -> Result<(), String> {
-    let sent = socket
-        .send(payload)
-        .map_err(|error| format!("UDP workload send failed: {error}"))?;
-    if sent != payload.len() {
-        return Err("UDP workload sent a partial datagram".to_owned());
-    }
-    let received = socket
-        .recv(reply)
-        .map_err(|error| format!("UDP workload receive failed: {error}"))?;
-    if received != payload.len() || &reply[..received] != payload {
-        return Err("UDP workload payload mismatch".to_owned());
-    }
-    Ok(())
-}
-
-pub(crate) fn sequenced_payload(length: usize, sequence: u64) -> Result<Vec<u8>, String> {
-    if length < std::mem::size_of::<u64>() {
-        return Err("sequenced UDP payload is too short".to_owned());
-    }
-    let mut payload = checked_payload(length, sequence);
-    payload[..8].copy_from_slice(&sequence.to_be_bytes());
-    Ok(payload)
-}
-
-pub(crate) fn fragment_request(sequence: u64) -> Vec<u8> {
-    let mut payload = checked_payload(FRAGMENT_PAYLOAD, sequence);
-    payload[..8].copy_from_slice(&FRAGMENT_REQUEST_TAG);
-    payload[8..16].copy_from_slice(&sequence.to_be_bytes());
-    payload
-}
-
-pub(crate) fn fragment_request_sequence(payload: &[u8]) -> Result<u64, String> {
-    if payload.len() != FRAGMENT_PAYLOAD {
-        return Err("fragment request payload length mismatch".to_owned());
-    }
-    if !payload.starts_with(&FRAGMENT_REQUEST_TAG) {
-        return Err("fragment request protocol tag mismatch".to_owned());
-    }
-    let mut encoded_sequence = [0_u8; 8];
-    encoded_sequence.copy_from_slice(&payload[8..16]);
-    let sequence = u64::from_be_bytes(encoded_sequence);
-    if payload[16..]
-        .iter()
-        .enumerate()
-        .any(|(offset, byte)| *byte != checked_payload_byte(offset + 16, sequence))
-    {
-        return Err("fragment request payload mismatch".to_owned());
-    }
-    Ok(sequence)
-}
-
-pub(crate) fn fragment_ack(sequence: u64) -> [u8; FRAGMENT_ACK_LEN] {
-    let mut ack = [0_u8; FRAGMENT_ACK_LEN];
-    ack[..8].copy_from_slice(&FRAGMENT_ACK_TAG);
-    ack[8..16].copy_from_slice(&sequence.to_be_bytes());
-    ack[16..24].copy_from_slice(&(FRAGMENT_PAYLOAD as u64).to_be_bytes());
-    ack
-}
-
-pub(crate) fn fragment_ack_sequence(payload: &[u8]) -> Result<u64, String> {
-    if payload.len() != FRAGMENT_ACK_LEN {
-        return Err("fragment ACK payload length mismatch".to_owned());
-    }
-    if !payload.starts_with(&FRAGMENT_ACK_TAG) {
-        return Err("fragment ACK protocol tag mismatch".to_owned());
-    }
-    let mut encoded_sequence = [0_u8; 8];
-    encoded_sequence.copy_from_slice(&payload[8..16]);
-    let mut encoded_request_len = [0_u8; 8];
-    encoded_request_len.copy_from_slice(&payload[16..24]);
-    if u64::from_be_bytes(encoded_request_len) != FRAGMENT_PAYLOAD as u64 {
-        return Err("fragment ACK request length mismatch".to_owned());
-    }
-    Ok(u64::from_be_bytes(encoded_sequence))
-}
-
-pub(crate) fn fragment_ack_for_request(
-    payload: &[u8],
-) -> Result<Option<[u8; FRAGMENT_ACK_LEN]>, String> {
-    if !payload.starts_with(&FRAGMENT_REQUEST_TAG) {
-        return Ok(None);
-    }
-    let sequence = fragment_request_sequence(payload)?;
-    Ok(Some(fragment_ack(sequence)))
-}
-
-pub(crate) fn udp_batch_round_trip(
-    socket: &UdpSocket,
-    payload_len: usize,
-    batch: usize,
-    first_sequence: u64,
-    reply: &mut [u8],
-) -> Result<u64, String> {
-    if batch == 0 || reply.len() < payload_len {
-        return Err("UDP batch bounds are invalid".to_owned());
-    }
-    let end_sequence = first_sequence
-        .checked_add(batch as u64)
-        .ok_or_else(|| "UDP batch sequence overflow".to_owned())?;
-    for sequence in first_sequence..end_sequence {
-        let payload = sequenced_payload(payload_len, sequence)?;
-        if socket
-            .send(&payload)
-            .map_err(|error| format!("UDP batch send failed: {error}"))?
-            != payload.len()
-        {
-            return Err("UDP batch sent a partial datagram".to_owned());
-        }
-    }
-    let mut seen = vec![false; batch];
-    for _ in 0..batch {
-        let received = socket
-            .recv(reply)
-            .map_err(|error| format!("UDP batch receive failed: {error}"))?;
-        if received != payload_len {
-            return Err("UDP batch payload length mismatch".to_owned());
-        }
-        let mut encoded_sequence = [0_u8; 8];
-        encoded_sequence.copy_from_slice(&reply[..8]);
-        let sequence = u64::from_be_bytes(encoded_sequence);
-        if !(first_sequence..end_sequence).contains(&sequence) {
-            return Err("UDP batch reply sequence is outside the request set".to_owned());
-        }
-        let offset = (sequence - first_sequence) as usize;
-        if std::mem::replace(&mut seen[offset], true) {
-            return Err("UDP batch contained a duplicate reply".to_owned());
-        }
-        if reply[..received] != sequenced_payload(payload_len, sequence)? {
-            return Err("UDP batch payload mismatch".to_owned());
-        }
-    }
-    Ok(end_sequence)
-}
-fn udp_packet_socket(address: SocketAddr) -> Result<UdpSocket, String> {
-    let socket = connected_udp(address)?;
-    socket
-        .set_read_timeout(Some(UDP_PACKET_TIMEOUT))
-        .map_err(|error| format!("set UDP packet-rate read timeout failed: {error}"))?;
-    Ok(socket)
-}
-
-fn udp_packet_round_trip_with_recovery(
-    socket: &mut UdpSocket,
-    address: SocketAddr,
-    first_sequence: u64,
-    reply: &mut [u8],
-) -> Result<(u64, u64), String> {
-    let mut receive_retries = 0_u64;
-    loop {
-        match udp_batch_round_trip(socket, UDP_PAYLOAD, UDP_BATCH, first_sequence, reply) {
-            Ok(next_sequence) => return Ok((next_sequence, receive_retries)),
-            Err(error)
-                if error.starts_with("UDP batch receive failed:")
-                    && (receive_retries as usize) + 1 < UDP_RECEIVE_ATTEMPTS =>
-            {
-                receive_retries += 1;
-                *socket = udp_packet_socket(address)?;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-pub(crate) fn fragment_batch_round_trip(
-    socket: &UdpSocket,
-    batch: usize,
-    first_sequence: u64,
-    reply: &mut [u8],
-) -> Result<u64, String> {
-    if batch == 0 || reply.len() < FRAGMENT_REPLY_BUFFER {
-        return Err("fragment batch bounds are invalid".to_owned());
-    }
-    let end_sequence = first_sequence
-        .checked_add(batch as u64)
-        .ok_or_else(|| "fragment batch sequence overflow".to_owned())?;
-    for sequence in first_sequence..end_sequence {
-        let payload = fragment_request(sequence);
-        if socket
-            .send(&payload)
-            .map_err(|error| format!("fragment batch send failed: {error}"))?
-            != payload.len()
-        {
-            return Err("fragment batch sent a partial datagram".to_owned());
-        }
-    }
-    let mut seen = vec![false; batch];
-    for _ in 0..batch {
-        let received = socket
-            .recv(reply)
-            .map_err(|error| format!("fragment ACK receive failed: {error}"))?;
-        let sequence = fragment_ack_sequence(&reply[..received])?;
-        if !(first_sequence..end_sequence).contains(&sequence) {
-            return Err("fragment ACK sequence is outside the request set".to_owned());
-        }
-        let offset = (sequence - first_sequence) as usize;
-        if std::mem::replace(&mut seen[offset], true) {
-            return Err("fragment batch contained a duplicate ACK".to_owned());
-        }
-    }
-    Ok(end_sequence)
-}
-
-pub(crate) fn fragment_retry_budget(unique_datagrams: u64) -> u64 {
-    unique_datagrams
-        .div_ceil(FRAGMENT_RETRY_BUDGET_UNIQUE_DATAGRAMS)
-        .max(1)
-}
-
-pub(crate) fn fragment_batch_failure(
-    error: &str,
-    batch: &FragmentAckBatch,
-    retry_budget: u64,
-) -> String {
-    let missing_sequences = batch.missing_sequences();
-    format!(
-        "{error}; first={} end={} seen={} missing={} missing_sequences={missing_sequences:?} budget={retry_budget}",
-        batch.first_sequence,
-        batch.end_sequence,
-        batch.seen_bitmap(),
-        missing_sequences.len(),
+async fn generation(args: &Args, generation: u8) -> Result<Value, String> {
+    // Borrowed futures avoid detached tasks and join/cancellation ownership.
+    let established = tokio::sync::Barrier::new(4);
+    let (a, b, c, d) = tokio::try_join!(
+        flow(args, generation, 0, &established),
+        flow(args, generation, 1, &established),
+        flow(args, generation, 2, &established),
+        flow(args, generation, 3, &established)
+    )?;
+    Ok(
+        json!({"generation": generation, "payload_identity": format!("generation-{generation}"),
+        "concurrent_flows": 4, "all_flows_established_barrier": true, "flows": [a,b,c,d]}),
     )
 }
 
-pub(crate) fn send_fragment_request(socket: &UdpSocket, sequence: u64) -> Result<(), String> {
-    let payload = fragment_request(sequence);
-    if socket
-        .send(&payload)
-        .map_err(|error| format!("fragment request send failed: {error}"))?
-        != payload.len()
-    {
-        return Err("fragment request send was partial".to_owned());
+async fn reset(args: &Args) -> Result<Value, String> {
+    let (ready, release) = args.reset.as_ref().ok_or("missing reset markers")?;
+    let mut old_tcp = connect(args.tcp).await?;
+    exchange(&mut old_tcp, &payload(1024, 1, 4, 1)).await?;
+    let bytes = payload(BULK, 1, 4, 2);
+    let sent = pause_reader(&old_tcp, &bytes).await?;
+    let old_udp = udp(args.udp).await?;
+    let pending = payload(256, 1, 4, 30);
+    if old_udp.send(&pending).await.map_err(|e| e.to_string())? != pending.len() {
+        return Err("reset pending UDP partial send".into());
     }
-    Ok(())
-}
-
-pub(crate) fn receive_fragment_ack_window(
-    socket: &UdpSocket,
-    reply: &mut [u8],
-    batch: &mut FragmentAckBatch,
-    accounting: &mut FragmentWorkloadAccounting,
-    retry_budget: u64,
-) -> Result<bool, String> {
-    let deadline = Instant::now() + FRAGMENT_ACK_WINDOW;
-    while !batch.complete() {
-        let now = Instant::now();
-        if now >= deadline {
-            return Ok(false);
+    // Pending denotes unsatisfied harness reads, not a claim about which
+    // product queue currently owns the bytes or datagram.
+    publish(
+        ready,
+        &json!({"schema_version":1,"kind":"ferrum2.windows-tun-reset-ready",
+        "generation":1,"tcp_pending":true,"udp_pending":true,
+        "tcp_paused_bytes_sent":sent,"tcp_unwritable_milliseconds":100,
+        "udp_pending_datagrams":1,
+        "udp_local_endpoint":old_udp.local_addr().map_err(|e| e.to_string())?.to_string()}),
+    )?;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match tokio::fs::symlink_metadata(release).await {
+                Ok(metadata) => {
+                    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 {
+                        return Err("invalid reset release marker file".to_owned());
+                    }
+                    let content = tokio::fs::read(release).await.map_err(|e| e.to_string())?;
+                    let value: Value = serde_json::from_slice(&content).map_err(|e| e.to_string())?;
+                    if value != json!({"schema_version":1,"kind":"ferrum2.windows-tun-reset-release","generation":2}) {
+                        return Err("reset release marker identity mismatch".into());
+                    }
+                    return Ok(());
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) => return Err(error.to_string()),
+            }
         }
-        socket
-            .set_read_timeout(Some(deadline.duration_since(now)))
-            .map_err(|error| {
-                fragment_batch_failure(
-                    &format!("set fragment ACK window failed: {error}"),
-                    batch,
-                    retry_budget,
-                )
-            })?;
-        let received = match socket.recv(reply) {
-            Ok(received) => received,
-            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                return Ok(false);
+    }).await.map_err(|_| "reset release deadline")??;
+    // Buffered old-generation replies may precede retirement. Account and check
+    // them, but never accept timeout or a successful new request as retirement.
+    let mut drained = 0;
+    let retirement = tokio::time::timeout(IO_LIMIT, async {
+        let mut buffer = [0; 16 * 1024];
+        loop {
+            match old_tcp.read(&mut buffer).await {
+                Ok(0) => return Ok("eof"),
+                Ok(count) => {
+                    if drained + count > sent || buffer[..count] != bytes[drained..drained + count]
+                    {
+                        return Err("old-generation TCP payload mismatch".to_owned());
+                    }
+                    drained += count;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::ConnectionReset
+                            | ErrorKind::ConnectionAborted
+                            | ErrorKind::BrokenPipe
+                            | ErrorKind::NotConnected
+                    ) =>
+                {
+                    return Ok("reset");
+                }
+                Err(error) => return Err(format!("old TCP retirement failed: {error}")),
             }
-            Err(error) => {
-                return Err(fragment_batch_failure(
-                    &format!("fragment ACK receive failed: {error}"),
-                    batch,
-                    retry_budget,
-                ));
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!("old TCP did not retire after route reset: checked buffered bytes {drained}/{sent}")
+    })??;
+    drop(old_tcp);
+    let udp_local = old_udp.local_addr().map_err(|e| e.to_string())?;
+    let fresh = payload(256, 2, 4, 30);
+    let expected_fresh = super::socket_io::udp_ack(&fresh)?;
+    let expected_old = super::socket_io::udp_ack(&pending)?;
+    let buffered = tokio::time::timeout(IO_LIMIT, async {
+        if old_udp.send(&fresh).await.map_err(|e| e.to_string())? != fresh.len() {
+            return Err("same-tuple UDP fresh send was partial".to_owned());
+        }
+        let mut reply = [0; 257];
+        for old_replies in 0..2 {
+            let count = old_udp.recv(&mut reply).await.map_err(|e| e.to_string())?;
+            if reply[..count] == expected_fresh {
+                return Ok(old_replies);
             }
-        };
-        let sequence = fragment_ack_sequence(&reply[..received])
-            .map_err(|error| fragment_batch_failure(&error, batch, retry_budget))?;
-        accounting
-            .observe_ack(batch, sequence)
-            .map_err(|error| fragment_batch_failure(&error, batch, retry_budget))?;
-    }
-    Ok(true)
+            if reply[..count] != expected_old || old_replies != 0 {
+                return Err("same-tuple UDP received stale, duplicate, or corrupt payload".into());
+            }
+        }
+        Err("same-tuple UDP fresh reply missing".into())
+    })
+    .await
+    .map_err(|_| "same-tuple UDP fresh reply deadline")??;
+    drop(old_udp);
+    Ok(
+        json!({"ready_generation":1,"release_generation":2,"old_tcp_retired":true,
+        "old_tcp_retirement":retirement,"old_tcp_pending_bytes":sent,"old_tcp_drained_bytes":drained,
+        "old_udp_pending_datagrams":1,"old_udp_buffered_replies":buffered,
+        "same_tuple_udp_fresh_reply_checked":true,"udp_local_endpoint":udp_local.to_string(),
+        "udp_fresh_payload_identity":"generation-2"}),
+    )
 }
 
-pub(crate) fn fragment_workload_batch_round_trip(
-    socket: &UdpSocket,
-    phase: FragmentPhase,
-    first_sequence: u64,
-    reply: &mut [u8],
-    accounting: &mut FragmentWorkloadAccounting,
-) -> Result<u64, String> {
-    if reply.len() < FRAGMENT_REPLY_BUFFER {
-        return Err(format!(
-            "fragment workload reply buffer is invalid; first={first_sequence} end={first_sequence} seen=<none> missing={FRAGMENT_BATCH} budget=1"
-        ));
-    }
-    let mut batch = FragmentAckBatch::new(first_sequence, FRAGMENT_BATCH).map_err(|error| {
-        format!(
-            "{error}; first={first_sequence} end=<overflow> seen=<none> missing={FRAGMENT_BATCH} budget=1"
-        )
-    })?;
-    let prospective_unique = accounting
-        .total_unique_datagrams()
-        .and_then(|value| {
-            value
-                .checked_add(FRAGMENT_BATCH as u64)
-                .ok_or_else(|| "fragment prospective unique count overflow".to_owned())
+pub(crate) fn run_qualification(arguments: &[OsString]) -> Result<String, String> {
+    let args = parse(arguments, "qualification")?;
+    let result = runtime()?.block_on(async {
+        tokio::time::timeout(Duration::from_secs(55), async {
+            let first = generation(&args, 1).await?;
+            let mut generations = vec![first];
+            let reset = if args.reset.is_some() {
+                let witness = reset(&args).await?;
+                generations.push(generation(&args, 2).await?);
+                witness
+            } else {
+                Value::Null
+            };
+            Ok::<_, String>(
+                json!({"schema_version":1,"kind":"ferrum2.windows-tun-qualification",
+                "status":"PASS","generations":generations,"reset":reset}),
+            )
         })
-        .map_err(|error| fragment_batch_failure(&error, &batch, 1))?;
-    let retry_budget = fragment_retry_budget(prospective_unique);
-    accounting
-        .record_initial_attempts(phase, FRAGMENT_BATCH as u64)
-        .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
-    for sequence in batch.first_sequence..batch.end_sequence {
-        send_fragment_request(socket, sequence)
-            .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
-    }
-    if !receive_fragment_ack_window(socket, reply, &mut batch, accounting, retry_budget)? {
-        accounting
-            .record_ack_window_expiration()
-            .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
-        let missing_sequence = batch
-            .sole_missing_sequence()
-            .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
-        accounting
-            .record_retransmission(phase, missing_sequence, retry_budget)
-            .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
-        send_fragment_request(socket, missing_sequence)
-            .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
-        if !receive_fragment_ack_window(socket, reply, &mut batch, accounting, retry_budget)? {
-            accounting
-                .record_ack_window_expiration()
-                .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
-            return Err(fragment_batch_failure(
-                "fragment ACK remained missing after its only retransmission",
-                &batch,
-                retry_budget,
-            ));
+        .await
+        .map_err(|_| "qualification global deadline".to_owned())?
+    });
+    let output = args.output.as_ref().ok_or("missing output")?;
+    match result {
+        Ok(witness) => {
+            publish(output, &witness)?;
+            Ok("windows_tun_qualification status=PASS".into())
+        }
+        Err(error) => {
+            publish(
+                output,
+                &json!({"schema_version":1,"kind":"ferrum2.windows-tun-qualification","status":"FAIL","error":error}),
+            )?;
+            Err(error)
         }
     }
-    accounting
-        .record_unique_datagrams(phase, FRAGMENT_BATCH as u64)
-        .map_err(|error| fragment_batch_failure(&error, &batch, retry_budget))?;
-    Ok(batch.end_sequence)
 }
 
-pub(crate) fn udp_packets(
-    address: SocketAddr,
-    warmup: Duration,
-    active: Duration,
-    active_markers: Option<&ActiveWindowMarkers>,
-) -> Result<Value, String> {
-    let mut socket = udp_packet_socket(address)?;
-    let mut reply = vec![0; UDP_PAYLOAD];
-    let (mut sequence, _) =
-        udp_packet_round_trip_with_recovery(&mut socket, address, 0, &mut reply)?;
-    let warmup_deadline = Instant::now() + warmup;
-    while Instant::now() < warmup_deadline {
-        (sequence, _) =
-            udp_packet_round_trip_with_recovery(&mut socket, address, sequence, &mut reply)?;
-    }
-    let mut latencies = Vec::with_capacity(UDP_LATENCY_SAMPLE_CAP);
-    let mut datagrams = 0_u64;
-    let mut receive_retries = 0_u64;
-    wait_for_active_release(active_markers)?;
-    let start = Instant::now();
-    let mut window = ActiveWorkWindow::new(active);
-    loop {
-        let started = Instant::now();
-        if !window.admits(started.duration_since(start)) {
-            break;
-        }
-        let (next_sequence, retries) =
-            udp_packet_round_trip_with_recovery(&mut socket, address, sequence, &mut reply)?;
-        let completed = Instant::now();
-        window.complete(
-            started.duration_since(start),
-            completed.duration_since(start),
-            UDP_BATCH as u64,
-        )?;
-        let latency = u64::try_from(completed.duration_since(started).as_nanos())
-            .map_err(|_| "UDP packet latency overflow".to_owned())?;
-        record_latency_sample(
-            &mut latencies,
-            datagrams / UDP_BATCH as u64,
-            latency,
-            UDP_LATENCY_SAMPLE_CAP,
-        )?;
-        sequence = next_sequence;
-        receive_retries = receive_retries
-            .checked_add(retries)
-            .ok_or_else(|| "UDP receive retry count overflow".to_owned())?;
-        datagrams = datagrams
-            .checked_add(UDP_BATCH as u64)
-            .ok_or_else(|| "UDP datagram count overflow".to_owned())?;
-    }
-    signal_active_complete(active_markers)?;
-    let measured = window.finish(UDP_MINIMUM_DATAGRAMS, "UDP packet")?;
-    let latency = latency_percentiles(latencies, "UDP packet")?;
-    let io_completions = datagrams
-        .checked_mul(2)
-        .ok_or_else(|| "UDP I/O completion count overflow".to_owned())?;
-    Ok(json!({
-        "measurements": {
-            "packet_rate": elapsed_rate(datagrams, measured.elapsed, "UDP packet rate")?,
-            "p50_nanoseconds": latency.p50,
-            "p95_nanoseconds": latency.p95,
-            "p99_nanoseconds": latency.p99,
-            "latency_samples": latency.samples,
-            "active_elapsed_nanoseconds": elapsed_nanoseconds(measured.elapsed)?,
-            "tail_checked_units": measured.tail_checked_units,
-            "io_completions": io_completions
-        },
-        "counters": {
-            "receive_retries": receive_retries
-        },
-        "checked_units": datagrams,
-        "checks": {
-            "every_reply_accounted": true,
-            "payload_exact": true,
-            "receive_retries_penalized": true,
-            "no_gso": true
-        }
-    }))
-}
-
-pub(crate) fn association_round(
-    sockets: &[UdpSocket],
-    seed_prefix: u64,
-    reply: &mut [u8; 32],
-    batch_associations: usize,
-    phase: &str,
-) -> Result<(), String> {
-    if batch_associations == 0 || !sockets.len().is_multiple_of(batch_associations) {
-        return Err("association batch bounds are invalid".to_owned());
-    }
-    for (batch_index, batch) in sockets.chunks(batch_associations).enumerate() {
-        let base = batch_index * batch_associations;
-        for (offset, socket) in batch.iter().enumerate() {
-            let seed = seed_prefix
-                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                .wrapping_add((base + offset) as u64);
-            let payload = checked_payload(32, seed);
-            if socket
-                .send(&payload)
-                .map_err(|error| {
-                    format!(
-                        "association batch send failed: phase={phase} association_index={} error={error}",
-                        base + offset
-                    )
-                })?
-                != payload.len()
-            {
-                return Err(format!(
-                    "association batch sent a partial datagram: phase={phase} association_index={}",
-                    base + offset
-                ));
-            }
-        }
-        for (offset, socket) in batch.iter().enumerate() {
-            let seed = seed_prefix
-                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                .wrapping_add((base + offset) as u64);
-            let payload = checked_payload(32, seed);
-            let received = socket
-                .recv(reply)
-                .map_err(|error| {
-                    format!(
-                        "association batch receive failed: phase={phase} association_index={} error={error}",
-                        base + offset
-                    )
-                })?;
-            if received != payload.len() || reply[..received] != payload {
-                return Err(format!(
-                    "association batch payload mismatch: phase={phase} association_index={}",
-                    base + offset
-                ));
-            }
-        }
-    }
-    Ok(())
+pub(crate) fn run_probe(arguments: &[OsString]) -> Result<String, String> {
+    let args = parse(arguments, "probe")?;
+    runtime()?.block_on(async {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut stream = connect(args.tcp).await?;
+            exchange(&mut stream, &payload(1024, 1, 0, 0)).await?;
+            let socket = udp(args.udp).await?;
+            datagram(&socket, &payload(256, 1, 0, 0)).await?;
+            datagram(&socket, &payload(FRAGMENT, 1, 0, 1)).await
+        })
+        .await
+        .map_err(|_| "probe deadline")?
+    })?;
+    Ok("windows_tun_probe status=PASS protocols=tcp,udp".into())
 }

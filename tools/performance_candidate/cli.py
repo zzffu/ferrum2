@@ -22,14 +22,7 @@ from tools.performance_candidate.linux.schedule import scenario_schedule, schedu
 from tools.performance_candidate.linux.scale import load_scale_safety_policy
 from tools.performance_candidate.linux.scale_lineage import build_scale_lineage, load_scale_lineage, validate_scale_source_lineage
 from tools.performance_candidate.output import _atomic_text
-from tools.performance_candidate.status import qualification_exit_code
-from tools.performance_candidate.windows_tun.recipe import (
-    WINDOWS_TUN_MODES,
-    WINDOWS_TUN_TOPOLOGIES,
-)
-from tools.performance_candidate.windows_tun.summary import (
-    validate_windows_tun_host_evidence,
-)
+from tools.performance_candidate.tun_mock import register_commands, run_command
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -137,24 +130,7 @@ def _parser() -> argparse.ArgumentParser:
     source_lineage.add_argument("--head-sha", required=True)
     source_lineage.add_argument("--parent-sha", required=True)
     source_lineage.add_argument("--candidate-sha", required=True)
-    windows_tun_validate = commands.add_parser(
-        "windows-tun-validate-host-evidence",
-        help="validate one cleanup-complete Windows-host TUN evidence bundle",
-    )
-    windows_tun_validate.add_argument(
-        "--evidence-root", required=True, type=pathlib.Path
-    )
-    windows_tun_validate.add_argument("--baseline-sha", required=True)
-    windows_tun_validate.add_argument("--candidate-sha", required=True)
-    windows_tun_validate.add_argument(
-        "--mode", required=True, choices=sorted(WINDOWS_TUN_MODES)
-    )
-    windows_tun_validate.add_argument(
-        "--topology", required=True, choices=sorted(WINDOWS_TUN_TOPOLOGIES)
-    )
-    windows_tun_validate.add_argument(
-        "--policy", required=True, type=pathlib.Path
-    )
+    register_commands(commands)
     return parser
 
 
@@ -311,17 +287,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 parsed.candidate_sha,
             )
             return 0
-        if parsed.command == "windows-tun-validate-host-evidence":
-            report = validate_windows_tun_host_evidence(
-                evidence_root=parsed.evidence_root,
-                baseline_sha=parsed.baseline_sha,
-                candidate_sha=parsed.candidate_sha,
-                mode=parsed.mode,
-                topology=parsed.topology,
-                policy_path=parsed.policy,
-            )
+        if parsed.command.startswith("tun-mock-"):
+            report = run_command(parsed)
             print(json.dumps(report, sort_keys=True, allow_nan=False))
-            return qualification_exit_code(report["status"])
+            return 0 if report["status"] in {"calibrated", "improved", "equivalent"} else 4
         raise AssertionError(f"unhandled command: {parsed.command}")
     except CandidateControlError as error:
         print(f"performance-candidate: {error}", file=sys.stderr)

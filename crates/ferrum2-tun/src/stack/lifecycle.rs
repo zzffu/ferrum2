@@ -21,6 +21,7 @@ impl Stack {
         Ok(())
     }
 
+    #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
     /// Final shutdown/full rebuild may also close the last representable generation.
     pub(crate) fn quiesce(&mut self, next_generation: u64, reason: UdpResponseDropReason) -> usize {
         if self.fenced_generation.is_none() && self.fence_generation(next_generation).is_err() {

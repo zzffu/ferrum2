@@ -20,8 +20,8 @@ Commands assume the repository root unless a guide says otherwise. Use `python` 
 
 | Guide | Scope |
 |---|---|
-| [Windows TUN correctness](windows-tun-qualification.md) | Fixed eight-check host plan, 900-second bound, source identity, recovery, and final verdict |
-| [Performance evidence](performance-evidence.md) | Controller ownership, host performance planning/validation, paired evidence, and retention |
+| [Windows TUN correctness](windows-tun-qualification.md) | Real socket coverage and fixed eight-check host plan: sustained traffic, active reset, WFP, 900-second bound and recovery |
+| [Performance evidence](performance-evidence.md) | TUN-only mock I/O, calibrated paired evidence, Linux controller ownership and retention |
 | [Rule qualification runner](../tools/ferrum2-rule-qualification/README.md) | Explicit measurement commands, schemas, and reviewed A/A calibration |
 | [Rule performance controller](../tools/performance_rule/README.md) | Calibration preflight, requested workload identity, evidence budget, and atomic output |
 | [Rule evidence tests](../tests/performance_rule/README.md) | Offline synthetic contracts and content-addressed external archive verification |

@@ -8,11 +8,12 @@ function Read-Ferrum2HostQualificationSourceBundle {
     $expectedPaths = @(
         "tests/platform/invoke_windows_tun_qualification_host_worker.ps1"
         "tests/platform/run_windows_tun_qualification_host.ps1"
-        "tools/powershell/Ferrum2.Performance/HostExecution.ps1"
-        "tools/powershell/Ferrum2.Performance/HostProduct.ps1"
-        "tools/powershell/Ferrum2.Performance/HostOwnership.ps1"
-        "tools/powershell/Ferrum2.Performance/HostCleanup.ps1"
-        "tools/powershell/Ferrum2.Performance/PerformanceProcessOwner.cs"
+        "tools/powershell/Ferrum2.Qualification.Host/HostExecution.ps1"
+        "tools/powershell/Ferrum2.Qualification.Host/HostProduct.ps1"
+        "tools/powershell/Ferrum2.Qualification.Host/HostOwnership.ps1"
+        "tools/powershell/Ferrum2.Qualification.Host/HostCleanup.ps1"
+        "tools/powershell/Ferrum2.Qualification.Host/HostFirewall.ps1"
+        "tools/powershell/Ferrum2.Qualification.Host/HostProcessOwner.cs"
         "tools/powershell/Ferrum2.Qualification.Host/Ferrum2.Qualification.Host.psd1"
         "tools/powershell/Ferrum2.Qualification.Host/Ferrum2.Qualification.Host.psm1"
         "tools/powershell/Ferrum2.Qualification.Host/HostQualification.ps1"
@@ -20,6 +21,7 @@ function Read-Ferrum2HostQualificationSourceBundle {
         "tools/powershell/Ferrum2.Qualification.Host/SourceBundle.ps1"
         "tools/powershell/Ferrum2.Qualification.Host/SupervisorEvidence.ps1"
         "tools/powershell/Ferrum2.Qualification.Host/WfpEvidence.ps1"
+        "tools/powershell/Ferrum2.Qualification.Host/WorkloadEvidence.ps1"
     ) | Sort-Object
     $manifestItem = Get-Item -LiteralPath $ManifestPath -Force -ErrorAction Stop
     if ($manifestItem.PSIsContainer -or $manifestItem.Length -le 0 -or

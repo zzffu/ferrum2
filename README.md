@@ -80,7 +80,7 @@ cargo run -p ferrum2-client --locked -- --config client.toml --dashboard-listen 
 - [Windows TUN 配置](docs/config-v2-tun.md)：当前 schema-v2 字段、系统 TCP、原生 UDP 和网络生命周期。
 - [内嵌 rocom 录制与离线解码](docs/architecture/rocom-recording-design.md)：自动识别 TSF4G 连接，每条连接独立保存原始数据/key JSONL，普通 TCP 不录制；敏感录制须显式开启。
 - [Windows TUN 正确性验证](docs/windows-tun-qualification.md)：真实网卡验证的专用流程。
-- [性能证据说明](docs/performance-evidence.md)：Linux 配对测量和 Windows 主机性能流程。
+- [性能证据说明](docs/performance-evidence.md)：Linux 配对测量与 TUN-only mock I/O 基准、A/A 校准和证据验证。
 - [Rule 性能控制器](tools/performance_rule/README.md)：校准前置检查、请求绑定与有界证据保留。
 - [TUN 系统 TCP 设计](docs/architecture/tun-system-tcp-design.md)：TCP 交给 Windows、UDP 保持原生；已选定最小临时入站放行与受管宿主机验证。
 
@@ -92,5 +92,13 @@ cargo run -p ferrum2-client --locked -- --config client.toml --dashboard-listen 
 
 完整命令和平台前提见[贡献指南](AGENTS.md)，CI 门禁见[门禁清单](docs/architecture/gates.md)。
 普通测试中客户端测试二进制只编译，TUN 和 Windows 平台库使用关闭默认特性的安全测试入口。
-真实 Windows TUN 正确性或性能运行需要已提升权限的 shell 和显式
-`-AcknowledgeHostNetworkMutation`，并由相应专用 runner 完成资源回收。
+TUN 性能使用 crate-owned `tun-benchmark`，只运行真实 TUN 逻辑与有界内存 I/O，不需要管理员权限。
+真实 Windows TUN 正确性运行仍需要已提升权限的 shell 和显式
+`-AcknowledgeHostNetworkMutation`，由唯一资格 runner 验证持续传输、重置及零残留。
+
+```text
+cargo build -p ferrum2-tun --example tun-benchmark --no-default-features --features benchmark --profile profiling --locked
+```
+
+Windows 可运行 `target/profiling/examples/tun-benchmark.exe --scenario tcp-rewrite --mode Quick`；
+Unix 省略 `.exe`。单场景输出只是内部处理成本观察，正式比较按性能指南执行校准和配对。

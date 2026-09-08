@@ -144,11 +144,11 @@ association freeze, so an initial query to the configured synthetic address does
 Internet outbound. Address-dependent filtering authorizes a remote IP only after a successful send;
 endpoint-independent filtering accepts any otherwise-valid same-family response source.
 
-The privileged host qualification sends TCP and UDP probes through one run-owned IPv4 TUN before and
-after a real network notification. It proves run-owned `/32` route isolation, live strict-route WFP
-identity, process-tree recovery, and zero residue. Detailed UDP mapping, filtering, capacity, queue,
-and stale-generation behavior remains covered by the hosted-safe Rust suites rather than a long live
-profile matrix.
+Privileged host qualification sends sustained, checked TCP and UDP/fragment requests through one
+run-owned IPv4 TUN. It exercises backpressure, half-close and active-work reset, requiring old TCP
+retirement and a fresh tagged reply on the same UDP socket. It also proves `/32` isolation, exact
+WFP epochs, process-tree recovery and zero residue. Detailed mapping/filtering/capacity and
+stale-capability behavior remains covered by hosted-safe Rust tests, not a long live profile matrix.
 
 ## Automatic and strict routing
 
@@ -239,6 +239,11 @@ Accepted IPv4 and IPv6 fragments are reassembled under bounded entry, fragment-c
 and timeout limits before transport checks, DNS matching, or routing. Overlapping fragments are
 dropped. Ferrum2 may generate local IPv4 Fragmentation Needed, IPv6 Packet Too Big, and appropriate
 Unreachable errors.
+
+UDP ingress reassembly does not imply outbound response fragmentation. A TUN UDP response payload
+must fit the interface MTU minus its IP/UDP headers (28 bytes for IPv4, 48 for IPv6); an oversized
+response is rejected. Qualification therefore verifies the entire fragmented request at its support
+endpoint and returns a small acknowledgement binding request length and generation/flow identity.
 
 ICMP Echo is not proxied to a remote endpoint. `ping` therefore does not measure Ferrum2 tunnel
 connectivity; use a TCP or UDP health check.

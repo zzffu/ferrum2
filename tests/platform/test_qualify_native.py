@@ -164,10 +164,11 @@ class HostFailureEvidenceTests(unittest.TestCase):
             script.write_text(r"""
 param([string]$Owners, [string]$FixtureRoot)
 $ErrorActionPreference = 'Stop'
-. (Join-Path $Owners 'Ferrum2.Performance/HostExecution.ps1')
-. (Join-Path $Owners 'Ferrum2.Performance/HostProduct.ps1')
+. (Join-Path $Owners 'Ferrum2.Qualification.Host/HostExecution.ps1')
+. (Join-Path $Owners 'Ferrum2.Qualification.Host/HostProduct.ps1')
 . (Join-Path $Owners 'Ferrum2.Qualification.Host/HostQualification.ps1')
 function Add-Ferrum2OwnedAddress { }
+function Add-Ferrum2OwnedFirewallRule { }
 function Start-Ferrum2Support { return @{ tcp_port = 41002; udp_port = 41003 } }
 function Initialize-Ferrum2QualificationResetRoute {
     return @{ endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Parse('198.19.0.2'), 9) }
@@ -175,11 +176,11 @@ function Initialize-Ferrum2QualificationResetRoute {
 function Fixture-Process($Role) {
     return @{ stdout = (Join-Path $FixtureRoot "$Role.stdout"); stderr = (Join-Path $FixtureRoot "$Role.stderr") }
 }
-function Start-Ferrum2ProductTrial {
-    return @{ client = (Fixture-Process client); server = (Fixture-Process server); client_metrics_port = 41000; server_metrics_port = 41001 }
+function Start-Ferrum2HostProduct {
+    return @{ dynamic_ranges = @(@{ protocol = 'udp'; start_port = 49152; end_port = 65535 }); adapter_name = 'fixture'; client = (Fixture-Process client); server = (Fixture-Process server); client_metrics_port = 41000; server_metrics_port = 41001 }
 }
 $script:stops = 0
-function Stop-Ferrum2ProductTrial { $script:stops += 1 }
+function Stop-Ferrum2HostProduct { $script:stops += 1 }
 function Assert-Ferrum2QualificationWfpAbsent { }
 function Get-Ferrum2QualificationLiveWfpWitness { return @{ strict_route = @{}; tcp_ingress = @{} } }
 $script:metricsCalls = 0
@@ -192,15 +193,15 @@ function Get-Ferrum2QualificationMetricLabelValue($Metrics, $Name, $Label, $Valu
     if ($Value -eq 'failure') { return 0 }
     return 1
 }
-function Invoke-Ferrum2OwnedCommand { throw 'injected TCP probe failure' }
+function Start-Ferrum2OwnedNativeProcess { throw 'injected TCP probe failure' }
 $failure = $null
 try {
-    Invoke-Ferrum2HostQualificationChecks -Context @{ evidence_directory = $FixtureRoot } `
+    Invoke-Ferrum2HostQualificationChecks -Context @{ evidence_directory = $FixtureRoot; run_root = $FixtureRoot } `
         -Candidate @{
             harness = (Join-Path $FixtureRoot 'harness.exe')
             client = (Join-Path $FixtureRoot 'ferrum2-client.exe')
         } `
-        -Network @{ support_address = '198.19.0.1'; support_prefix_length = 32 } -Loopback @{} | Out-Null
+        -Network @{ tun_address = '198.18.0.2'; support_address = '198.19.0.1'; support_prefix_length = 32 } -Loopback @{} | Out-Null
 } catch { $failure = $_.Exception.Message }
 @{ failure = $failure; stops = $script:stops } | ConvertTo-Json -Compress
 """, encoding="utf-8")
@@ -219,8 +220,8 @@ try {
                 },
             )
             self.assertEqual(
-                {path.name: path.read_text(encoding="utf-8") for path in (root / "process-logs").glob("*.log")},
-                {f"trial-2-{role}.{stream}.log": f"{role} {stream}\n"
+                {path.read_text(encoding="utf-8") for path in (root / "process-logs").glob("*.log")},
+                {f"{role} {stream}\n"
                  for role in ("client", "server") for stream in ("stdout", "stderr")},
             )
 

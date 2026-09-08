@@ -41,10 +41,10 @@ Use `python` instead of `python3` on Windows.
 
 `tools/performance_candidate/cli.py` is the composition root. Named shared modules own strict JSON,
 identity, atomic output, and paired statistics. The `linux/` package owns Linux plans, trials,
-calibration, scale lineage, and decisions. The `windows_tun/` package separates recipe, plan,
-policy, trial, and summary contracts into their corresponding modules. `summary.py` validates
-build, runtime, cleanup, paired-profile, and lifecycle evidence. Host execution and recovery belong
-to the PowerShell owners below. Production code must not be loaded from `tests/`.
+calibration, scale lineage, and decisions. `tun_mock.py`, `tun_mock_contract.py`, and
+`tun_mock_process.py` own TUN-only execution, closed evidence, and bounded child ownership.
+Privileged correctness belongs exclusively to `Ferrum2.Qualification.Host`.
+Production code must not be loaded from `tests/`.
 
 The Linux evidence chain is:
 
@@ -74,189 +74,116 @@ fresh A/A and A/B evidence with the same updated controller and harness. A/A rem
 calibration input; the aggregate accepts only distinct parent/candidate A/B identities. Replay
 validates the reported measurements and decisions, not physical execution order or profiler data.
 
-The Windows evidence chain selects one topology per run:
+## TUN-only mock I/O performance
+
+TUN performance measures Ferrum2's packet processing, not Windows TCP throughput or complete
+proxy performance. It creates no OS sockets, Wintun adapter, route, DNS or WFP state:
 
 ```text
-ClientDirect: workload -> real Wintun -> ferrum2-client TUN/TCP/UDP stack
-              -> client direct egress -> local support echo
-EndToEnd:     workload -> real Wintun -> ferrum2-client -> ferrum2-server
-              -> server direct egress -> local support echo
+fixed packets and accepted-connection events -> bounded memory I/O adapter
+-> production Stack / SystemTcp / UDP / reassembly / owner scheduler
+-> bounded packet and datagram capture -> complete output validation
 ```
 
-Both continue through the same closed evidence path:
+The private socket adapter uses a bounded in-memory stream for accepted-flow publication and
+retirement. Production builds retain the real system socket implementation. The benchmark shares
+owner-stage processing with the live owner, rather than copying its algorithms into a test loop.
+OS accept/bind, reactor behavior, Windows TCP congestion/retransmission, driver costs, DNS, routing
+policy, relay and proxy protocols are outside this measurement.
+
+Build and inspect a single scenario without privileges:
 
 ```text
-host PowerShell transaction -> closed profile plan -> independently built baseline/candidate
--> interleaved real-Wintun trials -> bounded raw evidence
--> host validation/paired summary -> reviewed decision
+cargo build -p ferrum2-tun --example tun-benchmark --no-default-features --features benchmark --profile profiling --locked
 ```
 
-Windows build-manifest schema 2 distinguishes product source from the executed workload.
-Each member's `product_m4_source_bundle_sha256` records its independently verified complete M4
-source bundle. These product-tree bundles may differ after API or self-check migrations. The
-candidate's harness is not built or executed: both members use the identical baseline-built
-harness path and SHA-256. `shared_harness_commit_sha` is the baseline commit, and
-`shared_harness_source_bundle_sha256` must equal that baseline's verified M4 bundle. The validator
-rejects mismatched shared paths, binary hashes, source identity or commit, malformed member
-identities, and schema 1. This does not permit different executed workloads or skip either source
-bundle's exact closure/content verification. Old evidence remains historical and must be read
-with its original controller; there is no compatibility reader in the current schema.
+```powershell
+target/profiling/examples/tun-benchmark.exe --scenario tcp-rewrite --mode Quick
+```
 
-Product listener setup reads the host's IPv4 TCP/UDP dynamic port ranges through bounded,
-joined read-only commands and records them in `port-ranges/<sequence>.json`. It selects listener
-ports outside the applicable ranges and holds exclusive socket reservations through configuration
-checks and preceding product startup. Each reservation is released immediately before its owning
-product starts; pending reservations are disposed on every failure. This prevents this runner's
-HTTP readiness probes from automatically consuming a future listener port. It does not transfer
-an inherited socket to the product, so an unrelated explicit bind during the final handoff is still
-possible and remains a failed trial. Early product exit is reported before further metrics polling.
-There is no hidden startup retry, changed timed load, or successful-result substitution.
-TCP reservations bind and listen; UDP reservations bind only. Setting `ExclusiveAddressUse` before
-a TCP `Bind` is insufficient on Unix .NET, whose bind implementation enables address reuse.
-The finite ownership/handoff tests therefore run on both Windows and Linux with PowerShell 7;
-a Linux run without `pwsh` skips that coverage and is not evidence of cross-platform exclusivity.
+On Unix, omit `.exe`. The six closed scenarios are:
 
-The Windows performance PowerShell implementation is owned by
-`tools/powershell/Ferrum2.Performance`. Its only public composition root is
-`tools/windows-tun/performance/run_windows_tun_performance_host.ps1`. The runner interface exposes
-planning, recovery, one required `ClientDirect|EndToEnd` topology, and the `Quick`, `Confirm`, and
-`Lifecycle` profiles; it hides adapter names, benchmark addresses, ports, process IDs, routes,
-temporary files, ledgers, cleanup, and evidence construction.
-`PerformanceProcessOwner.cs` places every spawned product and support process in one kill-on-close job
-instead of embedding process-tree interop in the runner.
+| Scenario | Measured TUN work |
+|---|---|
+| `tcp-rewrite` | Established IPv4/IPv6 tuple lookup, bidirectional rewrite and packet output |
+| `tcp-churn` | Mapping admission, accepted-event association, flow publication, RST retirement and port quarantine |
+| `udp-roundtrip` | Association receive, response admission, response construction and output |
+| `fragment-reassembly` | Concurrent incomplete fragment ownership, completion and UDP response; Confirm mixes ordered and reverse arrival |
+| `mixed-backpressure` | TCP/UDP competition through the actual scheduler with bounded output withheld and resumed |
+| `state-reset` | Populated TCP/UDP/reassembly generation fence, retirement and rejection of stale response capabilities |
 
-`tools/powershell/Ferrum2.Performance/bundle.json` is the canonical closed host-performance source
-bundle. It binds every consumed runner, module, collector, scenario, and C# owner by canonical path,
-byte length, and SHA-256. Its complete-file digest is the Windows performance runner identity and is
-recorded from plan through raw evidence and summary. The bundle contains no qualification source.
-Any source, file-map, schema, recipe, or paired-schedule change requires atomic producer/consumer
-updates and a new baseline; stale calibration or evidence is not comparable.
+Quick uses 32 active states and 64-byte payloads. Confirm expands ordinary state populations to
+128 and payloads to 512 bytes, includes ordinary TCP/UDP IPv6 traffic, and increases checked work.
+These are fixed recipes, not user-selectable unchecked load sizes. Quick has three interleaved
+baseline/candidate pairs per scenario (36 trials); Confirm has five (60 trials).
 
-`Quick` is the autoresearch feedback profile. Per selected topology it measures TCP single-flow
-throughput, 1 KiB TCP request p99 latency, UDP packet rate, and fragment-reassembly throughput using
-three interleaved baseline/candidate pairs, for 24 trials. `Confirm` adds 256-flow TCP fairness and
-uses five longer-window pairs, for 50 trials per selected topology. Run the two topologies separately
-when both attribution and complete client/server behavior are required; evidence never mixes them.
+Each trial performs an untimed diagnostic pass, followed by 128 measured batches in Quick or
+64 in Confirm. Every batch uses fresh bounded state and preallocated output capture; elapsed time
+and checked work are summed across measured windows only. Full packet/payload comparison stays
+outside each window, and every captured output must match the diagnostic. Setup, validation and
+storage scans are not timed or subtracted. This fixed repetition replaces the initial single-batch
+recipe after actual A/A runs exposed large noise in sub-millisecond windows. Failed checks or
+capture exhaustion cannot produce a trial. Real monotonic clocks measure elapsed time; injected
+logical expiry time is never substituted for it. Recipe v2 binds the repeated-batch counts.
 
-Every raw trial records the primary metric and direction, checked work, I/O completions, applicable
-p99 latency, client CPU and peak working set, and failure counters. `EndToEnd` also records server CPU,
-peak working set, and failure counters; those server fields are null in `ClientDirect`. Summaries
-retain every pair and report direction-normalized improvement ratios, range, outliers, checked work,
-I/O, latency, CPU, and memory. The non-target CPU guard uses process CPU seconds per checked unit:
-`cpu_percent / 100 * cpu_sample_seconds / checked_units`. Each member uses its own measured window;
-the paired ratio therefore remains comparable when those windows differ. Primary latency direction
-does not change this CPU/work calculation. CPU percentages remain in summaries as observations.
+Raw schema 1 records exact checked units, elapsed nanoseconds, unit, workload identity and
+input/output/rejection accounting. `peak_packet_storage_bytes` is a diagnostic sampled peak of
+retained packet buffers, charged UDP payloads, reassembly pieces, capture and fixtures. It excludes
+metadata, allocator overhead, transient buffers between samples, mock socket buffers and process
+RSS. It is not total memory consumption. Capture/adapter work remains part of the workload;
+there is no subtraction of a guessed harness cost.
 
-The performance trial's zero-failure-delta guard retains failure/drop/error/reject family-name
-matching and also checks the emitter's closed result labels: failed network reset/full rebuild,
-failed RuleSet load/refresh, DNS resolution, strict-route filter installation and outbound interface
-resolution, plus rejected/failed/stale-generation UDP association route work. Started/succeeded
-lifecycle observations and association-reset cleanup counts are not failures. Known result families
-with missing, duplicate or unknown labels are invalid evidence. Each sample is added at most once;
-distinct families can describe the same root cause, so the sum is failure observations, not an
-independent incident count or error rate. The existing `family_disabled` and `invalid_destination`
-TUN packet-rejection exemptions remain unchanged.
+### Paired execution and calibration
 
-`Lifecycle` is separate: 20 complete product-start, TUN-probe, and product-stop cycles under the
-selected topology. It never changes a default route or disables or enables a physical adapter.
+The controller independently builds both members from exact Git commits in detached worktrees,
+including A/A. It retains binaries, build logs and all raw trial files outside the repository.
+Both members must have the same four-file benchmark recipe closure, workload identities and mode.
+Source SHA, binary digests, controller digest and host/toolchain/environment identity are bound.
+Every child is bounded and owned through a Windows kill-on-close job or Unix process group;
+worktree or process cleanup failure prevents success.
 
-Every real run requires an already elevated shell and the literal
-`-AcknowledgeHostNetworkMutation` switch. The runner uses dedicated RFC 2544 addresses and only exact
-benchmark routes. Both topologies must prove benchmark traffic enters the owned TUN and support
-egress excludes it; `EndToEnd` additionally proves the client/server underlay excludes it. Each
-mutation is recorded incrementally in a per-RunId recovery ledger. Success requires identity-safe
-cleanup plus independent readback proving no owned adapter, route, address, process, or port remains.
-Recovery ledger schema 2 keeps historical expected identities after actionable records are retired.
-It captures a bounded adapter GUID baseline before startup; an unfinished creation plan requires no
-new GUID and no expected-name conflict at final readback. Created adapters remain tracked by GUID
-and name. Failed enumeration or ambiguous identity rejects cleanup success and never authorizes
-removal of unrelated resources.
+First create same-commit A/A evidence for a commit containing the new benchmark:
 
-The host runner's `summary.json` status `PASS` means execution and evidence construction completed.
-Use the independent Python validator to check the complete evidence and derive the performance
-decision; `PASS` alone does not mean the candidate improved. Host plan, runtime, and summary schemas
-are v2; raw trials are v4, while build and cleanup schemas remain v1. The host source manifest uses its own
-v1 manifest schema and kind `ferrum2.windows-tun-performance-source-bundle.v3`; this is independent
-of the product's schema-v2 TOML configuration.
+```powershell
+$baseline = (git rev-parse HEAD).Trim()
+$calibration = Join-Path $env:TEMP ("ferrum2-tun-aa-" + [guid]::NewGuid().ToString("N"))
+python -B -m tools.performance_candidate tun-mock-calibrate `
+  --baseline-sha $baseline --mode Quick --evidence-root $calibration
+python -B -m tools.performance_candidate tun-mock-validate `
+  --baseline-sha $baseline --candidate-sha $baseline --mode Quick --evidence-root $calibration
+```
 
-The controller's closed qualification statuses are `CANDIDATE_WIN`, `WITHIN_CALIBRATED_BAND`,
-`REGRESSION`, `INCONCLUSIVE`, `CALIBRATION_REQUIRED`, and `INVALID`. Only the first two are accepted.
-Invalid evidence exits 2, regression exits 3, and inconclusive or calibration-required results exit 4.
-Windows paired scenario decisions use `candidate-win`, `within-noise-band`, and `regression`; the
-validator reduces them to the uppercase controller status. A same-commit A/A result characterizes
-measurement noise and cannot establish a code-change speedup.
+`calibrated` characterizes observed noise; it is never a speedup or correctness verdict. Each
+scenario's noise bound includes the largest absolute A/A pair change, not only its median.
+Review the raw evidence and reported `manifest_sha256` before adopting that calibration.
+Do not inherit the retired host runner's 2% or server CPU policy.
 
-### Windows host commands
-
-Run these from the repository root using PowerShell 7.4 or later. Inspect an unprivileged,
-nonmutating A/A plan first:
+After making and committing a product change without changing the benchmark recipe, set
+`$candidate` to that distinct commit and pin the reviewed calibration digest:
 
 ```powershell
 $candidate = (git rev-parse HEAD).Trim()
-$baseline = $candidate
-pwsh -NoProfile -File tools/windows-tun/performance/run_windows_tun_performance_host.ps1 `
-  -PlanOnly -Mode Quick -Topology ClientDirect `
-  -BaselineSha $baseline -CandidateSha $candidate
+$calibrationHash = (Get-FileHash (Join-Path $calibration "manifest.json") -Algorithm SHA256).Hash.ToLowerInvariant()
+$evidence = Join-Path $env:TEMP ("ferrum2-tun-ab-" + [guid]::NewGuid().ToString("N"))
+python -B -m tools.performance_candidate tun-mock-run `
+  --baseline-sha $baseline --candidate-sha $candidate --mode Quick --evidence-root $evidence `
+  --calibration-root $calibration --calibration-sha256 $calibrationHash
+python -B -m tools.performance_candidate tun-mock-validate `
+  --baseline-sha $baseline --candidate-sha $candidate --mode Quick --evidence-root $evidence `
+  --calibration-root $calibration --calibration-sha256 $calibrationHash
 ```
 
-For A/B, set `$baseline` to the full 40-character commit of a reviewed baseline with the same
-workload, recipe, and evidence contract. For a real run, use an already elevated shell, the reviewed
-Wintun archive described in the [host qualification prerequisites](windows-tun-qualification.md#safety-boundary),
-and a new evidence directory outside the repository:
+Use `Confirm` consistently to select its independent recipe/calibration. A changed recipe,
+controller, toolchain or environment requires new A/A evidence. A/B outcomes are `improved`,
+`equivalent`, `regressed` or `inconclusive`; all pairs must exceed the noise bound to claim an
+improvement, and any pair below the negative bound rejects a scenario. Summaries retain
+scenario decisions rather than hiding a regression in an aggregate score.
 
-```powershell
-$evidence = Join-Path $env:TEMP ("ferrum2-host-performance-" + [guid]::NewGuid().ToString("N"))
-pwsh -NoProfile -File tools/windows-tun/performance/run_windows_tun_performance_host.ps1 `
-  -Mode Quick -Topology ClientDirect `
-  -BaselineSha $baseline -CandidateSha $candidate -EvidenceDirectory $evidence `
-  -AcknowledgeHostNetworkMutation
-```
-
-Validate the exported evidence with the same mode, topology, and commits:
-
-```powershell
-python -B -m tools.performance_candidate windows-tun-validate-host-evidence `
-  --evidence-root $evidence --baseline-sha $baseline --candidate-sha $candidate `
-  --mode Quick --topology ClientDirect --policy tools/windows_tun_performance_policy.json
-```
-
-Use `Confirm` or `EndToEnd` consistently in both commands when selecting those profiles/topologies.
-After interruption, use the same public runner with `-RecoveryOnly`; removing live network residue
-requires elevation. Historical same-source A/A results describe their recorded builds and host
-conditions; they are not current-checkout qualification or evidence of a code-change speedup.
-
-Windows workload schema 5 and host trial schema 4 retain TCP/UDP p50, p95, and p99
-nanoseconds plus `latency_samples` in `workload_measurements`. All three quantiles use
-nearest rank over the same bounded, deterministic reservoir (maximum 2,000,000 samples).
-The controller binds the sample count to successful checked transactions/datagrams and rejects
-missing or unordered quantiles. Timing remains request-send through verified echo completion,
-including receive recovery; connection setup and warmup are outside that interval. These closed-loop
-observations do not establish open-load queueing SLOs. The p99 adoption policy is unchanged;
-p50/p95 are retained observations. Historical schema 2 trial evidence must be read with its own
-recorded controller revision. Current readers have no compatibility path.
-
-TCP single-flow, request, fairness, UDP packet and fragment scenarios stop admitting transactions or batches
-at the configured active deadline. Already admitted work finishes with complete payload/ACK
-validation; its latency and checked work remain included. The original minimum coverage is checked
-afterward, and insufficient coverage fails instead of extending admission. Fairness waits for every
-flow to finish warmup before the common active release. `active_elapsed_nanoseconds` covers the
-common active start through the later of the admission deadline and last verified completion;
-`tail_checked_units` counts work completed strictly after that deadline, in the same units as
-`checked_units` (single-flow/fairness bytes, TCP request transactions, UDP/fragment unique datagrams). Fragment tails
-retain the complete admitted batch and all existing retransmission accounting.
-
-Both host and Python readers check integer counts, coverage, payload alignment, bounded final work,
-and the elapsed/tail relationship. They recompute single-flow byte throughput, UDP packet rate, fragment byte rate and fairness
-aggregate byte throughput from checked work and that elapsed interval. CPU sampling remains an
-independent window including marker/coordination overhead; its duration is not replaced by workload
-elapsed time. A shorter CPU duration is rejected as a necessary consistency condition, not proof of
-aligned endpoints. The host reads CPU counters before releasing the ready marker and after observing
-the completion marker, but trial fields do not retain corresponding interval endpoints. Client and
-server counters are read sequentially while sharing a reported duration, so collection skew remains.
-Summaries alone cannot reconstruct TCP quantiles or Jain fairness without original
-latency samples or per-flow counts. Single-flow `cpu_payload_bytes` retains warmup plus active work
-as a total only; warmup bytes never enter the active throughput numerator. New comparisons require
-both members to use the same revised harness and bundles.
+The former privileged host A/B modes, topology selection and timed Lifecycle performance mode
+are retired. Historical host reports require their historical controller and are not comparable
+to this benchmark. A TUN-only improvement does not prove real driver or full client/server
+performance improvement. Real socket and Wintun/WFP correctness are checked separately by the
+[Windows qualification contract](windows-tun-qualification.md).
 
 ### Windows CPU profiling interpretation
 
@@ -340,16 +267,15 @@ identities, reviewed A/A calibration and uninstrumented paired A/B evidence unde
 - Removing the SOCKS ready-stream mutex remains conditional on a real relay profile and a design
   preserving exactly-once replies and UDP control lifetime; synthetic ready-poll timings are not
   sufficient adoption evidence.
-- Same-source Windows A/A verdict labeling and strict boolean/integer distinctions across Windows
-  evidence schemas remain carried-forward review questions, not newly verified defects or completed
-  fixes. CPU build/workload/window/loss/symbol qualification also remains explicit work.
+- Historical Windows host performance reports do not qualify the new TUN-only benchmark. Fresh
+  A/A and distinct-source A/B evidence are required. CPU build/workload/window/loss/symbol
+  qualification remains separate work; internal packet rates are not whole-product throughput.
 
 ## Ordinary and privileged boundaries
 
-Ordinary CI may compile controllers, validate tracked fixtures, parse PowerShell, reconstruct closed
-bundles, and run deterministic contract tests. It must not create a real adapter or claim Wintun,
-WFP, or host-network evidence. `-PlanOnly` is unprivileged and nonmutating. Real Windows TUN
-performance evidence may be created only by the dedicated host performance runner from an already
-elevated shell with explicit acknowledgement; success requires exported raw evidence and verified
-per-run cleanup. Correctness uses its separate bounded host runner, fixed check set, source identity,
-and `qualification.json` verdict; neither public runner nor verdict is a fallback for the other.
+Ordinary CI may compile the TUN-only benchmark, validate evidence and fixtures, parse PowerShell,
+reconstruct closed bundles, and run deterministic and real-loopback socket tests. It must not
+create a real adapter or claim Wintun, WFP or host-network evidence. TUN mock performance needs
+no elevation or network acknowledgement. Privileged correctness uses the sole bounded host
+runner with explicit acknowledgement, a fixed check set, exact source identity, observed
+data-path/reset witnesses, zero-residue cleanup and a final `qualification.json` verdict.

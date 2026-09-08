@@ -82,6 +82,33 @@ pub(crate) struct ReassemblyTable {
 }
 
 impl ReassemblyTable {
+    #[cfg(feature = "benchmark")]
+    pub(crate) fn owned_packet_bytes(&self) -> usize {
+        self.entries
+            .values()
+            .map(|entry| {
+                let headers = match &entry.layout {
+                    Layout::Ipv4 {
+                        normalized_header,
+                        first_header,
+                    } => {
+                        normalized_header.capacity()
+                            + first_header.as_ref().map_or(0, Vec::capacity)
+                    }
+                    Layout::Ipv6 {
+                        normalized_prefix, ..
+                    } => normalized_prefix.capacity(),
+                };
+                headers
+                    + entry
+                        .pieces
+                        .iter()
+                        .map(|piece| piece.bytes.capacity())
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+
     pub(crate) fn new(generation: u64) -> Self {
         Self {
             generation,

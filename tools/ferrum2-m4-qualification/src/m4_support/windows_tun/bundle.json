@@ -35,13 +35,13 @@
     },
     {
       "path": "src/m4_support/mod.rs",
-      "bytes": 3535,
-      "sha256": "f89f73b72623fb22a3b73a78a8c87174fc74c7c183e1c30a79e70a3630a91623"
+      "bytes": 3347,
+      "sha256": "7273a76f8ba5bd7d088334b763bd7783c97f975fa3945133a930ee5cc0f76ab3"
     },
     {
-      "path": "src/m4_support/process_support/deadline_io/tests.rs",
-      "bytes": 4682,
-      "sha256": "db150ec6fb81c5514038052dcc9feb351d85a3ce42ef7e47777b0f207ffef9d6"
+      "path": "src/m4_support/process_support.rs",
+      "bytes": 29021,
+      "sha256": "7a1b66ddf92afa83503010505bc7c3de8e0a4d0cc136567f83ebbfdf4e6633eb"
     },
     {
       "path": "src/m4_support/process_support/deadline_io.rs",
@@ -49,14 +49,14 @@
       "sha256": "abecbbabc0c3463a4aeed0fd9813370f795c0da5eeb0109e9962fa9a0c4b2931"
     },
     {
+      "path": "src/m4_support/process_support/deadline_io/tests.rs",
+      "bytes": 4682,
+      "sha256": "db150ec6fb81c5514038052dcc9feb351d85a3ce42ef7e47777b0f207ffef9d6"
+    },
+    {
       "path": "src/m4_support/process_support/probe.rs",
       "bytes": 8419,
       "sha256": "e68501aa195e1a593b0f0f3765fc7eded7d7008a954e4064eccbabba8d1a1471"
-    },
-    {
-      "path": "src/m4_support/process_support.rs",
-      "bytes": 29021,
-      "sha256": "7a1b66ddf92afa83503010505bc7c3de8e0a4d0cc136567f83ebbfdf4e6633eb"
     },
     {
       "path": "src/m4_support/profile_contract.rs",
@@ -150,73 +150,33 @@
     },
     {
       "path": "src/m4_support/windows_tun/contract.rs",
-      "bytes": 20478,
-      "sha256": "faa37e725bad135aec8a5934794b5c373c8371502463e36c2f9325bac7378745"
-    },
-    {
-      "path": "src/m4_support/windows_tun/diagnostic.rs",
-      "bytes": 27533,
-      "sha256": "474d43048c14d492067025bb1c3ffef9609f5cdd5ef79abc7496b58f3a5d0035"
-    },
-    {
-      "path": "src/m4_support/windows_tun/latency.rs",
-      "bytes": 1774,
-      "sha256": "833f40502a57a3ecf881569218009a262a77fb9e157ce98ef6edeaf31fbcbb74"
-    },
-    {
-      "path": "src/m4_support/windows_tun/measurement.rs",
-      "bytes": 6704,
-      "sha256": "a4f9f6cad8a68f0a416ad5472c6b5794e69f5f086cd26efb9b712426f22c2759"
+      "bytes": 3962,
+      "sha256": "cee90e411afc6ba3f65d8f5ad3f8024e40a955834c79071cf0e2ab431cc6b349"
     },
     {
       "path": "src/m4_support/windows_tun/mod.rs",
-      "bytes": 306,
-      "sha256": "76de694be3e498581755bf1f4b6c05a79f1397f4bb76bf5490735c4cf8fedd22"
-    },
-    {
-      "path": "src/m4_support/windows_tun/scenarios.rs",
-      "bytes": 19891,
-      "sha256": "b3f1b274ee345b8c7cb1db0679382c0d45e3c459baec851ff955e1afa634be41"
-    },
-    {
-      "path": "src/m4_support/windows_tun/self_check/cli_contract.rs",
-      "bytes": 17253,
-      "sha256": "bb8083f12bd9d1ceaba3df4f86a35185bf75c516ba8a679d1a343b97818452f6"
-    },
-    {
-      "path": "src/m4_support/windows_tun/self_check/diagnostic.rs",
-      "bytes": 22416,
-      "sha256": "9333d979496b5b4517ff1d80dd3f86663501603080640b83bf7e189584c47fa1"
-    },
-    {
-      "path": "src/m4_support/windows_tun/self_check/measurement.rs",
-      "bytes": 7826,
-      "sha256": "94f860d141db1e2de842058016d80b9a1cb960ea4f27b4f367720603408e4cad"
-    },
-    {
-      "path": "src/m4_support/windows_tun/self_check/workload.rs",
-      "bytes": 11082,
-      "sha256": "98f4268f4561246726170da5088339d7619d2d90246292a6b4630f1b5e4204fd"
+      "bytes": 210,
+      "sha256": "17079b55fc72c7f4d7b72781da914ee93ae6532116c5f9626c7d2950424907ed"
     },
     {
       "path": "src/m4_support/windows_tun/self_check.rs",
-      "bytes": 425,
-      "sha256": "1b90b20e6f5d4fcd6f46b3623f3da95b28b89b1d988b91daeeced1cd702bfc05"
+      "bytes": 1810,
+      "sha256": "9cb2d96b45f9e92a27b73f9cab93548f0e2034cab1d36c059d9e6cc1524b2131"
+    },
+    {
+      "path": "src/m4_support/windows_tun/socket_io.rs",
+      "bytes": 7038,
+      "sha256": "ee269380da217a845a2c9f6580c101670c260edb0edaeb69044621a7028f9d01"
     },
     {
       "path": "src/m4_support/windows_tun/support.rs",
-      "bytes": 13189,
-      "sha256": "a0babb6714c4b21866c13cf391c08ed71747d37be32ad0b0b4ed4078dcd5b2cb"
+      "bytes": 3337,
+      "sha256": "d40ad8858de3c37a8b71ed6cd5d78a01079983df0caf664f4dfe0b9f93c2142c"
     },
     {
       "path": "src/m4_support/windows_tun/workload.rs",
-      "bytes": 38374,
-      "sha256": "6eaa06f88f4da3ee1fc6d18e2ca350122327fade0885814bbb2c884e50e808e8"
-    },
-    {
-      "path": "src/m4_support/windows_tun/workload_diagnostic.rs",
-      "bytes": 16433,
-      "sha256": "29d8ded29f3e6aa090ed0e481801c6c81fd46e18c3580ab05a94bed0445cf7cc"
+      "bytes": 10515,
+      "sha256": "920a7de09e6847c3d4582f64db228157e8b6130798e1cbee5753a5a4180675d0"
     },
     {
       "path": "src/main.rs",

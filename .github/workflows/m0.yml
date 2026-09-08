@@ -122,8 +122,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Windows TUN performance is privileged and runs only through the dedicated,
-          # explicitly acknowledged host runner. CI exercises the network-free control plane.
+          # TUN performance uses bounded in-memory I/O, never host network mutation.
+          # CI validates evidence contracts; paired measurements run explicitly.
           python3 -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v
       - name: Test Rule ordinary controller
         shell: bash
@@ -134,7 +134,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -B -m unittest discover -s tests/platform -p 'test_qualify_native.py' -v
+          python3 -B -m unittest discover -s tests/platform -p 'test_*.py' -v
       - name: Test declarative CI controllers
         shell: bash
         run: |
@@ -161,6 +161,11 @@ jobs:
           cargo test -p ferrum2-client --all-features --no-run --locked
           cargo test -p ferrum2-tun --lib --no-default-features --features fuzzing --locked
           cargo test -p ferrum2-platform-windows --lib --no-default-features --features fuzzing --locked
+      - name: Compile TUN-only mock benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check -p ferrum2-tun --example tun-benchmark --no-default-features --features benchmark --locked
       - name: Test DNS interop root
         shell: bash
         run: |

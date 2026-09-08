@@ -3,65 +3,6 @@ Set-StrictMode -Version Latest
 $script:QualificationMaximumElapsedSeconds = 900
 $script:QualificationWorkerTimeoutSeconds = 840
 $script:QualificationBuildTimeoutSeconds = 600
-$script:BaseWriteFerrum2TrialConfigs = ${function:Write-Ferrum2TrialConfigs}
-
-function Write-Ferrum2TrialConfigs {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][object]$Network,
-        [Parameter(Mandatory = $true)][object]$Loopback,
-        [Parameter(Mandatory = $true)][string]$AdapterName,
-        [Parameter(Mandatory = $true)]
-        [ValidateSet("EndToEnd")]
-        [string]$Topology,
-        [Parameter(Mandatory = $true)][uint16]$ServerPort,
-        [Parameter(Mandatory = $true)][uint16]$ClientMetricsPort,
-        [Parameter(Mandatory = $true)][uint16]$ServerMetricsPort,
-        [Parameter(Mandatory = $true)][int]$Sequence,
-        [AllowNull()][Net.IPEndPoint]$ResetProbeEndpoint = $null
-    )
-    $configs = & $script:BaseWriteFerrum2TrialConfigs `
-        -Context $Context -Network $Network -Loopback $Loopback `
-        -AdapterName $AdapterName -Topology $Topology -ServerPort $ServerPort `
-        -ClientMetricsPort $ClientMetricsPort -ServerMetricsPort $ServerMetricsPort `
-        -Sequence $Sequence
-    $text = [IO.File]::ReadAllText([string]$configs.client)
-    $matches = [regex]::Matches($text, '(?m)^auto_route = true\r?$')
-    if ($matches.Count -ne 1) {
-        throw 'qualification client config has no unique automatic-route setting'
-    }
-    $text = [regex]::Replace(
-        $text,
-        '(?m)^auto_route = true\r?$',
-        "auto_route = true`r`nstrict_route = true",
-        1
-    )
-    if ($null -ne $ResetProbeEndpoint) {
-        if ([regex]::Matches($text, '(?m)^final = "proxy"\r?$').Count -ne 1) {
-            throw 'qualification reset config has no unique proxy route'
-        }
-        $text = [regex]::Replace(
-            $text, '(?m)^final = "proxy"\r?$', 'final = "qualification-route"', 1
-        )
-        # The selector keeps both first hops in the underlay snapshot, but always uses the
-        # existing proxy. The reset endpoint receives no qualification traffic.
-        $text += @"
-
-[[outbounds]]
-tag = "qualification-reset-probe"
-type = "shadowsocks"
-server = "$ResetProbeEndpoint"
-method = "2022-blake3-aes-128-gcm"
-psk = "AAECAwQFBgcICQoLDA0ODw=="
-[[selectors]]
-tag = "qualification-route"
-outbounds = ["proxy", "qualification-reset-probe"]
-default = "proxy"
-"@
-    }
-    [IO.File]::WriteAllText([string]$configs.client, $text, [Text.UTF8Encoding]::new($false))
-    return $configs
-}
 
 function Get-Ferrum2HostQualificationPlan {
     param(
@@ -87,6 +28,18 @@ function Get-Ferrum2HostQualificationPlan {
             'forced-process-tree-recovery',
             'zero-residue-cleanup'
         )
+        data_path_workload = [pscustomobject][ordered]@{
+            concurrent_tcp_flows_per_generation = 4
+            generations = 2
+            checked_bulk_bytes_per_flow = 8388608
+            phases = @('request_before', 'paused_reader', 'full_duplex', 'request_after', 'half_close')
+            udp_and_fragment_replies_during_tcp_per_flow = 4
+            fragment_request_bytes = 4096
+            tun_mtu_bytes = 1420
+            reset_contract = 'old TCP retires by EOF/reset; same UDP tuple checks new tagged reply separately from buffered old replies; reconnect TCP with new payload identity'
+            workload_timeout_seconds = 60
+            performance_adoption_thresholds = $false
+        }
         safety = [pscustomobject][ordered]@{
             requires_elevation = $true
             requires_explicit_acknowledgement = $true
@@ -96,16 +49,21 @@ function Get-Ferrum2HostQualificationPlan {
             tcp_ingress_scope = 'exact app, TCP, TUN LUID, local address/port, and remote peer'
             wfp_lifetime = 'process-owned dynamic sessions only'
             tcp_ingress_installation = 'automatic after listener bind and before admission'
+            firewall_rule_store = 'PersistentStore with exact ActiveStore readback'
+            firewall_rule_lifetime = 'removed by finally/recovery; catastrophic interruption may retain rules until recovery'
+            firewall_rule_scope = 'current executable path/hash; exact IPv4 endpoints; fixed service ports or observed dynamic-port range; all profiles'
+            firewall_interface_transition = 'client ingress only: prelaunch deferred interface, then same rule narrowed to owned TUN alias after identity/MTU readback and before traffic; all other rules exact interface throughout'
             mutations = @(
                 'one run-owned Wintun adapter at a time',
                 'run-owned RFC2544 loopback support address',
                 'run-owned narrow routes',
                 'process-owned dynamic strict-route WFP session',
-                'process-owned dynamic exact TCP ingress WFP session'
+                'process-owned dynamic exact TCP ingress WFP session',
+                'run-owned narrowly scoped Windows Firewall rules before executable launch'
             )
             forbidden_mutations = @(
                 'default route', 'system DNS', 'physical adapters', 'WLAN',
-                'persistent Windows Firewall rules', 'unrelated WFP sessions',
+                'unrelated Windows Firewall rules', 'global firewall profile/notification settings', 'unrelated WFP sessions',
                 'sing-box', 'unrelated resources'
             )
             recovery = '%PROGRAMDATA%/Ferrum2HostPerformance-v2/<RunId>/recovery.json'
@@ -167,7 +125,7 @@ function Initialize-Ferrum2QualificationCandidate {
         schema_version = 1
         kind = 'ferrum2.windows-tun.host-qualification-build'
         run_id = $Context.run_id
-        qualification_source_bundle_sha256 = $Context.performance_source_bundle_sha256
+        qualification_source_bundle_sha256 = $Context.qualification_source_bundle_sha256
         candidate = $candidate
     }
     Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory 'build.json') `
@@ -278,7 +236,8 @@ function Invoke-Ferrum2HostQualificationChecks {
     )
     [void](Add-Ferrum2OwnedAddress -Context $Context -Loopback $Loopback `
         -Address $Network.support_address -PrefixLength $Network.support_prefix_length)
-    $support = Start-Ferrum2Support -Context $Context -Harness $Candidate.harness -Network $Network
+    $support = Start-Ferrum2Support -Context $Context -Harness $Candidate.harness `
+        -Network $Network -Loopback $Loopback
     $checks = [Collections.Generic.List[object]]::new()
     $checks.Add([pscustomobject][ordered]@{
         name = 'single-candidate-build'; status = 'PASS'
@@ -293,14 +252,14 @@ function Invoke-Ferrum2HostQualificationChecks {
         (Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'baseline')
     )
 
-    $createRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Candidate `
-        -Network $Network -Loopback $Loopback -Sequence 1 -Topology "EndToEnd"
+    $createRuntime = Start-Ferrum2HostProduct -Context $Context -Member $Candidate `
+        -Network $Network -Loopback $Loopback -Sequence 1
     try {
         $createWfp = Get-Ferrum2QualificationLiveWfpWitness -Context $Context `
             -Runtime $createRuntime -Network $Network -ExecutablePath $Candidate.client `
             -Label 'create-live'
     } finally {
-        Stop-Ferrum2ProductTrial -Context $Context -Runtime $createRuntime
+        Stop-Ferrum2HostProduct -Context $Context -Runtime $createRuntime
     }
     [void]$wfpAbsence.Add(
         (Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'create-cleanup')
@@ -310,8 +269,8 @@ function Invoke-Ferrum2HostQualificationChecks {
     })
 
     $resetRoute = Initialize-Ferrum2QualificationResetRoute -Context $Context -Network $Network
-    $smokeRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Candidate `
-        -Network $Network -Loopback $Loopback -Sequence 2 -Topology "EndToEnd" `
+    $smokeRuntime = Start-Ferrum2HostProduct -Context $Context -Member $Candidate `
+        -Network $Network -Loopback $Loopback -Sequence 2 `
         -ResetProbeEndpoint $resetRoute.endpoint
     try {
         $metricsBefore = Get-Ferrum2Metrics -Port $smokeRuntime.client_metrics_port
@@ -334,12 +293,40 @@ function Invoke-Ferrum2HostQualificationChecks {
         $wfpBefore = Get-Ferrum2QualificationLiveWfpWitness -Context $Context `
             -Runtime $smokeRuntime -Network $Network -ExecutablePath $Candidate.client `
             -Label 'before-network-reset'
-        $probeArguments = "windows-tun-probe --target-ip $($Network.support_address) " +
-            "--tcp-port $($support.tcp_port) --udp-port $($support.udp_port)"
-        [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Candidate.harness `
-            -Arguments $probeArguments `
+        $workloadReady = Join-Path $Context.run_root 'qualification-reset-ready.json'
+        $workloadRelease = Join-Path $Context.run_root 'qualification-reset-release.json'
+        $workloadOutput = Join-Path $Context.evidence_directory 'qualification-workload.json'
+        $udpRanges = @($smokeRuntime.dynamic_ranges | Where-Object { $_.protocol -ceq 'udp' })
+        if ($udpRanges.Count -ne 1) { throw 'qualification UDP dynamic port identity is unavailable' }
+        [void](Add-Ferrum2OwnedFirewallRule -Context $Context -Executable $Candidate.harness `
+            -Protocol UDP -LocalAddress $Network.tun_address `
+            -LocalPort "$($udpRanges[0].start_port)-$($udpRanges[0].end_port)" `
+            -RemoteAddress $Network.support_address -RemotePort ([string]$support.udp_port) `
+            -InterfaceAlias $smokeRuntime.adapter_name -Purpose 'workload-udp-replies')
+        $workloadArguments = "windows-tun-qualification --target-ip $($Network.support_address) " +
+            "--tcp-port $($support.tcp_port) --udp-port $($support.udp_port) " +
+            "--reset-ready-file `"$workloadReady`" --reset-release-file `"$workloadRelease`" " +
+            "--output `"$workloadOutput`""
+        $workloadTimer = [Diagnostics.Stopwatch]::StartNew()
+        $workload = Start-Ferrum2OwnedNativeProcess -Context $Context `
+            -Application $Candidate.harness -Arguments $workloadArguments `
             -WorkingDirectory (Split-Path -Parent $Candidate.harness) `
-            -LogPrefix 'qualification-probe-before-network-reset' -TimeoutSeconds 60)
+            -LogPrefix 'qualification-workload' -Purpose 'qualification-workload'
+        while (-not (Test-Path -LiteralPath $workloadReady -PathType Leaf)) {
+            if ($workloadTimer.Elapsed.TotalSeconds -ge 20 -or
+                [Ferrum2HostProcessGroup]::Wait([uint32]$workload.pid, 0)) {
+                if (Test-Path -LiteralPath $workloadOutput -PathType Leaf) {
+                    $failedWorkload = Read-Ferrum2QualificationWorkloadJson -Path $workloadOutput
+                    if ($failedWorkload.status -ceq 'FAIL') {
+                        throw "qualification workload failed: $($failedWorkload.error)"
+                    }
+                }
+                throw 'qualification workload did not establish active reset work before deadline'
+            }
+            Start-Sleep -Milliseconds 50
+        }
+        $ready = Read-Ferrum2QualificationWorkloadJson -Path $workloadReady
+        Assert-Ferrum2QualificationResetReady -Witness $ready
         $routeProofs = @($smokeRuntime.route_proofs)
         $notificationAddress = $resetRoute.address
         $routeNotification = [Ferrum2QualificationRouteNotification]::new()
@@ -390,11 +377,23 @@ function Invoke-Ferrum2HostQualificationChecks {
             route_after = $resetRouteAfter
             session_generation_before = [uint64]$generationBefore
             session_generation_after = [uint64]$generationAfter
+            tun_mtu_bytes = $smokeRuntime.mtu_bytes
+            active_work_ready = $ready
+            workload_generation_before = 1
+            workload_generation_after = 2
         }
-        [void](Invoke-Ferrum2OwnedCommand -Context $Context -Application $Candidate.harness `
-            -Arguments $probeArguments `
-            -WorkingDirectory (Split-Path -Parent $Candidate.harness) `
-            -LogPrefix 'qualification-probe-after-network-reset' -TimeoutSeconds 60)
+        Write-AtomicJsonFile -Path $workloadRelease -Document ([pscustomobject]@{
+            schema_version = 1
+            kind = 'ferrum2.windows-tun-reset-release'
+            generation = 2
+        })
+        $remainingSeconds = [int][Math]::Floor(60 - $workloadTimer.Elapsed.TotalSeconds)
+        if ($remainingSeconds -le 0) { throw 'qualification workload exceeded its deadline' }
+        [void](Complete-Ferrum2OwnedCommand -Context $Context -Process $workload `
+            -LogPrefix 'qualification-workload' -TimeoutSeconds $remainingSeconds)
+        $workloadWitness = Read-Ferrum2QualificationWorkloadJson -Path $workloadOutput
+        Assert-Ferrum2QualificationWorkloadWitness -Witness $workloadWitness
+        $workloadTimer.Stop()
     } catch {
         $failure = $_
         Export-Ferrum2ProductFailureLogs -Context $Context -Client $smokeRuntime.client `
@@ -411,7 +410,7 @@ function Invoke-Ferrum2HostQualificationChecks {
         }
         throw $failure
     } finally {
-        Stop-Ferrum2ProductTrial -Context $Context -Runtime $smokeRuntime
+        Stop-Ferrum2HostProduct -Context $Context -Runtime $smokeRuntime
     }
     [void]$wfpAbsence.Add(
         (Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'smoke-cleanup')
@@ -425,22 +424,23 @@ function Invoke-Ferrum2HostQualificationChecks {
         $checks.Add([pscustomobject][ordered]@{ name = $name; status = 'PASS' })
     }
 
-    $faultRuntime = Start-Ferrum2ProductTrial -Context $Context -Member $Candidate `
-        -Network $Network -Loopback $Loopback -Sequence 3 -Topology "EndToEnd"
+    $faultRuntime = Start-Ferrum2HostProduct -Context $Context -Member $Candidate `
+        -Network $Network -Loopback $Loopback -Sequence 3
     $faultWfp = Get-Ferrum2QualificationLiveWfpWitness -Context $Context `
         -Runtime $faultRuntime -Network $Network -ExecutablePath $Candidate.client `
         -Label 'before-forced-close'
-    [Ferrum2PerfProcessGroup]::CloseGroup()
+    [Ferrum2HostProcessGroup]::CloseGroup()
     Start-Sleep -Milliseconds 500
     $addressRows = @($Context.ledger.resources.addresses)
     if ($addressRows.Count -ne 1) {
         throw 'host qualification expected one owned support address'
     }
-    $addressRows[0].state = 'planned'
-    $Context.ledger.state = 'recovery_required'
-    Write-Ferrum2HostPerformanceLedger -Context $Context
+    $originalAddressState = [string]$addressRows[0].state
     $plannedAddressRefused = $false
     try {
+        $addressRows[0].state = 'planned'
+        $Context.ledger.state = 'recovery_required'
+        Write-Ferrum2HostLedger -Context $Context
         [void](Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path)
     } catch {
         if ([string]$_.Exception.Message -cne
@@ -448,12 +448,13 @@ function Invoke-Ferrum2HostQualificationChecks {
             throw
         }
         $plannedAddressRefused = $true
+    } finally {
+        $addressRows[0].state = $originalAddressState
+        Write-Ferrum2HostLedger -Context $Context
     }
     if (-not $plannedAddressRefused) {
         throw 'host qualification recovery accepted ambiguous planned address ownership'
     }
-    $addressRows[0].state = 'created'
-    Write-Ferrum2HostPerformanceLedger -Context $Context
     [void](Remove-Ferrum2LedgerResources -Ledger $Context.ledger -LedgerPath $Context.ledger_path)
     [void]$wfpAbsence.Add(
         (Assert-Ferrum2QualificationWfpAbsent -Context $Context -Label 'forced-close-cleanup')
@@ -466,7 +467,8 @@ function Invoke-Ferrum2HostQualificationChecks {
         @($Context.ledger.resources.routes).Count -ne 0 -or
         @($Context.ledger.resources.addresses).Count -ne 0 -or
         @($Context.ledger.resources.processes).Count -ne 0 -or
-        @($Context.ledger.resources.ports).Count -ne 0) {
+        @($Context.ledger.resources.ports).Count -ne 0 -or
+        @($Context.ledger.resources.firewall_rules).Count -ne 0) {
         throw 'host qualification retained a ledger-owned resource'
     }
     $checks.Add([pscustomobject][ordered]@{
@@ -479,6 +481,8 @@ function Invoke-Ferrum2HostQualificationChecks {
         candidate_sha = $Candidate.commit_sha
         checks = $checks.ToArray()
         route_proofs = $routeProofs
+        data_path = $workloadWitness
+        firewall_rules = @($Context.ledger.expected_resources.firewall_rules)
         strict_route_wfp = [pscustomobject][ordered]@{
             notification = $notificationWitness
             before_network_reset = $wfpBefore.strict_route
@@ -532,13 +536,13 @@ function Invoke-Ferrum2HostQualification {
     $mutex = $null
     if ($RecoveryOnly) {
         try {
-            $mutex = Enter-Ferrum2HostPerformanceMutex
-            return Invoke-Ferrum2HostPerformanceRecovery
+            $mutex = Enter-Ferrum2HostMutex
+            return Invoke-Ferrum2HostRecovery
         } finally {
-            Exit-Ferrum2HostPerformanceMutex -Mutex $mutex
+            Exit-Ferrum2HostMutex -Mutex $mutex
         }
     }
-    if (-not (Test-Ferrum2HostPerformanceAdministrator)) {
+    if (-not (Test-Ferrum2HostAdministrator)) {
         throw 'host qualification requires an already elevated PowerShell process'
     }
     if (-not $AcknowledgeHostNetworkMutation) {
@@ -554,26 +558,39 @@ function Invoke-Ferrum2HostQualification {
     $cleanupFailure = $null
     $checks = $null
     try {
-        $mutex = Enter-Ferrum2HostPerformanceMutex
-        Assert-NoPendingFerrum2HostPerformanceRecovery
-        $context = New-Ferrum2HostPerformanceContext -RepositoryRoot $RepositoryRoot `
-            -EvidenceDirectory $EvidenceDirectory -Mode 'Qualification' `
-            -BaselineSha $CandidateSha -CandidateSha $CandidateSha `
-            -PerformanceSourceBundleSha256 $QualificationSourceBundleSha256
+        $mutex = Enter-Ferrum2HostMutex
+        Assert-NoPendingFerrum2HostRecovery
+        $context = New-Ferrum2HostContext -RepositoryRoot $RepositoryRoot `
+            -EvidenceDirectory $EvidenceDirectory `
+            -CandidateSha $CandidateSha `
+            -QualificationSourceBundleSha256 $QualificationSourceBundleSha256
         $plan = Get-Ferrum2HostQualificationPlan -CandidateSha $CandidateSha `
             -QualificationSourceBundleSha256 $QualificationSourceBundleSha256
         Write-AtomicJsonFile -Path (Join-Path $context.evidence_directory 'plan.json') `
             -Document $plan
+        $firewallProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
+        if ((@($firewallProfiles | ForEach-Object { [string]$_.Name } | Sort-Object) -join '|') -cne
+                'Domain|Private|Public' -or
+            @($firewallProfiles | Where-Object {
+                [string]$_.Enabled -cne 'True' -or
+                [string]$_.AllowLocalFirewallRules -cne 'True' -or
+                [string]$_.AllowInboundRules -cne 'True'
+            }).Count -ne 0) {
+            throw 'qualification requires enabled profiles accepting local inbound rules; no profile settings will be changed'
+        }
+        Write-AtomicJsonFile -Path (Join-Path $context.evidence_directory 'firewall-profiles.json') `
+            -Document @($firewallProfiles | Select-Object Name, Enabled, AllowLocalFirewallRules,
+                AllowInboundRules, NotifyOnListen)
         $network = New-Ferrum2HostNetworkIdentity -RunId $context.run_id
         $loopback = Get-Ferrum2LoopbackIdentity
         Assert-Ferrum2HostNetworkIdentityAvailable -Network $network -Loopback $loopback
-        Set-Ferrum2HostPerformanceState -Context $context -State 'building'
+        Set-Ferrum2HostState -Context $context -State 'building'
         $buildTimer = [Diagnostics.Stopwatch]::StartNew()
         $candidate = Initialize-Ferrum2QualificationCandidate -Context $context `
             -CandidateSha $CandidateSha
         $buildTimer.Stop()
         $buildSeconds = $buildTimer.Elapsed.TotalSeconds
-        Set-Ferrum2HostPerformanceState -Context $context -State 'executing'
+        Set-Ferrum2HostState -Context $context -State 'executing'
         $executionTimer = [Diagnostics.Stopwatch]::StartNew()
         $checks = Invoke-Ferrum2HostQualificationChecks -Context $context `
             -Candidate $candidate -Network $network -Loopback $loopback
@@ -586,7 +603,7 @@ function Invoke-Ferrum2HostQualification {
         if ($null -ne $context) {
             try {
                 $cleanupTimer = [Diagnostics.Stopwatch]::StartNew()
-                $cleanup = Complete-Ferrum2HostPerformanceCleanup -Context $context `
+                $cleanup = Complete-Ferrum2HostCleanup -Context $context `
                     -Succeeded $succeeded
                 $inspectionRoot = Join-Path $context.evidence_directory `
                     'final-cleanup-inspection'
@@ -601,15 +618,15 @@ function Invoke-Ferrum2HostQualification {
                     ledger_path = Join-Path $inspectionRoot 'recovery.json'
                     repository_root = $context.repository_root
                     evidence_directory = $context.evidence_directory
-                    performance_source_bundle_sha256 =
-                        $context.performance_source_bundle_sha256
+                    qualification_source_bundle_sha256 =
+                        $context.qualification_source_bundle_sha256
                     ledger = $context.ledger
                 }
                 try {
                     $finalWfp = Assert-Ferrum2QualificationWfpAbsent `
                         -Context $inspectionContext -Label 'final-cleanup'
                 } finally {
-                    [Ferrum2PerfProcessGroup]::CloseGroup()
+                    [Ferrum2HostProcessGroup]::CloseGroup()
                 }
                 $cleanupTimer.Stop()
                 $qualificationCleanup = [pscustomobject][ordered]@{
@@ -623,6 +640,7 @@ function Invoke-Ferrum2HostQualification {
                     addresses_remaining = [int]$cleanup.addresses_remaining
                     processes_remaining = [int]$cleanup.processes_remaining
                     ports_remaining = [int]$cleanup.ports_remaining
+                    firewall_rule_remaining = [int]$cleanup.firewall_rule_remaining
                     strict_route_wfp_remaining = [int]$finalWfp.strict_route_objects
                     tcp_ingress_wfp_remaining = [int]$finalWfp.tcp_ingress_objects
                     elapsed_seconds = $cleanupTimer.Elapsed.TotalSeconds
@@ -650,7 +668,7 @@ function Invoke-Ferrum2HostQualification {
             Write-AtomicJsonFile -Path (Join-Path $context.evidence_directory 'runtime.json') `
                 -Document $runtime
         }
-        Exit-Ferrum2HostPerformanceMutex -Mutex $mutex
+        Exit-Ferrum2HostMutex -Mutex $mutex
     }
     if ($null -ne $primaryFailure) { throw $primaryFailure }
     if ($null -ne $cleanupFailure) { throw $cleanupFailure }
@@ -671,6 +689,8 @@ function Invoke-Ferrum2HostQualification {
         route_proofs = @($checks.route_proofs)
         strict_route_wfp = $checks.strict_route_wfp
         tcp_ingress_wfp = $checks.tcp_ingress_wfp
+        data_path = $checks.data_path
+        firewall_rules = @($checks.firewall_rules)
     }
     Write-AtomicJsonFile -Path (Join-Path $context.evidence_directory `
         'qualification-worker.json') -Document $workerResult

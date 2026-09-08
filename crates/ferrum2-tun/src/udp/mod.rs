@@ -833,13 +833,15 @@ impl Drop for UdpAssociation {
 #[cfg(any(
     all(windows, target_arch = "x86_64", feature = "live-backend"),
     test,
-    feature = "fuzzing"
+    feature = "fuzzing",
+    feature = "benchmark"
 ))]
 mod table;
 #[cfg(any(
     all(windows, target_arch = "x86_64", feature = "live-backend"),
     test,
-    feature = "fuzzing"
+    feature = "fuzzing",
+    feature = "benchmark"
 ))]
 pub(crate) use table::{Admission, ResponseProcessOutcome, UdpTable};
 #[cfg(test)]

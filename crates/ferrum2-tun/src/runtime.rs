@@ -18,8 +18,6 @@ use crate::{
     SessionCancellation, TcpFlow, TunNetworkFullRebuildReason, TunNetworkResetError, UdpCandidate,
 };
 
-pub(crate) const INGRESS_SLOTS: usize = 16;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OwnerExit {
     Stopped,

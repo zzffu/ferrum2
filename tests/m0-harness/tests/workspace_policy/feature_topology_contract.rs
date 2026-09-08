@@ -32,7 +32,7 @@ impl FeatureTopology {
     }
 
     fn validate(&self) -> Result<(), String> {
-        exact_feature_map(
+        required_feature_map(
             &self.platform,
             "platform",
             &[
@@ -41,7 +41,7 @@ impl FeatureTopology {
                 ("live-backend", &[]),
             ],
         )?;
-        exact_feature_map(
+        required_feature_map(
             &self.tun,
             "tun",
             &[
@@ -50,6 +50,7 @@ impl FeatureTopology {
                 ("live-backend", &["ferrum2-platform-windows/live-backend"]),
             ],
         )?;
+        benchmark_feature_excludes_live_backend(&self.tun)?;
 
         exact_dependency(
             &self.workspace,
@@ -129,19 +130,12 @@ fn table_at<'a>(
         .ok_or_else(|| format!("{owner} must be a TOML table"))
 }
 
-fn exact_feature_map(
+fn required_feature_map(
     manifest: &Value,
     owner: &str,
     expected: &[(&str, &[&str])],
 ) -> Result<(), String> {
     let features = table_at(manifest, &["features"], owner)?;
-    let actual_names: BTreeSet<_> = features.keys().map(String::as_str).collect();
-    let expected_names: BTreeSet<_> = expected.iter().map(|(name, _)| *name).collect();
-    if actual_names != expected_names {
-        return Err(format!(
-            "{owner} feature names changed: expected {expected_names:?}, got {actual_names:?}"
-        ));
-    }
     for (name, members) in expected {
         exact_string_array(
             features
@@ -150,6 +144,40 @@ fn exact_feature_map(
             members,
             &format!("{owner} feature {name}"),
         )?;
+    }
+    Ok(())
+}
+
+fn benchmark_feature_excludes_live_backend(manifest: &Value) -> Result<(), String> {
+    let features = table_at(manifest, &["features"], "tun")?;
+    let mut pending = vec!["benchmark"];
+    let mut visited = BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name) {
+            continue;
+        }
+        if matches!(name, "default" | "live-backend") {
+            return Err(format!("TUN benchmark enables privileged feature {name}"));
+        }
+        let members = features
+            .get(name)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("TUN benchmark feature {name} is missing or invalid"))?;
+        for member in members {
+            let member = member
+                .as_str()
+                .ok_or_else(|| format!("TUN benchmark feature {name} has a non-string member"))?;
+            if features.contains_key(member) {
+                pending.push(member);
+            } else if let Some((dependency, feature)) = member.split_once('/')
+                && dependency.trim_end_matches('?') == "ferrum2-platform-windows"
+                && matches!(feature, "default" | "live-backend")
+            {
+                return Err(format!(
+                    "TUN benchmark enables privileged dependency {member}"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -453,6 +481,28 @@ fn hosted_feature_topology_mutations_fail_closed() {
             Box::new(|topology| {
                 topology.server["dependencies"]["ferrum2-platform-windows"]["features"] =
                     Value::Array(Vec::new());
+            }),
+        ),
+        (
+            "benchmark transitively enables live backend",
+            Box::new(|topology| {
+                topology.tun["features"]["benchmark"] =
+                    Value::Array(vec![Value::String("benchmark-helper".to_owned())]);
+                topology.tun["features"]
+                    .as_table_mut()
+                    .expect("feature table")
+                    .insert(
+                        "benchmark-helper".to_owned(),
+                        Value::Array(vec![Value::String("live-backend".to_owned())]),
+                    );
+            }),
+        ),
+        (
+            "benchmark enables platform defaults",
+            Box::new(|topology| {
+                topology.tun["features"]["benchmark"] = Value::Array(vec![Value::String(
+                    "ferrum2-platform-windows/default".to_owned(),
+                )]);
             }),
         ),
     ];

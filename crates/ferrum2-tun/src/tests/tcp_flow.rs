@@ -19,7 +19,7 @@ fn system_tcp(max_flows: usize, generation: u64) -> SystemTcp {
         OwnerWake::default(),
         Arc::new(Mutex::new(PortQuarantine::default())),
     );
-    tcp.configure_bindings_for_test(TEST_ADDRESSES, TEST_LISTENER_PORTS)
+    tcp.configure_packet_bindings(TEST_ADDRESSES, TEST_LISTENER_PORTS)
         .expect("deterministic TCP bindings");
     tcp
 }
@@ -188,7 +188,7 @@ fn tcp_admission_requires_a_clean_syn_and_enforces_the_exact_mapping_limit() {
         OwnerWake::default(),
         Arc::new(Mutex::new(PortQuarantine::default())),
     );
-    tcp.configure_bindings_for_test(TEST_ADDRESSES, TEST_LISTENER_PORTS)
+    tcp.configure_packet_bindings(TEST_ADDRESSES, TEST_LISTENER_PORTS)
         .expect("deterministic TCP bindings");
 
     let original = ipv4_tcp_segment(10_000, 0x02, &[]);

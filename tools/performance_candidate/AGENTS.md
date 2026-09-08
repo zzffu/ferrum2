@@ -1,51 +1,28 @@
 # Performance Candidate Controller Guidelines
 
-## Purpose and Entry Point
+The only command entry point is `python -B -m tools.performance_candidate`. Keep `cli.py` a
+composition root. Shared JSON, identity, atomic output and pairing contracts have named owners;
+the `linux/` package retains Linux workload/calibration/scale behavior.
 
-The only supported command entry point is `python -B -m tools.performance_candidate`. Do not add a
-script shim or a second CLI. `cli.py` only wires commands; shared JSON, identity, output, and pairing
-contracts have named owners; Linux and Windows TUN behavior stays in their respective subpackages.
-Scale lineage, trial validation, and decisions are separate owners. Windows host plan, trial,
-recovery, cleanup, route-proof, and summary validation likewise have narrow owners; keep the
-composition root small rather than rebuilding the former guest/network-model facade.
+`tun_mock.py`, `tun_mock_contract.py` and `tun_mock_process.py` own TUN-only run, evidence and process
+lifetime. They build the crate-owned `tun-benchmark` with `--no-default-features --features benchmark`;
+they never create host network state or invoke the privileged correctness runner.
 
-## Contract Ownership
+Quick uses three interleaved pairs across six scenarios, Confirm five. Independent product builds
+must share the exact benchmark recipe closure. Bind source SHAs, binaries, controller, workload,
+mode, units, counts and environment. Preserve all raw trials and cleanup failures. Strict JSON
+validation must reject boolean-as-integer, missing/extra fields and forged decisions. A/A observes
+noise, never speedup; A/B requires an independently reviewed calibration manifest digest. Do not
+reuse retired host thresholds or server CPU guards, or hide a bad pair in an aggregate score.
 
-Keep evidence parsing fail-closed and bounded. Preserve exact JSON fields, schema versions,
-baseline/candidate and build identities, metric units, correctness results, cleanup results, pair
-order, source digests, and applicability unless a dedicated schema change updates every producer and
-consumer atomically. Policy decides retention and regression; observation producers must not invent
-thresholds. Windows Quick uses exactly three interleaved pairs and Confirm exactly five; the
-selected profile and scenario recipes are evidence identity. The non-target CPU guard compares
-client and server CPU per unit of reported work, so additional CPU that is fully explained by higher
-throughput is not mislabeled as a regression.
-
-The Windows TUN recipe binds this package only to the canonical host runner and collectors under
-`tools/windows-tun/performance`, host owners under `tools/powershell/Ferrum2.Performance`, the Rust
-workload harness, and the verified performance source bundle, excluding qualification sources.
-Repository source paths stay canonical.
-
-The performance source bundle is a closed host source set. Moving or changing any bound source
-changes runner identity and requires coordinated producer/consumer updates plus a fresh baseline.
-Update recipe paths, source manifests, exact byte lengths, per-file SHA-256 values, and
-complete-manifest hashes atomically. Plans and raw evidence record the complete bundle digest, not an
-entrypoint-only hash.
-
-## Verification
-
-Use static checks before running any performance workflow:
+Keep the Windows child suspended until its kill-on-close job owns it; Unix children use an owned
+process group. Timeouts, output caps, failures and leader exit must not leave descendants running.
+Test real process behavior separately from synthetic evidence contracts. Network-independent
+benchmarking does not prove real reactor, Wintun, WFP or complete product performance.
 
 ```text
 python -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v
-python -B -c "import tools.performance_candidate.cli; import tools.performance_candidate.windows_tun.summary"
+python -B -m tools.performance_candidate --help
 ```
 
-Static tests and manifest reconstruction are the ordinary behavioral gates. They must not execute a
-real TUN workload. Live Windows TUN performance is allowed only through the canonical host runner from
-an already elevated shell with explicit network-mutation acknowledgement and verified per-RunId
-cleanup. The separate host correctness runner and its verdict are not a performance fallback.
-
-Tests mirror production owners: shared and Linux plan/policy/summary/scale behavior have separate
-modules; Windows host plan, trial, recovery/cleanup, and summary behavior use narrow fixture helpers.
-Keep only the current `ClientDirect` and `EndToEnd` host topology identities; do not retain guest
-schemas, retired topologies, or compatibility readers.
+Do not preserve retired host topology schemas, guest readers, performance script shims or aliases.

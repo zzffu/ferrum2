@@ -93,6 +93,20 @@ pub(crate) struct MemoryDevice {
 }
 
 impl MemoryDevice {
+    /// Retained packet storage, excluding container metadata and allocator overhead.
+    #[cfg(feature = "benchmark")]
+    pub(crate) fn owned_packet_bytes(&self) -> usize {
+        self.ingress
+            .iter()
+            .map(|slot| slot.bytes.capacity())
+            .sum::<usize>()
+            + self
+                .output
+                .iter()
+                .map(|slot| slot.bytes.capacity())
+                .sum::<usize>()
+    }
+
     #[cfg(test)]
     pub(crate) fn new(mtu: usize, families: Families) -> Self {
         Self::with_output_slots(mtu, families, 1)
@@ -173,7 +187,7 @@ impl MemoryDevice {
         (self.output_count != 0).then_some(&slot.bytes[..slot.len])
     }
 
-    fn pop_output(&mut self) {
+    pub(super) fn pop_output(&mut self) {
         assert!(self.output_count != 0, "output queue is not empty");
         self.output[self.output_head].len = 0;
         self.output_head = (self.output_head + 1) % self.output.len();

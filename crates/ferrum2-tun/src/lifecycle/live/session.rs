@@ -126,11 +126,15 @@ pub(crate) fn run_active_session(session: &mut ActiveSession<'_>) -> SessionExit
                     session.datagram_output,
                     session.cancellation,
                 );
-                StepOutcome::from_work(session.stack.process_owner_control_stage(
-                    supervisor_now,
-                    admitting,
-                    forwarded_flow || forwarded_datagram,
-                ))
+                let internal = session
+                    .stack
+                    .owner_internal_step(stage, supervisor_now, admitting)
+                    .expect("internal owner stage");
+                if forwarded_flow || forwarded_datagram {
+                    StepOutcome::Worked
+                } else {
+                    internal
+                }
             }
             WorkStage::FlushOutput => {
                 match session
@@ -165,7 +169,10 @@ pub(crate) fn run_active_session(session: &mut ActiveSession<'_>) -> SessionExit
                     OutputFlushOutcome::Fatal => StepOutcome::Fatal,
                 }
             }
-            WorkStage::Stack => StepOutcome::from_work(session.stack.process_one_tcp_packet()),
+            WorkStage::Stack => session
+                .stack
+                .owner_internal_step(stage, supervisor_now, admitting)
+                .expect("internal owner stage"),
             WorkStage::Receive if session.stack.ingress_available() != 0 => {
                 let received = match session.adapter.receive() {
                     Ok(Some(packet)) => packet,
@@ -185,20 +192,10 @@ pub(crate) fn run_active_session(session: &mut ActiveSession<'_>) -> SessionExit
                 StepOutcome::Worked
             }
             WorkStage::Receive => StepOutcome::Idle,
-            WorkStage::UdpResponse => {
-                match session.stack.process_one_udp_response(supervisor_now) {
-                    crate::udp::ResponseProcessOutcome::Idle => StepOutcome::Idle,
-                    crate::udp::ResponseProcessOutcome::Deferred => {
-                        session.events.emit(TunEvent::InternalEgressBackpressured);
-                        StepOutcome::Worked
-                    }
-                    crate::udp::ResponseProcessOutcome::Injected
-                    | crate::udp::ResponseProcessOutcome::Dropped(_) => StepOutcome::Worked,
-                }
-            }
-            WorkStage::Expire => {
-                StepOutcome::from_work(session.stack.expire_deadlines(supervisor_now))
-            }
+            WorkStage::UdpResponse | WorkStage::Expire => session
+                .stack
+                .owner_internal_step(stage, supervisor_now, admitting)
+                .expect("internal owner stage"),
         });
         if budget.fatal {
             return match adapter_failure.unwrap_or(AdapterErrorDisposition::RuntimeFailed) {

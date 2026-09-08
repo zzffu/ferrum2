@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [features]
 default = ["live-backend"]
 fuzzing = []
+benchmark = []
 live-backend = ["ferrum2-platform-windows/live-backend"]
 
 [dependencies]
@@ -23,6 +24,10 @@ tokio.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+[[example]]
+name = "tun-benchmark"
+required-features = ["benchmark"]
 
 [lints]
 workspace = true

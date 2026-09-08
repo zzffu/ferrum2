@@ -98,6 +98,32 @@ public sealed class Ferrum2QualificationRouteNotification : IDisposable
         return luid;
     }
 
+    [DllImport("iphlpapi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern uint ConvertInterfaceAliasToLuid(string interfaceAlias, out ulong interfaceLuid);
+
+    [DllImport("iphlpapi.dll", ExactSpelling = true)]
+    private static extern uint ConvertInterfaceLuidToGuid(ref ulong interfaceLuid, out Guid interfaceGuid);
+
+    public static ulong InterfaceLuid(string interfaceAlias)
+    {
+        if (String.IsNullOrWhiteSpace(interfaceAlias))
+            throw new ArgumentException("Interface alias is required", nameof(interfaceAlias));
+        uint status = ConvertInterfaceAliasToLuid(interfaceAlias, out ulong luid);
+        if (status != 0 || luid == 0)
+            throw new Win32Exception(unchecked((int)status), "ConvertInterfaceAliasToLuid failed");
+        return luid;
+    }
+
+    public static Guid InterfaceGuid(ulong interfaceLuid)
+    {
+        if (interfaceLuid == 0)
+            throw new ArgumentOutOfRangeException(nameof(interfaceLuid));
+        uint status = ConvertInterfaceLuidToGuid(ref interfaceLuid, out Guid guid);
+        if (status != 0 || guid == Guid.Empty)
+            throw new Win32Exception(unchecked((int)status), "ConvertInterfaceLuidToGuid failed");
+        return guid;
+    }
+
     public Ferrum2QualificationRouteNotification()
     {
         signal = new EventWaitHandle(false, EventResetMode.ManualReset);

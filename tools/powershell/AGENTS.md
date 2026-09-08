@@ -2,31 +2,26 @@
 
 ## Boundaries
 
-`Ferrum2.Qualification.Host` owns Windows TUN correctness policy, its fixed check set, evidence, and
-the only exported qualification function. `Ferrum2.Performance` owns host performance plans,
-profiles, reducers, thresholds, evidence, and recovery. Qualification may compose the reviewed
-private host ownership, execution, and process-group primitives from `Ferrum2.Performance`; it must
-not call the public performance runner or reuse a performance verdict. Do not duplicate those
-primitives or introduce a guest, virtual-machine, or staging fallback.
+`Ferrum2.Qualification.Host` owns Windows TUN correctness policy, sustained data-path/reset
+witnesses, fixed checks, process/ownership/cleanup primitives, and the only exported qualification
+function. There is no privileged host performance module or public performance runner.
+TUN-only performance belongs to the crate-owned memory benchmark and Python controller.
+Do not duplicate ownership primitives or introduce a guest, virtual-machine or staging fallback.
 
-Canonical performance entry scripts live under `tools/windows-tun/performance`; correctness
-entrypoints and workers live under `tests/platform`. Reusable PowerShell modules live here. Public
-entry scripts are composition and transaction roots, not compatibility facades.
+Correctness entrypoints and workers live under `tests/platform`. Reusable PowerShell modules live
+here. Public entry scripts are composition and transaction roots, not compatibility facades.
 
 ## Evidence identity
 
-Each performance or qualification source manifest must enumerate every consumed script, module, and
-C# source under its canonical repository path with exact byte length and SHA-256. The complete
-manifest digest flows through that runner's plan, raw evidence, and summary or verdict. A performance
-bundle must not contain qualification sources. A qualification bundle may list only its own sources
-and the explicitly shared private host primitives. Update all file rows and bundle identities
-atomically; stale source identity is never accepted through an alias, fallback reader, or optional
-manifest row.
+The qualification source manifest enumerates every consumed script, module and C# source by
+canonical repository path, exact byte length and SHA-256. Its complete digest flows through plan,
+raw witnesses and final verdict. Update source rows atomically; stale identity is never accepted
+through an alias, fallback reader or optional manifest row.
 
 The private host primitives own address allocation, narrow-route proof, process-job ownership,
-incremental recovery ledgers, cleanup verification, and bounded command execution. Qualification
-adds correctness witnesses; performance adds scenarios and statistical policy. Pure planning and
-ledger-validation helpers should return data rather than mutate state.
+incremental recovery ledgers, cleanup verification, and bounded command execution. Correctness
+witnesses must distinguish observed workload state from unobserved product ownership. Preserve the
+existing recovery ledger identity so already-created resources remain safely recoverable.
 
 ## Verification
 
@@ -36,8 +31,12 @@ PowerShell and C# production owners below 1,000 lines unless a reviewed exceptio
 deeper seam would be worse.
 
 Ordinary hosts may execute nonmutating `-PlanOnly` and identity-safe `-RecoveryOnly` operations. Real
-host qualification or performance requires the corresponding dedicated runner, an already elevated
-shell, and explicit acknowledgement. A runner may touch only its ledger-owned Wintun adapter, exact
+host qualification requires its sole dedicated runner, an already elevated shell, and explicit
+acknowledgement. A runner may touch only its ledger-owned Wintun adapter, exact
 RFC 2544 routes and addresses, processes, ports, files, and declared product-owned dynamic
-strict-route or exact TCP-ingress WFP sessions. It must not change default routes, DNS, physical
-adapters, WLAN, persistent Windows Firewall rules, sing-box, or unrelated state.
+strict-route or exact TCP-ingress WFP sessions, plus explicitly authorized per-run Windows Firewall
+rules scoped to current test executables and required traffic. Create rules before their process
+starts, bind file hash and rule identity in the ledger, and independently verify rule removal.
+PersistentStore rules are not kernel-dynamic: interrupted runs require identity-safe recovery.
+Never change existing rules, profile notification settings, default routes, DNS, physical adapters,
+WLAN, sing-box or unrelated state.

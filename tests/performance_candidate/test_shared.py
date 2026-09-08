@@ -13,7 +13,6 @@ from tools.performance_candidate.linux import plan as linux_plan
 from tools.performance_candidate.linux import policy as linux_policy
 from tools.performance_candidate.linux import scale as linux_scale
 from tools.performance_candidate.linux import evidence_contract
-from tools.performance_candidate.windows_tun import recipe as windows_recipe
 
 
 class SummaryExitCodeTests(unittest.TestCase):
@@ -292,26 +291,9 @@ class ScenarioPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(json_contract.CandidateControlError, "diagnostic"):
             self.plan("diagnostic", "udp-payload-matrix")
 
-    def test_windows_tun_host_selection_uses_only_the_dedicated_runner(self) -> None:
-        with self.assertRaisesRegex(
-            json_contract.CandidateControlError,
-            "dedicated host performance runner",
-        ):
-            self.plan("qualification", windows_recipe.WINDOWS_TUN_SELECTION)
-        for obsolete in (
-            "windows-tun-network-reset-10",
-            "windows-tun-network-reset-100",
-            "windows-tun-network-reset-1000",
-            "windows-tun-scheduler-ring-full",
-            "windows-tun-route-detect",
-            "windows-tun-unregistered",
-        ):
-            with self.subTest(selection=obsolete):
-                with self.assertRaisesRegex(
-                    json_contract.CandidateControlError,
-                    "selection",
-                ):
-                    self.plan("qualification", obsolete)
+    def test_tun_selections_are_not_linux_workloads(self) -> None:
+        with self.assertRaises(json_contract.CandidateControlError):
+            self.plan("qualification", "tun-mock")
 
     def test_workflow_exposes_only_controller_plannable_selections(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")

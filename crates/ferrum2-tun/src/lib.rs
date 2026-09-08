@@ -1,5 +1,14 @@
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "benchmark")]
+pub mod benchmark;
+
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "benchmark"
+))]
+pub(crate) const INGRESS_SLOTS: usize = 16;
 #[cfg(feature = "fuzzing")]
 mod fuzzing;
 #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
@@ -11,22 +20,36 @@ mod owner_harness_tests;
 #[cfg(any(
     all(windows, target_arch = "x86_64", feature = "live-backend"),
     test,
-    feature = "fuzzing"
+    feature = "fuzzing",
+    feature = "benchmark"
 ))]
 mod packet;
 mod process;
 #[cfg(any(
     all(windows, target_arch = "x86_64", feature = "live-backend"),
     test,
-    feature = "fuzzing"
+    feature = "fuzzing",
+    feature = "benchmark"
 ))]
 mod reassembly;
-#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "benchmark"
+))]
 mod scheduler;
-#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "benchmark"
+))]
 mod stack;
 mod supervisor;
-#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    test,
+    feature = "benchmark"
+))]
 mod system_tcp;
 mod tcp;
 mod udp;

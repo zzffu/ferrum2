@@ -15,9 +15,11 @@ in `packet/control.rs`, while packet-only fixtures and unit cases belong in `pac
 and `packet/tests.rs`. Gate these focused modules at their declaration boundary instead of scattering
 the same target predicate across individual packet items.
 
-Ordinary network-semantic changes perform a lightweight `ResetNetwork`: quiesce admission, publish
-the new network generation, run reset hooks, cancel current TCP/UDP owners, clear provisional and
-packet state, stop and join the TCP listener epoch, and remove its exact dynamic TCP-ingress guard.
+Ordinary network-semantic changes perform a lightweight `ResetNetwork`: quiesce admission, fence
+socket leases abortively, and deliver kernel-generated reset packets through the old tuple mapping
+before removing its exact ingress guard. Prior FIN delivery cannot satisfy a new reset obligation.
+Stop/join the old listener epoch and remove its guard, then complete the generation barrier/reset
+hooks and clear provisional/packet state. A bounded delivery failure cannot advertise successful reset.
 Replace the network runtime/stack, bind fresh listener identities, verify peer routes, and install
 and read back the new ingress guard before reopening admission. Preserve the long-lived adapter,
 Wintun session, GUID/LUID, managed addresses/routes/DNS, strict-route WFP session, and ownership ledger.
@@ -31,6 +33,19 @@ An adapter-creation cleanup failure takes precedence over a simultaneous stop, s
 readiness deadline. Invalidate the published underlay before reporting that terminal failure;
 cancellation must not turn an unconfirmed cleanup into a successful stopped result.
 
+## TUN-only Performance
+
+The `benchmark` feature and `tun-benchmark` example expose bounded mock I/O, not a working
+non-Windows product root. Keep the packet/owner implementation shared with production. Mock only
+external packet/connection I/O; do not replace tuple mapping, UDP, reassembly or scheduler logic.
+Production builds must not pay for the memory socket adapter. Benchmarking uses no OS socket,
+adapter, route, DNS or WFP operations; real-loopback tests separately qualify socket reactor behavior.
+
+Inputs and storage diagnostics are outside measured windows. Capture into bounded preallocated
+buffers, validate complete outputs after each batch and count only checked work. Preserve the
+controller's exact recipe/source identities and fixed batch schedule. Internal packet costs are not
+whole-product throughput; memory observations are not process RSS.
+
 ## Focused Verification
 
 Run:
@@ -38,6 +53,7 @@ Run:
 ```text
 cargo test -p ferrum2-tun --lib --no-default-features --features fuzzing --locked
 cargo check -p ferrum2-tun --all-features --locked
+cargo build -p ferrum2-tun --example tun-benchmark --no-default-features --features benchmark --profile profiling --locked
 ```
 
 The library suite is hosted-safe and runs on ordinary Linux and hosted Windows. Keep it target-neutral:

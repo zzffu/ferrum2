@@ -10,7 +10,6 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 POLICY_PATH = ROOT / "tools" / "performance_candidate_policy.json"
 SCALE_POLICY_PATH = ROOT / "tools" / "performance_candidate_scale_safety_policy.json"
-WINDOWS_TUN_POLICY_PATH = ROOT / "tools" / "windows_tun_performance_policy.json"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "performance-candidate.yml"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

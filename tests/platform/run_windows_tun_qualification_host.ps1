@@ -40,6 +40,9 @@ $sourceBundle = Read-Ferrum2HostQualificationSourceBundle `
     -RepositoryRoot $repositoryRoot `
     -ManifestPath (Join-Path $moduleRoot 'bundle.json')
 . (Join-Path $moduleRoot 'SupervisorEvidence.ps1')
+. (Join-Path $moduleRoot 'WorkloadEvidence.ps1')
+. (Join-Path $moduleRoot 'HostOwnership.ps1')
+. (Join-Path $moduleRoot 'HostFirewall.ps1')
 
 if ($PlanOnly -or $RecoveryOnly) {
     Import-Module -Name (Join-Path $moduleRoot 'Ferrum2.Qualification.Host.psd1') `
@@ -77,7 +80,7 @@ New-Item -ItemType Directory -Path $supervisorRoot -ErrorAction Stop | Out-Null
 $stdoutPath = Join-Path $supervisorRoot 'worker.stdout.log'
 $stderrPath = Join-Path $supervisorRoot 'worker.stderr.log'
 $processOwnerPath = Join-Path $repositoryRoot `
-    'tools\powershell\Ferrum2.Performance\PerformanceProcessOwner.cs'
+    'tools\powershell\Ferrum2.Qualification.Host\HostProcessOwner.cs'
 Add-Type -Path $processOwnerPath -ErrorAction Stop
 $pwsh = [string](Get-Command pwsh -CommandType Application -ErrorAction Stop).Source
 $worker = Join-Path $PSScriptRoot 'invoke_windows_tun_qualification_host_worker.ps1'
@@ -98,19 +101,19 @@ $outcome = [ordered]@{
     cleanup_phase = 'pending'; cleanup_failures = @()
 }
 try {
-    $workerPid = [Ferrum2PerfProcessGroup]::Start(
+    $workerPid = [Ferrum2HostProcessGroup]::Start(
         $pwsh, $workerArguments, $repositoryRoot, $stdoutPath, $stderrPath
     )
-    if (-not [Ferrum2PerfProcessGroup]::Wait(
+    if (-not [Ferrum2HostProcessGroup]::Wait(
             [uint32]$workerPid, [uint32]($workerTimeoutSeconds * 1000))) {
         $timedOut = $true
         $outcome.worker_timed_out = $true
-        [Ferrum2PerfProcessGroup]::CloseGroup()
+        [Ferrum2HostProcessGroup]::CloseGroup()
     } else {
-        $exitCode = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$workerPid)
+        $exitCode = [Ferrum2HostProcessGroup]::ExitCode([uint32]$workerPid)
         $outcome.worker_exit_code = $exitCode
-        [Ferrum2PerfProcessGroup]::Close([uint32]$workerPid)
-        [Ferrum2PerfProcessGroup]::CloseGroup()
+        [Ferrum2HostProcessGroup]::Close([uint32]$workerPid)
+        [Ferrum2HostProcessGroup]::CloseGroup()
         if ($exitCode -ne 0) {
             throw "host qualification worker failed; evidence=$resolvedEvidence"
         }
@@ -124,18 +127,18 @@ try {
             '-File', ('"' + $PSCommandPath + '"')
             '-RecoveryOnly'
         ) -join ' '
-        $recoveryPid = [Ferrum2PerfProcessGroup]::Start(
+        $recoveryPid = [Ferrum2HostProcessGroup]::Start(
             $pwsh, $recoveryArguments, $repositoryRoot, $recoveryStdout, $recoveryStderr
         )
-        if (-not [Ferrum2PerfProcessGroup]::Wait([uint32]$recoveryPid, 45000)) {
+        if (-not [Ferrum2HostProcessGroup]::Wait([uint32]$recoveryPid, 45000)) {
             $outcome.recovery_timed_out = $true
-            [Ferrum2PerfProcessGroup]::CloseGroup()
+            [Ferrum2HostProcessGroup]::CloseGroup()
             throw 'host qualification timed out and bounded recovery also timed out'
         }
-        $recoveryExit = [Ferrum2PerfProcessGroup]::ExitCode([uint32]$recoveryPid)
+        $recoveryExit = [Ferrum2HostProcessGroup]::ExitCode([uint32]$recoveryPid)
         $outcome.recovery_exit_code = $recoveryExit
-        [Ferrum2PerfProcessGroup]::Close([uint32]$recoveryPid)
-        [Ferrum2PerfProcessGroup]::CloseGroup()
+        [Ferrum2HostProcessGroup]::Close([uint32]$recoveryPid)
+        [Ferrum2HostProcessGroup]::CloseGroup()
         if ($recoveryExit -ne 0) {
             throw "host qualification timed out and recovery failed; evidence=$resolvedEvidence; recovery log=recovery.stderr.log"
         }
@@ -225,8 +228,24 @@ try {
         }).Count -eq 0
     )
     $strictRoute = $workerResult.strict_route_wfp
+    Assert-Ferrum2QualificationWorkloadWitness -Witness $workerResult.data_path
+    Assert-Ferrum2QualificationResetReady -Witness $strictRoute.notification.active_work_ready
+    if (@($workerResult.firewall_rules).Count -ne 18) {
+        throw 'qualification fixed firewall rule set evidence is incomplete'
+    }
+    Assert-Ferrum2FirewallEvidence -Expected @($workerResult.firewall_rules) `
+        -EvidenceDirectory $resolvedEvidence
     $resetEvidenceValid = (
         $strictRoute.notification.observed -eq $true -and
+        $strictRoute.notification.tun_mtu_bytes -eq 1420 -and
+        $strictRoute.notification.workload_generation_before -eq 1 -and
+        $strictRoute.notification.workload_generation_after -eq 2 -and
+        $workerResult.data_path.reset.old_tcp_pending_bytes -eq
+            $strictRoute.notification.active_work_ready.tcp_paused_bytes_sent -and
+        $workerResult.data_path.reset.old_udp_pending_datagrams -eq
+            $strictRoute.notification.active_work_ready.udp_pending_datagrams -and
+        $workerResult.data_path.reset.udp_local_endpoint -ceq
+            $strictRoute.notification.active_work_ready.udp_local_endpoint -and
         $strictRoute.notification.session_generation_after -gt
             $strictRoute.notification.session_generation_before -and
         $strictRoute.before_network_reset.sublayer_weight -ceq
@@ -242,6 +261,7 @@ try {
         $cleanup.status -cne 'PASS' -or $cleanup.adapter_remaining -ne 0 -or
         $cleanup.routes_remaining -ne 0 -or $cleanup.addresses_remaining -ne 0 -or
         $cleanup.processes_remaining -ne 0 -or $cleanup.ports_remaining -ne 0 -or
+        $cleanup.firewall_rule_remaining -ne 0 -or
         $cleanup.strict_route_wfp_remaining -ne 0 -or
         $cleanup.tcp_ingress_wfp_remaining -ne 0 -or
         -not $ingressEvidenceValid -or -not $resetEvidenceValid -or
@@ -261,6 +281,8 @@ try {
         route_proofs = @($workerResult.route_proofs)
         strict_route_wfp = $workerResult.strict_route_wfp
         tcp_ingress_wfp = $workerResult.tcp_ingress_wfp
+        data_path = $workerResult.data_path
+        firewall_rules = @($workerResult.firewall_rules)
         cleanup = $cleanup
     }
     $outcome.phase = 'verdict-ready'
@@ -269,7 +291,7 @@ try {
     throw
 } finally {
     $closeFailure = $null
-    try { [Ferrum2PerfProcessGroup]::CloseGroup() } catch {
+    try { [Ferrum2HostProcessGroup]::CloseGroup() } catch {
         $closeFailure = $_
         $outcome.cleanup_phase = 'close-process-group'
         $outcome.cleanup_error = [string]$_.Exception.Message

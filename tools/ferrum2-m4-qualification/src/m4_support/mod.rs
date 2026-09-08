@@ -42,8 +42,7 @@ pub fn run(arguments: impl Iterator<Item = OsString>) -> Result<String, String> 
         .ok_or_else(|| {
             concat!(
                 "expected mode: throughput, resource, dns-resource, profile-workload, ",
-                "windows-tun-workload, windows-tun-probe, windows-tun-support, ",
-                "windows-tun-udp-diagnostic-finalize, or self-check"
+                "windows-tun-qualification, windows-tun-probe, windows-tun-support, or self-check"
             )
             .to_owned()
         })?;
@@ -59,16 +58,14 @@ pub fn run(arguments: impl Iterator<Item = OsString>) -> Result<String, String> 
         "profile-workload" => {
             profile_output::run_profile_workload(profile_contract::parse_profile_args(&rest)?)
         }
-        "windows-tun-workload" => windows_tun::run_workload(&rest),
+        "windows-tun-qualification" => windows_tun::run_qualification(&rest),
         "windows-tun-probe" => windows_tun::run_probe(&rest),
         "windows-tun-support" => windows_tun::run_support(&rest),
-        "windows-tun-udp-diagnostic-finalize" => windows_tun::run_udp_diagnostic_finalize(&rest),
         "self-check" if rest.is_empty() => self_check::run_self_check(),
         "self-check" => Err("self-check accepts no arguments".to_owned()),
         _ => Err(concat!(
             "expected mode: throughput, resource, dns-resource, profile-workload, ",
-            "windows-tun-workload, windows-tun-probe, windows-tun-support, ",
-            "windows-tun-udp-diagnostic-finalize, or self-check"
+            "windows-tun-qualification, windows-tun-probe, windows-tun-support, or self-check"
         )
         .to_owned()),
     }

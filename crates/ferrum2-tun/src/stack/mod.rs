@@ -2,7 +2,14 @@ mod device;
 mod lifecycle;
 #[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
 mod live;
+#[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
+mod teardown;
 mod udp;
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend", not(test)),
+    feature = "benchmark"
+))]
+mod work;
 
 pub(crate) use device::{MemoryDevice, OutputFlushOutcome, OutputSendOutcome};
 #[cfg(test)]
@@ -52,6 +59,29 @@ pub(crate) type StackReady = (
 );
 
 impl Stack {
+    #[cfg(feature = "benchmark")]
+    pub(crate) fn accept_packet_socket(
+        &mut self,
+        source: std::net::SocketAddr,
+        target: std::net::SocketAddr,
+        stream: tokio::io::DuplexStream,
+    ) {
+        self.system_tcp.accept_packet_socket(source, target, stream);
+    }
+
+    #[cfg(all(feature = "benchmark", not(test)))]
+    pub(crate) fn configure_packet_bindings(&mut self) {
+        self.system_tcp
+            .configure_packet_bindings(
+                self.addresses,
+                (
+                    self.addresses.0.map(|_| 20000),
+                    self.addresses.1.map(|_| 20001),
+                ),
+            )
+            .expect("bounded packet adapter identities");
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_udp(
         addresses: InterfaceAddresses,
@@ -91,7 +121,7 @@ impl Stack {
         let test_tcp_port = 20_000_u16 + 2 * (session_generation % 20_000) as u16;
         #[cfg(test)]
         system_tcp
-            .configure_bindings_for_test(
+            .configure_packet_bindings(
                 addresses,
                 (ipv4.map(|_| test_tcp_port), ipv6.map(|_| test_tcp_port + 1)),
             )
@@ -405,7 +435,23 @@ impl Stack {
         &mut self,
         send: impl FnOnce(&[u8]) -> OutputSendOutcome,
     ) -> OutputFlushOutcome {
-        self.device.flush_output(send)
+        let terminal = if self.system_tcp.has_reset_output() {
+            self.device.front_output().and_then(|packet| {
+                match self.device.validator.parse_ingress(packet) {
+                    Ok(ParsedPacket::Complete(parsed)) => Some(parsed),
+                    Ok(ParsedPacket::Fragment(_)) | Err(_) => None,
+                }
+            })
+        } else {
+            None
+        };
+        let outcome = self.device.flush_output(send);
+        if outcome == OutputFlushOutcome::Sent
+            && let Some(parsed) = terminal
+        {
+            self.system_tcp.reset_output_sent(parsed);
+        }
+        outcome
     }
 
     #[cfg(test)]

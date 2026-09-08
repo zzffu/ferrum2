@@ -11,7 +11,6 @@ from tools.performance_candidate.linux.catalog import ACTIVE_SECONDS, MODES, PAI
 from tools.performance_candidate.linux.evidence_contract import scenario_evidence_contract
 from tools.performance_candidate.linux.policy import MEASUREMENT_ENVIRONMENT, UNCALIBRATED_POLICY, _scenario_policy_is_applicable, validate_decision_policy
 from tools.performance_candidate.linux.scale import SCALE_SCENARIO, _scale_scenario_entry, validate_scale_lineage_shape, validate_scale_safety_policy
-from tools.performance_candidate.windows_tun.recipe import WINDOWS_TUN_SELECTION
 
 PLAN_SCHEMA_VERSION = 7
 PLAN_MAX_BYTES = 1024 * 1024
@@ -140,10 +139,6 @@ def create_plan(
 
     if mode not in MODES:
         raise CandidateControlError("mode must be diagnostic or qualification")
-    if selection == WINDOWS_TUN_SELECTION:
-        raise CandidateControlError(
-            "windows-tun-host uses the dedicated host performance runner"
-        )
     if mode == "diagnostic" and selection not in SCENARIO_CATALOG:
         raise CandidateControlError("diagnostic selection must be one profile workload")
     if mode == "qualification" and selection not in (

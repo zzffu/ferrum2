@@ -4,13 +4,14 @@
 
 `m4-qualification` is a bounded qualification executable, not production runtime code. Its
 ordinary/hosted modes are `throughput`, `resource`, `dns-resource`, `profile-workload`, and
-`self-check`. The Windows TUN modes are `windows-tun-workload`, `windows-tun-probe`,
-`windows-tun-support`, and `windows-tun-udp-diagnostic-finalize`; compile them on ordinary hosts,
-but execute them only as job-contained children of the explicitly authorized
-`tests/platform/run_windows_tun_qualification_host.ps1` correctness runner or
-`tools/windows-tun/performance/run_windows_tun_performance_host.ps1` performance runner. Keep argument parsing
-and execution fail-closed: reject unsupported modes, unbounded durations, malformed identities,
-unsafe paths, and incomplete readiness evidence before starting work.
+`self-check`. Windows TUN modes are `windows-tun-qualification`, `windows-tun-probe` and
+`windows-tun-support`; compile them on ordinary hosts, but execute them only as job-contained
+children of the explicitly authorized `tests/platform/run_windows_tun_qualification_host.ps1`.
+TUN performance now belongs to the crate-owned memory benchmark, not M4 Windows workloads.
+Reject unsupported modes, unbounded durations, malformed identities, unsafe paths and incomplete
+readiness evidence before starting work. Real qualification includes synchronized concurrent flows,
+observed backpressure, complete payload checks, half-close and active-reset witnesses; socket closure
+by the harness must never be reported as an observed product discard.
 
 The `profile-workload` JSONL schema is consumed by the `tools.performance_candidate` Python package, its tests, and the performance workflow. Coordinate changes across those consumers. Preserve one complete record per trial, explicit parent/candidate identity, metric units, environment identity, correctness status, deterministic cleanup, and plan-bound producer/controller/semantic-recipe/bundle digests. This producer records observations; adoption and regression thresholds belong in the reviewed candidate policy, not here.
 

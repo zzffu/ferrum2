@@ -31,7 +31,7 @@ reviewed 2026-09-05. Ferrum2-specific rules below and scoped guides govern local
 
 ## Project Structure & Module Organization
 
-Ferrum2 is a Rust 2024 workspace pinned to Rust 1.97.1. Binaries live in `bins/ferrum2-client` and `bins/ferrum2-server`; shared networking, crypto, DNS, runtime, configuration, and TUN code lives in `crates/ferrum2-*`. Cross-binary qualification tests are in `tests/m0-harness`; crate integration tests use each crate's `tests/` directory. Cross-workspace stable inputs and vectors belong under `tests/fixtures/{config,crypto,dns-tls,sip022,srs}`. The TUN crate's reviewed packet corpus is intentionally crate-owned under `crates/ferrum2-tun/tests/fixtures/packets`, with separate fuzz seed sets under `crates/ferrum2-tun/fuzz/corpus/{packet_reassembly,udp_reset_races,config_legacy_fields,strict_route_rules}`. Platform correctness qualification and its static contract live in `tests/platform`; reusable Windows host modules live in `tools/powershell`, and Windows TUN performance scripts live in `tools/windows-tun/performance`. Performance-controller tests live in `tests/{performance_candidate,performance_rule}`; offline CI-controller tests live in `tests/ci`. Declarative workflow controllers live in `tools/ci`, and qualification tooling is in `tools/{ferrum2-m4-qualification,ferrum2-rule-qualification}`. `vendor/shadowsocks-crypto` is patched through the root manifest; treat it as reviewed third-party source. Each workspace package and major test/tool subtree has a scoped `AGENTS.md`; follow the nearest guide while retaining this guide.
+Ferrum2 is a Rust 2024 workspace pinned to Rust 1.97.1. Binaries live in `bins/ferrum2-client` and `bins/ferrum2-server`; shared networking, crypto, DNS, runtime, configuration, and TUN code lives in `crates/ferrum2-*`. Cross-binary qualification tests are in `tests/m0-harness`; crate integration tests use each crate's `tests/` directory. Cross-workspace stable inputs and vectors belong under `tests/fixtures/{config,crypto,dns-tls,sip022,srs}`. The TUN crate's reviewed packet corpus is intentionally crate-owned under `crates/ferrum2-tun/tests/fixtures/packets`, with separate fuzz seed sets under `crates/ferrum2-tun/fuzz/corpus/{packet_reassembly,udp_reset_races,config_legacy_fields,strict_route_rules}`. Platform correctness qualification and its static contract live in `tests/platform`; Windows host modules live in `tools/powershell/Ferrum2.Qualification.Host`. TUN-only mock I/O performance is crate-owned in `crates/ferrum2-tun`, driven by `tools/performance_candidate`. Performance-controller tests live in `tests/{performance_candidate,performance_rule}`; offline CI-controller tests live in `tests/ci`. Declarative workflow controllers live in `tools/ci`, and qualification tooling is in `tools/{ferrum2-m4-qualification,ferrum2-rule-qualification}`. `vendor/shadowsocks-crypto` is patched through the root manifest; treat it as reviewed third-party source. Each workspace package and major test/tool subtree has a scoped `AGENTS.md`; follow the nearest guide while retaining this guide.
 
 ## Build, Test, and Development Commands
 
@@ -49,6 +49,7 @@ cargo test -p ferrum2-client --all-features --no-run --locked
 cargo test -p ferrum2-rule-qualification --no-run --locked
 cargo test -p ferrum2-tun --lib --no-default-features --features fuzzing --locked
 cargo test -p ferrum2-platform-windows --lib --no-default-features --features fuzzing --locked
+cargo build -p ferrum2-tun --example tun-benchmark --no-default-features --features benchmark --profile profiling --locked
 cargo check -p ferrum2-tun -p ferrum2-platform-windows --all-features --locked
 cargo check -p ferrum2-tun --features fuzzing --target x86_64-unknown-linux-gnu --locked
 cargo test -p ferrum2-dns --features __interop-test-root --locked
@@ -67,12 +68,12 @@ Run the ordinary Python controller tests with `python3` on Unix and `python` on 
 python3 -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v
 python3 -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v
 python3 -B -m unittest discover -s tests/ci -p 'test_*.py' -v
-python3 -B -m unittest discover -s tests/platform -p 'test_qualify_native.py' -v
+python3 -B -m unittest discover -s tests/platform -p 'test_*.py' -v
 
 python -B -m unittest discover -s tests/performance_candidate -p 'test_*.py' -v
 python -B -m unittest discover -s tests/performance_rule -p 'test_*.py' -v
 python -B -m unittest discover -s tests/ci -p 'test_*.py' -v
-python -B -m unittest discover -s tests/platform -p 'test_qualify_native.py' -v
+python -B -m unittest discover -s tests/platform -p 'test_*.py' -v
 ```
 
 The Linux-target check requires that Rust target and its native cross-compilation prerequisites;
@@ -99,11 +100,15 @@ CI. Ordinary tests must never create a real adapter or mutate route, DNS, WFP, o
 Privileged Windows TUN correctness qualification runs only through
 `tests/platform/run_windows_tun_qualification_host.ps1`; it requires an already elevated shell,
 the explicit `-AcknowledgeHostNetworkMutation` switch, run-owned RFC 2544 addresses and `/32` routes,
-and a verified zero-residue transaction within 900 seconds. Windows TUN performance remains separate
-at `tools/windows-tun/performance/run_windows_tun_performance_host.ps1` and has the same elevation and
-acknowledgement requirements. Neither host runner may change a default route, host DNS, a physical
-adapter, WLAN, sing-box, or unrelated state. The deterministic TUN smoke corpus and sanitizer-backed,
-pure in-memory fuzz targets run only in their bounded Linux CI workflow.
+and a verified zero-residue transaction within 900 seconds. It verifies sustained concurrent TCP,
+observed backpressure, UDP/fragments and active-work reset, not just a short echo. TUN performance
+uses the crate-owned `tun-benchmark` with bounded mock I/O and the Python candidate controller,
+without real sockets or host mutation. It does not qualify reactor or driver behavior. The host
+qualification runner may create only ledger-owned firewall rules for the exact current test EXEs
+and their narrow traffic scope, removing and independently verifying them at cleanup. It must not
+change existing firewall rules, default routes, host DNS, physical adapters, WLAN, sing-box, or
+unrelated state. Deterministic TUN smoke and pure in-memory fuzz targets
+remain in their bounded Linux CI workflow.
 `tests/platform/qualify_native.py --local-contract` may execute its unprivileged loopback binary
 contract locally; omitting `--local-contract` retains hosted-CI identity and evidence checks.
 

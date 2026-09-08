@@ -240,6 +240,74 @@ Assert-True (
     $tcpIngressOffline.residue_rejected -eq $true
 ) 'TCP ingress WFP identity, isolation, epoch, or rollback contract changed'
 
+. (Join-Path $moduleRoot 'WorkloadEvidence.ps1')
+$readyWitness = [pscustomobject]@{
+    schema_version = 1; kind = 'ferrum2.windows-tun-reset-ready'; generation = 1
+    tcp_pending = $true; udp_pending = $true; tcp_paused_bytes_sent = 65536
+    tcp_unwritable_milliseconds = 100; udp_pending_datagrams = 1
+    udp_local_endpoint = '198.18.0.1:42000'
+}
+Assert-Ferrum2QualificationResetReady -Witness $readyWitness
+$trafficWitness = [pscustomobject]@{
+    schema_version = 1; kind = 'ferrum2.windows-tun-qualification'; status = 'PASS'
+    generations = @(foreach ($generation in 1..2) {
+        [pscustomobject]@{
+            generation = $generation; payload_identity = "generation-$generation"
+            concurrent_flows = 4
+            all_flows_established_barrier = $true
+            flows = @(foreach ($flow in 0..3) {
+                [pscustomobject]@{
+                    flow = $flow; generation = $generation
+                    local_endpoint = "198.18.0.1:$(40000 + $generation * 4 + $flow)"
+                    same_connection_phases = @(
+                        'request_before', 'paused_reader', 'full_duplex', 'request_after', 'half_close')
+                    bulk_bytes = 8388608; paused_bytes_sent = 65536
+                    paused_unwritable_milliseconds = 100; resumed_bytes_sent = 8323072
+                    checked_tcp_bytes = 8391680; udp_replies_during_tcp = 4
+                    fragment_replies_during_tcp = 4; fragment_request_bytes = 4096
+                    payload_exact = $true; half_close_reply_checked = $true; remote_eof = $true
+                }
+            })
+        }
+    })
+    reset = [pscustomobject]@{
+        ready_generation = 1; release_generation = 2; old_tcp_retired = $true
+        old_tcp_retirement = 'reset'; old_tcp_pending_bytes = 65536; old_tcp_drained_bytes = 0
+        old_udp_pending_datagrams = 1; old_udp_buffered_replies = 1
+        same_tuple_udp_fresh_reply_checked = $true; udp_fresh_payload_identity = 'generation-2'
+        udp_local_endpoint = '198.18.0.1:42000'
+    }
+}
+Assert-Ferrum2QualificationWorkloadWitness -Witness $trafficWitness
+foreach ($mutation in @(
+    { param($w) $w.generations = @($w.generations[0]) },
+    { param($w) $w.generations[0].all_flows_established_barrier = $false },
+    { param($w) $w.generations[1].payload_identity = 'generation-1' },
+    { param($w) $w.generations[1].flows[0].local_endpoint = $w.generations[0].flows[0].local_endpoint },
+    { param($w) $w.generations[0].flows[0].paused_bytes_sent = 0 },
+    { param($w) $w.generations[0].flows[0].resumed_bytes_sent = 1 },
+    { param($w) $w.generations[0].flows[0].udp_replies_during_tcp = 0 },
+    { param($w) $w.generations[0].flows[0].fragment_replies_during_tcp = 0 },
+    { param($w) $w.generations[0].flows[0].half_close_reply_checked = $false },
+    { param($w) $w.generations[0].flows[0].payload_exact = $false },
+    { param($w) $w.reset.old_tcp_retirement = 'timeout' },
+    { param($w) $w.reset.old_tcp_retired = $false },
+    { param($w) $w.reset.same_tuple_udp_fresh_reply_checked = $false },
+    { param($w) $w.reset.udp_fresh_payload_identity = 'generation-1' },
+    { param($w) $w.reset.old_udp_buffered_replies = 2 },
+    { param($w) $w.reset.old_udp_pending_datagrams = 0 }
+)) {
+    $changed = $trafficWitness | ConvertTo-Json -Depth 20 | ConvertFrom-Json -Depth 20
+    & $mutation $changed
+    $rejected = $false
+    try { Assert-Ferrum2QualificationWorkloadWitness -Witness $changed } catch { $rejected = $true }
+    Assert-True $rejected 'incomplete or stale workload evidence was accepted'
+}
+$readyWitness.tcp_pending = $false
+$rejected = $false
+try { Assert-Ferrum2QualificationResetReady -Witness $readyWitness } catch { $rejected = $true }
+Assert-True $rejected 'idle reset was accepted as active work'
+
 
 $candidateSha = (& git -C $repositoryRoot rev-parse HEAD).Trim()
 Assert-True ($LASTEXITCODE -eq 0 -and $candidateSha -cmatch '^[0-9a-f]{40}$') `
@@ -274,7 +342,10 @@ Assert-True ($plan.kind -ceq 'ferrum2.windows-tun.host-qualification-plan' -and
         'automatic after listener bind and before admission' -and
     @($plan.safety.mutations) -contains
         'process-owned dynamic exact TCP ingress WFP session' -and
-    @($plan.safety.forbidden_mutations) -contains 'persistent Windows Firewall rules' -and
+    $plan.safety.firewall_rule_store -ceq 'PersistentStore with exact ActiveStore readback' -and
+    @($plan.safety.mutations) -contains 'run-owned narrowly scoped Windows Firewall rules before executable launch' -and
+    @($plan.safety.forbidden_mutations) -contains 'unrelated Windows Firewall rules' -and
+    @($plan.safety.forbidden_mutations) -contains 'global firewall profile/notification settings' -and
     @($plan.safety.forbidden_mutations) -contains 'unrelated WFP sessions') `
     'host qualification plan contract changed'
 
