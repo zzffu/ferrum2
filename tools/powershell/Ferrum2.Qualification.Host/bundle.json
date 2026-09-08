@@ -10,8 +10,8 @@
     },
     {
       "path": "tests/platform/run_windows_tun_qualification_host.ps1",
-      "bytes": 16611,
-      "sha256": "84bc10917623b4a8f2dc4816871890572aec5220e44ab4d2cf922338b7f2f6b5"
+      "bytes": 16689,
+      "sha256": "99a73d8a7d976d0dce911f554e35cb572dd6a9ef4e5e5c56ce9799c2bb104fd4"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/AddressFamily.ps1",
@@ -85,8 +85,8 @@
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/WfpEvidence.ps1",
-      "bytes": 32430,
-      "sha256": "2f1d6821515681418fa1874f0ab9c20834faeaab1bfbaf698990c479a2e1b561"
+      "bytes": 33106,
+      "sha256": "dd60222fefcb85d55a6bd3d5b87c1fc38bfe2fd92a534274b353c6ec0fca309e"
     },
     {
       "path": "tools/powershell/Ferrum2.Qualification.Host/WorkloadEvidence.ps1",

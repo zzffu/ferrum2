@@ -223,6 +223,7 @@ try {
                 "$($_.field_key):$($_.type):$($_.match_type)"
             } | Sort-Object) -join '|') -cne $expectedConditionShape -or
             $_.listener.address_family -cne $AddressFamily -or
+            ($AddressFamily -ceq 'IPv6' -and $_.ipv4_address_count -ne 0) -or
             $_.listener.local_address -in @('0.0.0.0', '::') -or
             $_.listener.local_port -eq 0 -or
             $_.listener.wildcard_listener_count -ne 0

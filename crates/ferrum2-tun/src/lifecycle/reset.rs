@@ -116,6 +116,9 @@ pub(crate) const fn map_managed_state_damage(
             TunNetworkFullRebuildReason::SessionDamage
         }
         ferrum2_platform_windows::ManagedStateDamage::Mtu => TunNetworkFullRebuildReason::MtuDamage,
+        ferrum2_platform_windows::ManagedStateDamage::InterfacePolicy => {
+            TunNetworkFullRebuildReason::InterfacePolicyDamage
+        }
         ferrum2_platform_windows::ManagedStateDamage::Address => {
             TunNetworkFullRebuildReason::AddressDamage
         }

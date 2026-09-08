@@ -46,6 +46,11 @@ IPv4 retains its existing host-address rules, including rejection of `/31` and `
 interface prefixes must be `/126` or wider; `/127` and `/128` do not leave an ordinary synthetic
 peer that Ferrum2 can use for the system TCP path.
 
+When IPv4 is omitted, Ferrum2 disables IPv4 link-local autoconfiguration on its own adapter so
+Windows cannot later assign an APIPA address and disrupt an IPv6-only session. This exact
+interface policy is journaled, read back, health-checked and restored during owned teardown.
+It does not disable DHCP globally, unbind host protocols or change any physical adapter.
+
 
 `auto_dns` retains its existing exact-endpoint semantics. It requires `auto_route = true` and at
 least one synthetic DNS address belonging to an enabled TUN subnet. Only TCP or UDP traffic whose

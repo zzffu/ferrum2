@@ -111,6 +111,9 @@ impl CleanupOperations for Operations {
     fn restore_ipv4_mtu(&mut self) -> Option<bool> {
         None
     }
+    fn restore_ipv4_link_local(&mut self) -> Option<bool> {
+        None
+    }
     fn close_adapter(&mut self) -> Option<bool> {
         self.events.borrow_mut().push(Event::CloseAdapter);
         Some(self.close_failed)

@@ -59,10 +59,67 @@ pub(in crate::windows) fn mtu_health(
     Ok(ManagedTunHealth::Healthy)
 }
 
+/// Requires a link-local suppression lease exactly when IPv4 is not configured.
+pub(in crate::windows) fn ipv4_link_local_health(
+    ipv4_enabled: bool,
+    policy_journaled: bool,
+    mut read_disabled: impl FnMut() -> Result<Option<bool>, Error>,
+) -> Result<ManagedTunHealth, Error> {
+    if policy_journaled != !ipv4_enabled {
+        return Ok(ManagedTunHealth::Damaged(
+            ManagedStateDamage::OwnershipLedger,
+        ));
+    }
+    if policy_journaled && read_disabled()? != Some(true) {
+        return Ok(ManagedTunHealth::Damaged(
+            ManagedStateDamage::InterfacePolicy,
+        ));
+    }
+    Ok(ManagedTunHealth::Healthy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::windows::core::managed::mtu_health;
+
+    #[test]
+    fn ipv4_link_local_health_requires_the_disabled_family_lease_and_exact_readback() {
+        assert_eq!(
+            ipv4_link_local_health(true, false, || panic!("enabled IPv4 queried")),
+            Ok(ManagedTunHealth::Healthy)
+        );
+        for (enabled, journaled) in [(true, true), (false, false)] {
+            assert_eq!(
+                ipv4_link_local_health(enabled, journaled, || panic!("invalid journal queried")),
+                Ok(ManagedTunHealth::Damaged(
+                    ManagedStateDamage::OwnershipLedger
+                ))
+            );
+        }
+        assert_eq!(
+            ipv4_link_local_health(false, true, || Ok(Some(true))),
+            Ok(ManagedTunHealth::Healthy)
+        );
+        for current in [None, Some(false)] {
+            assert_eq!(
+                ipv4_link_local_health(false, true, || Ok(current)),
+                Ok(ManagedTunHealth::Damaged(
+                    ManagedStateDamage::InterfacePolicy
+                ))
+            );
+        }
+        for error in [
+            Error::recoverable_session(),
+            Error::invalid_input(),
+            Error::cleanup(),
+        ] {
+            assert_eq!(
+                ipv4_link_local_health(false, true, || Err(error)),
+                Err(error)
+            );
+        }
+    }
     #[test]
     fn mtu_readback_distinguishes_damage_unavailability_and_family_journal_conflicts() {
         for enabled in [[true, false], [false, true], [true, true]] {

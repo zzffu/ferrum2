@@ -124,6 +124,7 @@ pub enum ManagedNetworkDamage {
     ManagedRouteDamaged,
     ManagedDnsDamaged,
     ManagedMtuDamaged,
+    ManagedInterfacePolicyDamaged,
     StrictRouteDamaged,
     TcpIngress,
     OwnershipLedgerUntrusted,

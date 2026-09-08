@@ -96,6 +96,8 @@ pub enum ManagedStateDamage {
     Address,
     /// An owned interface MTU is absent or differs from its journal.
     Mtu,
+    /// An owned interface policy is absent or no longer matches its lease.
+    InterfacePolicy,
     /// One or more owned capture-route rows are absent or no longer exact.
     Route,
     /// One or more managed DNS leases are absent or no longer exact.

@@ -23,6 +23,10 @@ const REBUILD_REASONS: &[(NetworkFullRebuildReason, &str)] = &[
     (NetworkFullRebuildReason::DnsDamage, "dns_damage"),
     (NetworkFullRebuildReason::MtuDamage, "mtu_damage"),
     (
+        NetworkFullRebuildReason::InterfacePolicyDamage,
+        "interface_policy_damage",
+    ),
+    (
         NetworkFullRebuildReason::StrictRouteDamage,
         "strict_route_damage",
     ),
