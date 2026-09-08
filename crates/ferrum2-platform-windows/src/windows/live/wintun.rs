@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GetLastError, HANDLE};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceLuidToGuid, CreateUnicastIpAddressEntry, GetIpInterfaceEntry,
-    InitializeIpInterfaceEntry, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, SetIpInterfaceEntry,
+    MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, SetIpInterfaceEntry,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::{
@@ -534,10 +534,11 @@ impl Adapter {
     }
 
     pub(super) fn set_mtu(&mut self, family: u16, slot: usize) -> Result<(), Error> {
-        let mut row = MIB_IPINTERFACE_ROW::default();
-        unsafe { InitializeIpInterfaceEntry(&mut row) };
-        row.Family = family;
-        row.InterfaceLuid = self.luid;
+        let mut row = MIB_IPINTERFACE_ROW {
+            Family: family,
+            InterfaceLuid: self.luid,
+            ..MIB_IPINTERFACE_ROW::default()
+        };
         let status = unsafe { GetIpInterfaceEntry(&mut row) };
         if status != ERROR_SUCCESS {
             return Err(Error);

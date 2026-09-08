@@ -9,8 +9,8 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceLuidToIndex, CreateIpForwardEntry2, DeleteIpForwardEntry2,
     DeleteUnicastIpAddressEntry, GetIpForwardEntry2, GetIpInterfaceEntry, GetUnicastIpAddressEntry,
-    InitializeIpForwardEntry, InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry,
-    MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, SetIpInterfaceEntry,
+    InitializeIpForwardEntry, InitializeUnicastIpAddressEntry, MIB_IPFORWARD_ROW2,
+    MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW, SetIpInterfaceEntry,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
@@ -92,10 +92,13 @@ pub(super) fn read_owned_ip_interface(
     luid: NET_LUID_LH,
     family: u16,
 ) -> Result<Option<MIB_IPINTERFACE_ROW>, Error> {
-    let mut row = MIB_IPINTERFACE_ROW::default();
-    unsafe { InitializeIpInterfaceEntry(&mut row) };
-    row.Family = family;
-    row.InterfaceLuid = luid;
+    // Queries need only family and identity. Setter initialization contains 0xff
+    // BOOLEAN sentinels and must not be used to construct a Rust-valued row.
+    let mut row = MIB_IPINTERFACE_ROW {
+        Family: family,
+        InterfaceLuid: luid,
+        ..MIB_IPINTERFACE_ROW::default()
+    };
     // The initialized row contains only this transaction's LUID and family; the call
     // borrows its stack storage and retains no pointer.
     match unsafe { GetIpInterfaceEntry(&mut row) } {

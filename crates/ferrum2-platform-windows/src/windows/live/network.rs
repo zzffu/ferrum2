@@ -12,9 +12,9 @@ use socket2::Socket;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     FreeMibTable, GetBestInterfaceEx, GetBestRoute2, GetIfTable2, GetIpForwardTable2,
-    GetIpInterfaceEntry, GetUnicastIpAddressTable, InitializeIpInterfaceEntry, MIB_IF_ROW2,
-    MIB_IF_TABLE2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
-    MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE,
+    GetIpInterfaceEntry, GetUnicastIpAddressTable, MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2,
+    MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
+    MIB_UNICASTIPADDRESS_TABLE,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::{
     IfOperStatusUp, MediaConnectStateConnected, NET_IF_ADMIN_STATUS_UP, NET_LUID_LH,
@@ -267,13 +267,14 @@ impl UnderlayOperations for PlatformUnderlay {
         family: std::net::IpAddr,
         interface_index: u32,
     ) -> Result<u32, Error> {
-        let mut row = MIB_IPINTERFACE_ROW::default();
-        unsafe { InitializeIpInterfaceEntry(&mut row) };
-        row.Family = match family {
-            std::net::IpAddr::V4(_) => AF_INET,
-            std::net::IpAddr::V6(_) => AF_INET6,
+        let mut row = MIB_IPINTERFACE_ROW {
+            Family: match family {
+                std::net::IpAddr::V4(_) => AF_INET,
+                std::net::IpAddr::V6(_) => AF_INET6,
+            },
+            InterfaceIndex: interface_index,
+            ..MIB_IPINTERFACE_ROW::default()
         };
-        row.InterfaceIndex = interface_index;
         if unsafe { GetIpInterfaceEntry(&mut row) } != ERROR_SUCCESS || !row.Connected {
             return Err(Error);
         }
@@ -484,14 +485,15 @@ pub(super) fn read_catalog_family_state(
     identity: InterfaceIdentity,
     family: NetworkFamily,
 ) -> Result<(bool, u32), Error> {
-    let mut row = MIB_IPINTERFACE_ROW::default();
-    unsafe { InitializeIpInterfaceEntry(&mut row) };
-    row.Family = match family {
-        NetworkFamily::Ipv4 => AF_INET,
-        NetworkFamily::Ipv6 => AF_INET6,
-    };
-    row.InterfaceLuid = NET_LUID_LH {
-        Value: identity.luid,
+    let mut row = MIB_IPINTERFACE_ROW {
+        Family: match family {
+            NetworkFamily::Ipv4 => AF_INET,
+            NetworkFamily::Ipv6 => AF_INET6,
+        },
+        InterfaceLuid: NET_LUID_LH {
+            Value: identity.luid,
+        },
+        ..MIB_IPINTERFACE_ROW::default()
     };
     if unsafe { GetIpInterfaceEntry(&mut row) } != ERROR_SUCCESS {
         return Err(Error);
