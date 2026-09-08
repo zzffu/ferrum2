@@ -53,6 +53,10 @@ cargo run -p ferrum2-client --locked -- --config docs/examples/client-v2-socks5.
 用于真实部署前，应复制配置、替换测试密钥和地址，并保持两端方法和密钥一致。
 SOCKS5 入站为无认证模式，示例因此只监听回环地址。
 
+服务端 `inbounds[].listen` 支持 IPv4 或带方括号的 IPv6 地址，例如 `[::1]:8388`；
+IPv6 TCP/UDP 监听为 IPv6-only，不隐式接收 IPv4-mapped 流量。两端的 `metrics.listen`
+只接受回环地址，可使用 `127.0.0.1:9091` 或 `[::1]:9091`。客户端 SOCKS5 监听仍限 IPv4。
+
 ## 内嵌仪表盘
 
 client 内嵌 React 仪表盘，提供连接、出站选择、路由、DNS、日志与配置管理。

@@ -4,18 +4,22 @@ use tokio::net::{TcpListener, TcpSocket};
 
 use super::RunError;
 
-pub(super) fn bind_listener(
-    address: std::net::SocketAddrV4,
-    backlog: u32,
-) -> Result<TcpListener, RunError> {
-    let socket = TcpSocket::new_v4().map_err(|_| RunError::StartupBind)?;
+pub(super) fn bind_listener(address: SocketAddr, backlog: u32) -> Result<TcpListener, RunError> {
+    let socket = match address {
+        SocketAddr::V4(_) => TcpSocket::new_v4(),
+        SocketAddr::V6(_) => TcpSocket::new_v6(),
+    }
+    .map_err(|_| RunError::StartupBind)?;
+    if address.is_ipv6() {
+        socket2::SockRef::from(&socket)
+            .set_only_v6(true)
+            .map_err(|_| RunError::StartupBind)?;
+    }
     #[cfg(unix)]
     socket
         .set_reuseaddr(true)
         .map_err(|_| RunError::StartupBind)?;
-    socket
-        .bind(SocketAddr::V4(address))
-        .map_err(|_| RunError::StartupBind)?;
+    socket.bind(address).map_err(|_| RunError::StartupBind)?;
     socket.listen(backlog).map_err(|_| RunError::StartupBind)
 }
 
@@ -68,7 +72,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn listener_policy_rebinds_after_traffic_and_excludes_live_contender() {
-        let address = reserve_address();
+        let address = SocketAddr::from(reserve_address());
         let listener = bind_listener(address, 1).expect("initial listener");
         let (client, accepted) =
             tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());

@@ -293,7 +293,7 @@ async fn minimal_v2_materializes_without_network_or_refresh_owner() {
         .expect("materialize minimal config");
     assert!(downloader.seen().is_empty());
     let config = materialized.into_validated_config();
-    assert_eq!(SocketAddr::V4(config.inbounds[0].listen), listen);
+    assert_eq!(config.inbounds[0].listen, listen);
 
     system_owner
         .shutdown()

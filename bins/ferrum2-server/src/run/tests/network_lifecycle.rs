@@ -258,7 +258,9 @@ async fn tagged_prepare_failure_positions_rollback_every_bound_address() {
         let listens = [reserve_address(), reserve_address(), reserve_address()];
         let metrics = reserve_address();
         let (path, mut config) = tagged_server_test_config(listens, false);
-        config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
+        config.metrics = Some(ferrum2_config::MetricsConfig {
+            listen: metrics.into(),
+        });
         let incumbent: Box<dyn Send> = match block {
             0..=2 => {
                 Box::new(std::net::TcpListener::bind(listens[block]).expect("occupy TCP position"))

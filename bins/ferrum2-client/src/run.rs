@@ -529,7 +529,7 @@ where
                 ProcessRoot::new(move || async move {
                     let mut listeners = Vec::with_capacity(listens.len());
                     for listen in listens {
-                        listeners.push(bind_listener(listen, listen_backlog)?);
+                        listeners.push(bind_listener(listen.into(), listen_backlog)?);
                     }
                     let executor = AffineConnectionExecutor::new(
                         ClientTcpListeners {

@@ -163,16 +163,9 @@ pub(crate) fn validate_client_prepared(
         })
         .transpose()?;
     let logging = validate_logging(raw.logging)?;
-    let mut listens: Vec<_> = inbounds.iter().map(|inbound| inbound.listen).collect();
+    let mut listens = ordinary_listens;
     if let Some(dns) = &dns {
-        listens.extend(
-            dns.inbounds
-                .iter()
-                .filter_map(|inbound| match inbound.listen {
-                    SocketAddr::V4(listen) => Some(listen),
-                    SocketAddr::V6(_) => None,
-                }),
-        );
+        listens.extend(dns.inbounds.iter().map(|inbound| inbound.listen));
     }
     let metrics = validate_metrics(raw.metrics, &listens)?;
     Ok(PreparedClientValidation {

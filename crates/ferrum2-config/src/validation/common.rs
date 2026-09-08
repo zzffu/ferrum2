@@ -510,18 +510,18 @@ pub(super) fn validate_logging(raw: RawLogging) -> Result<LoggingConfig, ConfigE
 
 pub(super) fn validate_metrics(
     raw: Option<RawMetrics>,
-    proxy_listens: &[SocketAddrV4],
+    proxy_listens: &[SocketAddr],
 ) -> Result<Option<MetricsConfig>, ConfigError> {
     let Some(raw) = raw else {
         return Ok(None);
     };
-    let listen = parse_endpoint(&raw.listen, ConfigField::MetricsListen)?;
+    let listen = parse_socket(&raw.listen, ConfigField::MetricsListen)?;
     if !listen.ip().is_loopback() {
         return Err(ConfigError::semantic(ConfigField::MetricsListen));
     }
     validate_listener(
-        SocketAddr::V4(listen),
-        proxy_listens.iter().copied().map(SocketAddr::V4),
+        listen,
+        proxy_listens.iter().copied(),
         ConfigField::MetricsListen,
     )?;
     Ok(Some(MetricsConfig { listen }))

@@ -9,9 +9,9 @@ use crate::raw::{RawSelector, RawServerInbound};
 
 use super::AdmittedEgressGraph;
 use super::common::{
-    DnsRole, DnsValidationContext, GraphValidation, dns_detour_tags, parse_endpoint, parse_method,
-    parse_psk, validate_count, validate_dns, validate_logging, validate_metrics, validate_replay,
-    validate_runtime, validate_tag, validate_udp,
+    DnsRole, DnsValidationContext, GraphValidation, dns_detour_tags, parse_method, parse_psk,
+    parse_socket, validate_count, validate_dns, validate_logging, validate_metrics,
+    validate_replay, validate_runtime, validate_tag, validate_udp,
 };
 use super::graph::{compile_graph_roots, validate_outbound_dial_options, validate_route_network};
 use super::listener::validate_listener;
@@ -214,12 +214,8 @@ pub(super) fn validate_server_graph(
         {
             return Err(ConfigError::semantic(ConfigField::InboundsTag));
         }
-        let listen = parse_endpoint(&inbound.listen, ConfigField::InboundsListen)?;
-        validate_listener(
-            std::net::SocketAddr::V4(listen),
-            listens.iter().copied().map(std::net::SocketAddr::V4),
-            ConfigField::InboundsListen,
-        )?;
+        let listen = parse_socket(&inbound.listen, ConfigField::InboundsListen)?;
+        validate_listener(listen, listens.iter().copied(), ConfigField::InboundsListen)?;
         listens.push(listen);
     }
     for (index, outbound) in outbounds.iter().enumerate() {

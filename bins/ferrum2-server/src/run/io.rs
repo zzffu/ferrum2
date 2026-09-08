@@ -5,17 +5,25 @@ use tokio::net::{TcpListener, TcpSocket};
 use super::error::{EndpointAcquireError, EndpointAcquireStage};
 
 pub(super) fn bind_listener(
-    address: std::net::SocketAddrV4,
+    address: SocketAddr,
     backlog: u32,
 ) -> Result<TcpListener, EndpointAcquireError> {
-    let socket = TcpSocket::new_v4()
-        .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::SocketCreate, error))?;
+    let socket = match address {
+        SocketAddr::V4(_) => TcpSocket::new_v4(),
+        SocketAddr::V6(_) => TcpSocket::new_v6(),
+    }
+    .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::SocketCreate, error))?;
+    if address.is_ipv6() {
+        socket2::SockRef::from(&socket)
+            .set_only_v6(true)
+            .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Configure, error))?;
+    }
     #[cfg(unix)]
     socket
         .set_reuseaddr(true)
         .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Configure, error))?;
     socket
-        .bind(SocketAddr::V4(address))
+        .bind(address)
         .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Bind, error))?;
     socket
         .listen(backlog)
@@ -23,19 +31,24 @@ pub(super) fn bind_listener(
 }
 
 pub(super) fn bind_datagram(
-    address: std::net::SocketAddrV4,
+    address: SocketAddr,
 ) -> Result<tokio::net::UdpSocket, EndpointAcquireError> {
     let socket = socket2::Socket::new(
-        socket2::Domain::IPV4,
+        socket2::Domain::for_address(address),
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
     )
     .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::SocketCreate, error))?;
+    if address.is_ipv6() {
+        socket
+            .set_only_v6(true)
+            .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Configure, error))?;
+    }
     socket
         .set_nonblocking(true)
         .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Configure, error))?;
     socket
-        .bind(&socket2::SockAddr::from(SocketAddr::V4(address)))
+        .bind(&socket2::SockAddr::from(address))
         .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Bind, error))?;
     tokio::net::UdpSocket::from_std(socket.into())
         .map_err(|error| EndpointAcquireError::new(EndpointAcquireStage::Configure, error))
@@ -77,7 +90,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn listener_policy_rebinds_after_traffic_and_excludes_live_contender() {
-        let address = reserve_address();
+        let address = SocketAddr::from(reserve_address());
         let listener = bind_listener(address, 1).expect("initial listener");
         let (client, accepted) =
             tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());

@@ -39,7 +39,9 @@ async fn route_sniff_reject_udp_freezes_first_terminal_before_reservation() {
         action = \"reject\"\n";
     let metrics = reserve_address();
     let (path, mut config) = server_v2_test_config(listen, route);
-    config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
+    config.metrics = Some(ferrum2_config::MetricsConfig {
+        listen: metrics.into(),
+    });
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
     wait_until_active(&mut server, &registry).await;

@@ -278,7 +278,7 @@ pub struct ValidatedServerConfig {
 /// One validated protocol-specific listener.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerInboundConfig {
-    pub listen: SocketAddrV4,
+    pub listen: SocketAddr,
     pub protocol: ServerInboundProtocol,
 }
 
@@ -778,5 +778,5 @@ pub enum LoggingLevel {
 /// Validated optional loopback metrics endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MetricsConfig {
-    pub listen: SocketAddrV4,
+    pub listen: SocketAddr,
 }

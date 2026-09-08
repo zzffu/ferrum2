@@ -83,7 +83,9 @@ async fn route_sniff_reject_lifecycle_composition_contract_prefix_is_exact() {
     let (path, mut config) = server_test_config_source("m14-selector", &source);
     let selector = config.selector_control();
     config.outbounds.truncate(1);
-    config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
+    config.metrics = Some(ferrum2_config::MetricsConfig {
+        listen: metrics.into(),
+    });
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
     wait_until_active(&mut server, &registry).await;
@@ -451,7 +453,9 @@ async fn route_sniff_reject_tcp_timeout_continues_to_final() {
         sniffers = \"tls\"\n";
     let metrics = reserve_address();
     let (path, mut config) = server_v2_test_config(listen, route);
-    config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
+    config.metrics = Some(ferrum2_config::MetricsConfig {
+        listen: metrics.into(),
+    });
     let registry = OwnerRegistry::new();
     let (stop, mut server) = spawn_test_server(config, &registry);
     wait_until_active(&mut server, &registry).await;

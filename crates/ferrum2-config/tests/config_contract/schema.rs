@@ -113,7 +113,7 @@ fn schema_v2_fixture_cohort_normalizes_defaults_boundaries_and_choices() {
                     config.metrics.map(|metrics| metrics.listen.port()),
                 );
                 let expected = (
-                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388),
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388)),
                     Some(case.method),
                     case.replay_capacity,
                     expected_udp.0,

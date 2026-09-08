@@ -306,7 +306,9 @@ async fn tagged_prepare_failures_restore_full_baseline_and_exact_rebind() {
         let metrics = reserve_address();
         let (path, mut config) =
             tagged_client_test_config(&listens.map(|listen| (listen, reserve_address())), false);
-        config.metrics = Some(ferrum2_config::MetricsConfig { listen: metrics });
+        config.metrics = Some(ferrum2_config::MetricsConfig {
+            listen: metrics.into(),
+        });
         let address = if blocked < 2 {
             listens[blocked]
         } else {

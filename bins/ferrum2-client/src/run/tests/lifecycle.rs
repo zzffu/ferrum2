@@ -350,7 +350,7 @@ async fn listener_fatal_cancels_udp_without_forced_shutdown() {
     let tcp_root = ProcessRoot::new(move || async move {
         let listeners = listens
             .into_iter()
-            .map(|listen| bind_listener(listen, 16))
+            .map(|listen| bind_listener(listen.into(), 16))
             .collect::<Result<Vec<_>, _>>()?;
         let executor = AffineConnectionExecutor::new(
             ClientTcpListeners {
