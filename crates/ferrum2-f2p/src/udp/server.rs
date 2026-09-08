@@ -113,9 +113,15 @@ async fn server_session<B: UdpBackend>(
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "F2P UDP open expired"))?;
-    let socket = timeout(STALL, backend.connect(reservation, &target, &first.body))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "F2P UDP destination stalled"))??;
+    // The first packet has left the queue and is now funding destination preparation.
+    // Bound preparation and its send together, without expiring in-flight opening work.
+    let opening_deadline = Instant::now() + STALL;
+    let socket = tokio::time::timeout_at(
+        opening_deadline,
+        backend.connect(reservation, &target, &first.body),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "F2P UDP destination stalled"))??;
     let peer = socket.peer_addr()?;
     let mut response = Vec::with_capacity(20);
     response.push(0);
@@ -123,19 +129,11 @@ async fn server_session<B: UdpBackend>(
     let reply = shared.packet(Some(&session), OPEN_RESULT, session.id, &response)?;
     shared.enqueue(&session, reply, true)?;
     lock(&session.state).peer = Some(peer);
-    if first.created.elapsed() <= shared.policy.residence {
-        timeout(
-            shared
-                .policy
-                .residence
-                .saturating_sub(first.created.elapsed()),
-            socket.send(&first.body),
-        )
+    tokio::time::timeout_at(opening_deadline, socket.send(&first.body))
         .await
         .map_err(|_| {
             io::Error::new(io::ErrorKind::TimedOut, "F2P UDP destination send stalled")
         })??;
-    }
     drop(first);
     let send = async {
         loop {

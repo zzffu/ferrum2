@@ -44,6 +44,13 @@ Queues have session, tunnel and aggregate byte bounds, including pending opens a
 
 Expired UDP data may be dropped only before commitment to TLS/TCP. Expiry cannot retract bytes already in TLS or the kernel. Overflow does not block every receiving session indefinitely, and one stalled destination cannot stop tunnel parsing. Queue policy is explicit; it does not promise freshness beyond the proxy-controlled queue. TCP flows retain byte-stream reliability and are not subject to datagram expiry.
 
+Queue residence ends when the server dequeues the first DATA for payload-aware destination
+preparation. That packet retains its existing resource charge while route selection, socket
+creation and its first send share one 10-second stall deadline; preparation cannot silently
+expire the admitted packet after publishing OPEN_RESULT. Packets still queued behind it retain
+their original profile residence deadline and may expire. A stalled opening/send closes only
+that session; it does not extend the deadline or introduce retransmission.
+
 Client pooling currently uses one lazy tunnel per outbound identity, with fixed session-to-tunnel assignment and no warm connection. Two configured profiles/outbounds remain isolated. This is a conservative implemented policy, not a claim that one tunnel is optimal. The profile is the only public tuning control; there are no worker, batch, TLS-record, socket-buffer or tunnel-count knobs.
 
 | Initial UDP policy | balanced | realtime |
