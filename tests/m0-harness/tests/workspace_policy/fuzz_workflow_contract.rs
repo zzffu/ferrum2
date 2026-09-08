@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    contains_early_control_flow, continuation_statements, workflow_child_mapping,
-    workflow_child_sequence, workflow_jobs, workflow_mapping,
+    commands_equivalent, contains_early_control_flow, continuation_statements,
+    workflow_child_mapping, workflow_child_sequence, workflow_jobs, workflow_mapping,
 };
 
 pub(crate) fn validate_fuzz_workflow_execution(source: &str) -> Result<(), String> {
@@ -97,12 +97,17 @@ pub(crate) fn validate_fuzz_workflow_execution(source: &str) -> Result<(), Strin
         .steps
         .iter()
         .filter(|step| {
+            let statements = executable_statements(step);
             step.properties.get("id").map(String::as_str) == Some("classify")
                 && !step.properties.contains_key("if")
                 && !step.properties.contains_key("continue-on-error")
-                && continuation_statements(step, '\\')
-                    .iter()
-                    .any(|statement| statement == expected_classifier)
+                && step.properties.get("shell").map(String::as_str) == Some("bash")
+                && matches!(
+                    statements.as_slice(),
+                    [strict, command]
+                        if strict == "set -euo pipefail"
+                            && commands_equivalent(command, expected_classifier)
+                )
         })
         .collect();
     let classifier_invocations = jobs
@@ -124,14 +129,12 @@ pub(crate) fn validate_fuzz_workflow_execution(source: &str) -> Result<(), Strin
         .steps
         .iter()
         .filter(|step| {
-            step.properties.get("name").map(String::as_str)
-                == Some("Run deterministic TUN smoke corpus")
-                && step.properties.get("shell").map(String::as_str) == Some("bash")
+            step.properties.get("shell").map(String::as_str) == Some("bash")
                 && !step.properties.contains_key("if")
                 && !step.properties.contains_key("continue-on-error")
                 && step.environment.is_empty()
                 && step.inputs.is_empty()
-                && step.run_lines == ["set -euo pipefail", "./target/debug/smoke"]
+                && executable_statements(step) == ["set -euo pipefail", "./target/debug/smoke"]
         })
         .collect();
     let smoke_invocations = jobs
@@ -181,24 +184,16 @@ pub(crate) fn validate_fuzz_workflow_execution(source: &str) -> Result<(), Strin
         .steps
         .iter()
         .filter(|step| {
-            step.properties.get("name").map(String::as_str)
-                == Some("Run target sanitizer fuzz campaign")
-                && step.properties.get("shell").map(String::as_str) == Some("bash")
+            step.properties.get("shell").map(String::as_str) == Some("bash")
                 && step.properties.get("timeout-minutes").map(String::as_str) == Some("17")
                 && !step.properties.contains_key("if")
                 && !step.properties.contains_key("continue-on-error")
                 && step.environment.is_empty()
                 && step.inputs.is_empty()
+                && campaign_sequence_matches(step, expected_campaign)
         })
         .collect();
-    let expected_campaign_sequence = [
-        "set -euo pipefail",
-        "campaign_root=\"$RUNNER_TEMP/tun-fuzz-campaign\"",
-        "outer_timeout_seconds=$((FUZZ_SECONDS_PER_TARGET + 60))",
-        expected_campaign,
-    ];
-    let runs_bounded_target = campaign_steps.len() == 1
-        && continuation_statements(campaign_steps[0], '\\') == expected_campaign_sequence;
+    let runs_bounded_target = campaign_steps.len() == 1;
     let all_statements: Vec<_> = jobs
         .values()
         .flat_map(|job| &job.steps)
@@ -223,16 +218,107 @@ pub(crate) fn validate_fuzz_workflow_execution(source: &str) -> Result<(), Strin
         .filter(|statement| statement.contains("cargo ") && statement.contains(" fuzz "))
         .map(String::as_str)
         .collect();
-    let expected_fuzz_commands = BTreeSet::from([
+    let expected_fuzz_commands = [
         "test \"$(cargo +nightly-2026-07-10 fuzz --version)\" = \"cargo-fuzz 0.13.2\"",
         "CARGO_NET_OFFLINE=true cargo +nightly-2026-07-10 fuzz build --features libfuzzer \"$target\"",
-    ]);
-    if fuzz_commands.len() != 2
-        || fuzz_commands.iter().copied().collect::<BTreeSet<_>>() != expected_fuzz_commands
+    ];
+    if fuzz_commands.len() != expected_fuzz_commands.len()
+        || fuzz_commands
+            .iter()
+            .zip(expected_fuzz_commands)
+            .any(|(actual, expected)| {
+                if let Some(expected) = expected.strip_prefix("CARGO_NET_OFFLINE=true ") {
+                    !actual
+                        .strip_prefix("CARGO_NET_OFFLINE=true ")
+                        .is_some_and(|actual| commands_equivalent(actual, expected))
+                } else {
+                    actual
+                        .strip_prefix("test \"$(")
+                        .and_then(|command| command.strip_suffix(")\" = \"cargo-fuzz 0.13.2\""))
+                        .is_none_or(|command| {
+                            !commands_equivalent(
+                                command,
+                                "cargo +nightly-2026-07-10 fuzz --version",
+                            )
+                        })
+                }
+            })
     {
         return Err(format!(
             "cargo-fuzz command surface drifted: {fuzz_commands:?}"
         ));
     }
     Ok(())
+}
+
+// The assignments and pipeline form the reviewed budget/dataflow envelope.
+// Only the inner invocation has freely reorderable arguments: accepting arbitrary
+// shell syntax here could hide an unbounded run or mask the fuzzer's exit status.
+fn campaign_sequence_matches(step: &super::WorkflowStep, expected_command: &str) -> bool {
+    let statements = executable_statements(step);
+    let [strict, root, budget, command] = statements.as_slice() else {
+        return false;
+    };
+    let pipeline = " 2>&1 | tee \"$campaign_root/logs/$FUZZ_TARGET.log\"";
+    strict == "set -euo pipefail"
+        && root == "campaign_root=\"$RUNNER_TEMP/tun-fuzz-campaign\""
+        && budget == "outer_timeout_seconds=$((FUZZ_SECONDS_PER_TARGET + 60))"
+        && command
+            .strip_suffix(pipeline)
+            .zip(expected_command.strip_suffix(pipeline))
+            .is_some_and(|(actual, expected)| commands_equivalent(actual, expected))
+}
+
+fn executable_statements(step: &super::WorkflowStep) -> Vec<String> {
+    continuation_statements(step, '\\')
+        .into_iter()
+        .filter(|statement| !statement.is_empty() && !statement.starts_with('#'))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn campaign_role_allows_renaming_and_argument_order_not_unbounded_execution() {
+        let source = std::fs::read_to_string(
+            crate::workspace_root().join(".github/workflows/tun-fuzz-deterministic.yml"),
+        )
+        .expect("fuzz workflow");
+        let renamed = source
+            .replace(
+                "Run deterministic TUN smoke corpus",
+                "Exercise deterministic corpus",
+            )
+            .replace(
+                "Run target sanitizer fuzz campaign",
+                "Exercise bounded target",
+            )
+            .replace(
+                "--signal=TERM --kill-after=30s",
+                "--kill-after 30s --signal TERM",
+            )
+            .replace(
+                "-timeout=15 -rss_limit_mb=4096",
+                "-rss_limit_mb=4096 -timeout=15",
+            );
+        validate_fuzz_workflow_execution(&renamed).expect("equivalent bounded campaign");
+        for (from, to) in [
+            (
+                "-max_total_time=\"$FUZZ_SECONDS_PER_TARGET\"",
+                "-max_total_time=0",
+            ),
+            (
+                "\"$campaign_root/corpus/$FUZZ_TARGET\"",
+                "\"$campaign_root/corpus/other\"",
+            ),
+            ("--kill-after 30s", "--kill-after 300s"),
+            ("set -euo pipefail", "set -eu"),
+            ("tools.ci.fuzz_contract", "tools.ci.other_contract"),
+        ] {
+            assert!(renamed.contains(from), "mutation source {from}");
+            assert!(validate_fuzz_workflow_execution(&renamed.replace(from, to)).is_err());
+        }
+    }
 }

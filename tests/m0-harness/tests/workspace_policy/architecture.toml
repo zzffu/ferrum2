@@ -49,7 +49,6 @@ package = "ferrum2-rocom"
 allowed = []
 
 [unsafe_boundary]
-allow_declarations = 2
 legacy_file = "crates/ferrum2-platform-windows/src/windows.rs"
 legacy_allowed = false
 allowed_paths = [
@@ -62,14 +61,6 @@ root = "tests/fixtures/dns-tls"
 readme = "tests/fixtures/dns-tls/README.md"
 consumer_source_roots = ["bins", "crates", "tests", "tools"]
 forbidden_consumer_paths = ["crates/ferrum2-dns/tests/fixtures"]
-consumers = [
-    "crates/ferrum2-dns/src/resolver.rs",
-    "crates/ferrum2-dns/src/runtime_owner/tests.rs",
-    "crates/ferrum2-f2p/src/tests.rs",
-    "crates/ferrum2-ruleset/tests/ruleset_https.rs",
-    "tests/m0-harness/src/external_support/dns_case.rs",
-    "tests/m0-harness/tests/f2p_local_e2e.rs",
-]
 
 [[shared_dns_tls.files]]
 name = "m12-test-ca.der"

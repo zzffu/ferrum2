@@ -1,5 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "workflow_command.rs"]
+mod workflow_command;
+use workflow_command::commands_equivalent;
+
 fn workflow_mapping(source: &str, key: &str) -> Result<BTreeMap<String, String>, String> {
     let header = format!("{key}:");
     let lines: Vec<_> = source.lines().collect();
@@ -546,6 +550,9 @@ fn contains_early_control_flow(step: &WorkflowStep) -> bool {
 }
 
 fn is_cargo_test_statement(statement: &str) -> bool {
+    if statement.trim_start().starts_with('#') {
+        return false;
+    }
     let words = command_words(statement);
     let Some(cargo) = words.iter().position(|word| *word == "cargo") else {
         return false;
@@ -562,48 +569,60 @@ fn is_cargo_test_statement(statement: &str) -> bool {
 }
 
 fn selects_package(statement: &str, package: &str) -> bool {
-    command_words(statement)
-        .windows(2)
-        .any(|pair| pair[0] == "-p" && pair[1] == package)
+    let words: Vec<_> = command_words(statement)
+        .into_iter()
+        .take_while(|word| !word.starts_with('#'))
+        .collect();
+    words.windows(2).any(|pair| {
+        matches!(pair[0], "-p" | "--package") && pair[1].trim_matches(['\'', '"']) == package
+    }) || words.iter().any(|word| {
+        word.strip_prefix("--package=")
+            .or_else(|| word.strip_prefix("-p="))
+            .is_some_and(|value| value.trim_matches(['\'', '"']) == package)
+    })
 }
 
 fn is_cargo_library_test(line: &str, package: &str, target_required: bool) -> bool {
-    let words = command_words(line);
-    let actual: Vec<_> = words
-        .iter()
-        .map(|word| word.trim_matches(|character| matches!(character, '"' | '\'')))
-        .collect();
     let expected = if target_required {
-        vec![
-            "cargo",
-            "+1.97.1",
-            "test",
-            "-p",
-            package,
-            "--lib",
-            "--no-default-features",
-            "--features",
-            "fuzzing",
-            "--locked",
-            "--target",
-            "${{",
-            "matrix.target",
-            "}}",
-        ]
+        format!(
+            "cargo +1.97.1 test -p {package} --lib --no-default-features --features fuzzing --locked --target ${{{{ matrix.target }}}}"
+        )
     } else {
-        vec![
-            "cargo",
-            "test",
-            "-p",
-            package,
-            "--lib",
-            "--no-default-features",
-            "--features",
-            "fuzzing",
-            "--locked",
-        ]
+        format!("cargo test -p {package} --lib --no-default-features --features fuzzing --locked")
     };
-    actual == expected
+    commands_equivalent(line, &expected)
+}
+
+fn execution_statements(step: &WorkflowStep) -> Vec<String> {
+    continuation_statements(
+        step,
+        if step.properties.get("shell").map(String::as_str) == Some("pwsh") {
+            '`'
+        } else {
+            '\\'
+        },
+    )
+    .into_iter()
+    .filter(|statement| {
+        let trimmed = statement.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    })
+    .collect()
+}
+
+fn execution_sequence_matches(step: &WorkflowStep, expected: &[&str]) -> bool {
+    let actual = execution_statements(step);
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(actual, expected)| {
+            if expected.starts_with("cargo ") {
+                commands_equivalent(actual, expected)
+            } else {
+                actual == expected
+                    || actual.strip_prefix(expected).is_some_and(|rest| {
+                        rest.starts_with(char::is_whitespace) && rest.trim_start().starts_with('#')
+                    })
+            }
+        })
 }
 
 fn job_runs_library_test(
@@ -615,8 +634,7 @@ fn job_runs_library_test(
     job.steps.iter().any(|step| {
         step.properties.get("if").map(String::as_str) == required_step_condition
             && !step.properties.contains_key("continue-on-error")
-            && step
-                .run_lines
+            && execution_statements(step)
                 .iter()
                 .any(|line| is_cargo_library_test(line, package, target_required))
     })
@@ -677,7 +695,7 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
             ["ferrum2-tun", "ferrum2-platform-windows"]
                 .iter()
                 .any(|package| {
-                    step.run_lines
+                    execution_statements(step)
                         .iter()
                         .any(|line| is_cargo_library_test(line, package, false))
                 })
@@ -692,11 +710,6 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
     if linux_hosted_steps.len() != 1
         || linux_hosted_steps[0]
             .properties
-            .get("name")
-            .map(String::as_str)
-            != Some("Run portable TUN and Windows platform unit tests")
-        || linux_hosted_steps[0]
-            .properties
             .get("shell")
             .map(String::as_str)
             != Some("bash")
@@ -706,7 +719,7 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
             .contains_key("continue-on-error")
         || !linux_hosted_steps[0].environment.is_empty()
         || !linux_hosted_steps[0].inputs.is_empty()
-        || linux_hosted_steps[0].run_lines != expected_linux_sequence
+        || !execution_sequence_matches(linux_hosted_steps[0], &expected_linux_sequence)
     {
         return Err(
             "Linux hosted tests must be the exact unconditional execution sequence".to_owned(),
@@ -744,11 +757,6 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
         );
     }
     for package in ["ferrum2-tun", "ferrum2-platform-windows"] {
-        let expected_name = if package == "ferrum2-tun" {
-            "Run hosted-safe Windows TUN unit tests"
-        } else {
-            "Run hosted-safe Windows platform unit tests"
-        };
         let expected_command = format!(
             "cargo +1.97.1 test -p {package} --lib --no-default-features --features fuzzing --locked --target ${{{{ matrix.target }}}}"
         );
@@ -756,17 +764,12 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
             .steps
             .iter()
             .filter(|step| {
-                step.run_lines
+                execution_statements(step)
                     .iter()
                     .any(|line| is_cargo_library_test(line, package, true))
             })
             .collect();
         if execution_steps.len() != 1
-            || execution_steps[0]
-                .properties
-                .get("name")
-                .map(String::as_str)
-                != Some(expected_name)
             || execution_steps[0].properties.get("if").map(String::as_str)
                 != Some("matrix.profile == 'windows-msvc'")
             || execution_steps[0]
@@ -779,12 +782,14 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
                 .contains_key("continue-on-error")
             || !execution_steps[0].environment.is_empty()
             || !execution_steps[0].inputs.is_empty()
-            || execution_steps[0].run_lines
-                != [
+            || !execution_sequence_matches(
+                execution_steps[0],
+                &[
                     "$ErrorActionPreference = \"Stop\"",
                     "$PSNativeCommandUseErrorActionPreference = $true",
                     expected_command.as_str(),
-                ]
+                ],
+            )
         {
             return Err(format!(
                 "Windows platform job does not execute {package} in one exact unconditional step"
@@ -798,8 +803,6 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
             step.properties.get("if").map(String::as_str)
                 == Some("matrix.profile == 'windows-msvc'")
                 && step.properties.get("shell").map(String::as_str) == Some("pwsh")
-                && step.properties.get("name").map(String::as_str)
-                    == Some("Prove hosted-safe Windows test imports")
                 && step
                     .run_lines
                     .iter()
@@ -859,8 +862,9 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
         .steps
         .iter()
         .filter(|step| {
-            step.properties.get("name").map(String::as_str)
-                == Some("Compile Rule qualification tests")
+            execution_statements(step)
+                .iter()
+                .any(|statement| commands_equivalent(statement, qualification_command))
         })
         .collect();
     if qualification_steps.len() != 1
@@ -875,13 +879,17 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
             .contains_key("continue-on-error")
         || !qualification_steps[0].environment.is_empty()
         || !qualification_steps[0].inputs.is_empty()
-        || qualification_steps[0].run_lines != ["set -euo pipefail", qualification_command]
-        || all_statements
-            .iter()
-            .filter(|statement| selects_package(statement, "ferrum2-rule-qualification"))
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            != [qualification_command]
+        || !execution_sequence_matches(
+            qualification_steps[0],
+            &["set -euo pipefail", qualification_command],
+        )
+        || {
+            let commands: Vec<_> = all_statements
+                .iter()
+                .filter(|statement| selects_package(statement, "ferrum2-rule-qualification"))
+                .collect();
+            commands.len() != 1 || !commands_equivalent(commands[0], qualification_command)
+        }
     {
         return Err("Rule qualification tests must only compile in the ordinary gate".to_owned());
     }
@@ -891,7 +899,8 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
         .filter(|statement| command_words(statement).contains(&"--workspace"))
         .map(String::as_str)
         .collect();
-    if workspace_tests != [exact_workspace_test] {
+    if workspace_tests.len() != 1 || !commands_equivalent(workspace_tests[0], exact_workspace_test)
+    {
         return Err(format!(
             "workspace cargo-test exclusion surface drifted: {workspace_tests:?}"
         ));
@@ -900,9 +909,12 @@ pub(super) fn validate_hosted_library_execution(source: &str) -> Result<(), Stri
         .iter()
         .filter(|statement| {
             let words = command_words(statement);
-            statement.as_str() != exact_workspace_test
-                && (!words.contains(&"-p")
-                    || words.contains(&"--manifest-path")
+            !commands_equivalent(statement, exact_workspace_test)
+                && (!words.iter().any(|word| {
+                    matches!(*word, "-p" | "--package")
+                        || word.starts_with("--package=")
+                        || word.starts_with("-p=")
+                }) || words.iter().any(|word| word.starts_with("--manifest-path"))
                     || words.contains(&"--all"))
         })
         .collect();

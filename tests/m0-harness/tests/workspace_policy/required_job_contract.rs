@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::workflow_jobs;
+use super::{commands_equivalent, validate_read_only_permissions, workflow_jobs};
 
 fn controller_contract(
     expected_dependencies: &BTreeSet<String>,
-) -> Result<(&'static str, BTreeMap<String, String>, &'static str), String> {
+) -> Result<(BTreeMap<String, String>, &'static str), String> {
     let ordinary = BTreeSet::from([
         "changes".to_owned(),
         "quality".to_owned(),
@@ -19,7 +19,6 @@ fn controller_contract(
     ]);
     if expected_dependencies == &ordinary {
         Ok((
-            "Require every ordinary main gate",
             BTreeMap::from([
                 (
                     "CHANGE_RESULT".to_owned(),
@@ -46,7 +45,6 @@ fn controller_contract(
         ))
     } else if expected_dependencies == &fuzz {
         Ok((
-            "Require impact decision and applicable fuzz gates",
             BTreeMap::from([
                 (
                     "IMPACT_RESULT".to_owned(),
@@ -82,12 +80,21 @@ pub(crate) fn validate_required_job(
     source: &str,
     expected_dependencies: &BTreeSet<String>,
 ) -> Result<(), String> {
+    validate_read_only_permissions(source)?;
     let jobs = workflow_jobs(source)?;
     let required = jobs
         .get("required")
         .ok_or_else(|| "workflow required job is missing".to_owned())?;
-    if required.properties.get("if").map(String::as_str) != Some("${{ always() }}") {
-        return Err("required job must use the exact always condition".to_owned());
+    if !required.properties.get("if").is_some_and(|condition| {
+        let condition = condition.trim();
+        condition
+            .strip_prefix("${{")
+            .and_then(|inner| inner.strip_suffix("}}"))
+            .unwrap_or(condition)
+            .trim()
+            == "always()"
+    }) {
+        return Err("required job must run unconditionally with always()".to_owned());
     }
     if required.properties.contains_key("continue-on-error") {
         return Err("required job must not suppress failures".to_owned());
@@ -116,9 +123,8 @@ pub(crate) fn validate_required_job(
     }
 
     let checkout = &required.steps[0];
-    if checkout.properties.get("name").map(String::as_str) != Some("Checkout exact current SHA")
-        || checkout.properties.get("uses").map(String::as_str)
-            != Some("actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd")
+    if checkout.properties.get("uses").map(String::as_str)
+        != Some("actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd")
         || checkout.properties.contains_key("if")
         || checkout.properties.contains_key("continue-on-error")
         || checkout.inputs
@@ -133,16 +139,14 @@ pub(crate) fn validate_required_job(
         return Err("required job checkout step drifted".to_owned());
     }
 
-    let (expected_name, expected_environment, expected_command) =
-        controller_contract(expected_dependencies)?;
+    let (expected_environment, expected_command) = controller_contract(expected_dependencies)?;
     let controller = &required.steps[1];
-    if controller.properties.get("name").map(String::as_str) != Some(expected_name)
-        || controller.properties.get("shell").map(String::as_str) != Some("bash")
+    if controller.properties.get("shell").map(String::as_str) != Some("bash")
         || controller.properties.contains_key("if")
         || controller.properties.contains_key("continue-on-error")
         || controller.environment != expected_environment
         || !controller.inputs.is_empty()
-        || controller.run_lines != [expected_command]
+        || !commands_equivalent(&controller.run_lines.join("\n"), expected_command)
     {
         return Err(
             "required job must invoke the exact typed controller with the closed dependency inputs"
@@ -150,4 +154,57 @@ pub(crate) fn validate_required_job(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controller_role_allows_presentation_changes_but_preserves_failure_inputs() {
+        let source =
+            std::fs::read_to_string(crate::workspace_root().join(".github/workflows/m0.yml"))
+                .expect("ordinary workflow");
+        let dependencies = ["changes", "quality", "platform", "interop"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect();
+        let (_, command) = controller_contract(&dependencies).expect("ordinary controller");
+        let reordered = "python3 -B -m tools.ci.required_gate --dependency \"interop=$INTEROP_RESULT\" --decision \"$RUN_EXPENSIVE\" --dependency \"platform=$PLATFORM_RESULT\" --mode=ordinary --dependency \"changes=$CHANGE_RESULT\" --dependency \"quality=$QUALITY_RESULT\"";
+        assert!(source.contains(command));
+        let renamed = source
+            .replace("Checkout exact current SHA", "Checkout reviewed revision")
+            .replace(
+                "Require every ordinary main gate",
+                "Evaluate dependency outcomes",
+            )
+            .replace("${{ always() }}", "${{always()}}")
+            .replace(command, reordered);
+        validate_required_job(&renamed, &dependencies).expect("equivalent controller");
+        for replacement in [
+            reordered.replace("interop=$INTEROP_RESULT", "interop=success"),
+            reordered.replace("tools.ci.required_gate", "tools.ci.other_gate"),
+            reordered.replace("\"$RUN_EXPENSIVE\"", "'$RUN_EXPENSIVE'"),
+            format!("{reordered} || true"),
+        ] {
+            assert!(
+                validate_required_job(&renamed.replace(reordered, &replacement), &dependencies)
+                    .is_err()
+            );
+        }
+        assert!(
+            validate_required_job(
+                &renamed.replace("${{always()}}", "${{ success() }}"),
+                &dependencies,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_required_job(
+                &renamed.replace("contents: read", "contents: write"),
+                &dependencies,
+            )
+            .is_err()
+        );
+    }
 }

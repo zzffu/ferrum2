@@ -1,11 +1,16 @@
-use proc_macro2::{TokenStream, TokenTree};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{metadata, workspace_root};
+
+#[path = "source_boundaries.rs"]
+mod source_boundaries;
+use source_boundaries::{
+    validate_fixture_bytes, validate_fixture_ownership, validate_fixture_references,
+    validate_unsafe_sources,
+};
 
 fn policy() -> toml::Value {
     toml::from_str(include_str!("architecture.toml")).expect("structured architecture policy")
@@ -45,6 +50,21 @@ fn validate_member_set(
     } else {
         Err(format!(
             "workspace member drift: actual={actual:?} expected={expected:?}"
+        ))
+    }
+}
+
+fn validate_dependency_allowlist(
+    package: &str,
+    actual: &BTreeSet<String>,
+    allowed: &BTreeSet<String>,
+) -> Result<(), String> {
+    let undeclared: Vec<_> = actual.difference(allowed).collect();
+    if undeclared.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{package} has undeclared internal dependency edges: {undeclared:?}"
         ))
     }
 }
@@ -115,14 +135,6 @@ fn validate_forbidden_path(
     }
 }
 
-fn has_unsafe_token(tokens: TokenStream) -> bool {
-    tokens.into_iter().any(|token| match token {
-        TokenTree::Ident(identifier) => identifier == "unsafe",
-        TokenTree::Group(group) => has_unsafe_token(group.stream()),
-        _ => false,
-    })
-}
-
 fn rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).expect("Rust source directory") {
         let entry = entry.expect("Rust source entry");
@@ -164,85 +176,6 @@ fn managed_rust_sources(root: &Path, source_roots: &BTreeSet<String>) -> BTreeMa
             (relative, source)
         })
         .collect()
-}
-
-fn validate_fixture_consumer_policy(
-    sources: &BTreeMap<String, String>,
-    declared: &BTreeSet<String>,
-    canonical_path: &str,
-    forbidden_paths: &BTreeSet<String>,
-) -> Result<(), String> {
-    let forbidden_consumers: BTreeSet<_> = sources
-        .iter()
-        .filter(|(_, source)| {
-            forbidden_paths
-                .iter()
-                .any(|forbidden| source.contains(forbidden))
-        })
-        .map(|(path, _)| path.clone())
-        .collect();
-    if !forbidden_consumers.is_empty() {
-        return Err(format!(
-            "shared DNS TLS consumers retain forbidden fixture paths: {forbidden_consumers:?}"
-        ));
-    }
-
-    let actual: BTreeSet<_> = sources
-        .iter()
-        .filter(|(_, source)| source.contains(canonical_path))
-        .map(|(path, _)| path.clone())
-        .collect();
-    if actual == *declared {
-        return Ok(());
-    }
-    let undeclared: BTreeSet<_> = actual.difference(declared).cloned().collect();
-    let stale: BTreeSet<_> = declared.difference(&actual).cloned().collect();
-    Err(format!(
-        "shared DNS TLS consumer drift: undeclared={undeclared:?} stale={stale:?}"
-    ))
-}
-
-fn count_unsafe_allowances(source: &str) -> usize {
-    let compact: String = source
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect();
-    compact.match_indices("#[allow(unsafe_code)]").count()
-        + compact.match_indices("#![allow(unsafe_code)]").count()
-}
-
-fn validate_unsafe_sources(
-    sources: &[(PathBuf, String)],
-    legacy: Option<&Path>,
-    allowed_paths: &[PathBuf],
-    expected_allowances: usize,
-) -> Result<(), String> {
-    let allowance_count: usize = sources
-        .iter()
-        .map(|(_, source)| count_unsafe_allowances(source))
-        .sum();
-    if allowance_count != expected_allowances {
-        return Err(format!(
-            "unsafe allowance count {allowance_count}, expected {expected_allowances}"
-        ));
-    }
-    for (path, source) in sources {
-        let tokens = source
-            .parse::<TokenStream>()
-            .map_err(|error| format!("invalid Rust source {}: {error}", path.display()))?;
-        if has_unsafe_token(tokens)
-            && !legacy.is_some_and(|legacy| path == legacy)
-            && !allowed_paths
-                .iter()
-                .any(|allowed| path == allowed || path.starts_with(allowed))
-        {
-            return Err(format!(
-                "unsafe token escaped declared boundary: {}",
-                path.display()
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn local_crypto_package(lock: &toml::Value) -> Result<&toml::Value, String> {
@@ -302,7 +235,7 @@ use workflow_contract::{
     validate_lifecycle_triggers, validate_read_only_permissions, validate_required_job,
 };
 #[test]
-fn shared_dns_tls_fixtures_match_provenance_and_consumers() {
+fn shared_dns_tls_fixtures_match_provenance_and_ownership() {
     let root = workspace_root();
     let policy = policy();
     let contract = &policy["shared_dns_tls"];
@@ -311,20 +244,18 @@ fn shared_dns_tls_fixtures_match_provenance_and_consumers() {
         fs::read_to_string(root.join(contract["readme"].as_str().expect("fixture provenance")))
             .expect("shared DNS TLS provenance");
 
+    let mut fixtures = Vec::new();
     for fixture in contract["files"]
         .as_array()
         .expect("shared DNS TLS fixture rows")
     {
         let name = fixture["name"].as_str().expect("fixture name");
         let bytes = fs::read(fixture_root.join(name)).expect("shared DNS TLS fixture");
-        assert_eq!(
-            bytes.len(),
-            fixture["bytes"].as_integer().expect("fixture byte length") as usize,
-            "{name} byte length drift"
-        );
-        let digest = hex::encode(Sha256::digest(&bytes));
+        let size = fixture["bytes"].as_integer().expect("fixture byte length") as usize;
         let expected = fixture["sha256"].as_str().expect("fixture SHA-256");
-        assert_eq!(digest, expected, "{name} digest drift");
+        validate_fixture_bytes(&bytes, size, expected)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        fixtures.push((name.to_owned(), size, expected.to_owned()));
         assert!(
             readme.contains(name) && readme.contains(expected),
             "{name} is absent from shared fixture provenance"
@@ -334,13 +265,12 @@ fn shared_dns_tls_fixtures_match_provenance_and_consumers() {
     let source_roots = strings(&contract["consumer_source_roots"]);
     let sources = managed_rust_sources(&root, &source_roots);
     let forbidden_paths = strings(&contract["forbidden_consumer_paths"]);
-    validate_fixture_consumer_policy(
-        &sources,
-        &strings(&contract["consumers"]),
-        contract["root"].as_str().expect("canonical fixture path"),
-        &forbidden_paths,
-    )
-    .expect("shared DNS TLS consumer allowlist");
+    validate_fixture_references(&sources, &forbidden_paths)
+        .expect("shared DNS TLS fixture references");
+    for source_root in &source_roots {
+        validate_fixture_ownership(&root.join(source_root), &fixture_root, &fixtures)
+            .expect("canonical shared DNS TLS fixture ownership");
+    }
     for forbidden_path in forbidden_paths {
         assert!(
             !root.join(&forbidden_path).exists(),
@@ -400,7 +330,8 @@ fn declarative_architecture_policy_matches_the_workspace() {
         let package = boundary["package"].as_str().expect("allowlist package");
         let allowed = strings(&boundary["allowed"]);
         let actual = adjacency.get(package).cloned().unwrap_or_default();
-        assert_eq!(actual, allowed, "{package} internal dependency drift");
+        validate_dependency_allowlist(package, &actual, &allowed)
+            .expect("internal dependency allowlist");
     }
 
     let declared_runtime_targets: BTreeSet<_> = policy["direct_forbidden_edges"]
@@ -452,9 +383,6 @@ fn unsafe_boundary_honors_the_declared_reviewed_paths() {
             .expect("legacy phase flag")
             .then_some(legacy.as_path()),
         &allowed_paths,
-        boundary["allow_declarations"]
-            .as_integer()
-            .expect("allow declaration count") as usize,
     )
     .expect("unsafe boundary");
 }
@@ -645,28 +573,6 @@ fn policy_mutations_fail_closed() {
     ]);
     assert!(validate_forbidden_path(&graph, "ferrum2-server", "ferrum2-tun").is_err());
 
-    let legacy = PathBuf::from("legacy.rs");
-    let ffi = PathBuf::from("ffi");
-    let second_allowance = vec![
-        (
-            legacy.clone(),
-            "#[allow(unsafe_code)] fn first() { unsafe {} }".to_owned(),
-        ),
-        (
-            ffi.join("raw.rs"),
-            "#[allow(unsafe_code)] fn second() { unsafe {} }".to_owned(),
-        ),
-    ];
-    assert!(
-        validate_unsafe_sources(
-            &second_allowance,
-            Some(&legacy),
-            std::slice::from_ref(&ffi),
-            1
-        )
-        .is_err()
-    );
-
     let vendor_source =
         fs::read_to_string(workspace_root().join("vendor/shadowsocks-crypto/Cargo.toml"))
             .expect("vendor manifest");
@@ -680,57 +586,12 @@ fn policy_mutations_fail_closed() {
 }
 
 #[test]
-fn fixture_consumer_policy_rejects_undeclared_and_stale_consumers() {
-    let canonical = format!("{}/{}", "tests/fixtures", "dns-tls");
-    let sources = BTreeMap::from([
-        (
-            "crates/declared.rs".to_owned(),
-            format!("include_bytes!(\"../../../{canonical}/root.der\");"),
-        ),
-        (
-            "crates/undeclared.rs".to_owned(),
-            format!("include_bytes!(\"../../../{canonical}/leaf.der\");"),
-        ),
-    ]);
-    let forbidden = BTreeSet::new();
-
-    let missing_declaration = validate_fixture_consumer_policy(
-        &sources,
-        &BTreeSet::from(["crates/declared.rs".to_owned()]),
-        &canonical,
-        &forbidden,
-    )
-    .expect_err("undeclared fixture consumer must fail closed");
-    assert!(missing_declaration.contains("crates/undeclared.rs"));
-
-    let stale_declaration = validate_fixture_consumer_policy(
-        &sources,
-        &BTreeSet::from([
-            "crates/declared.rs".to_owned(),
-            "crates/undeclared.rs".to_owned(),
-            "crates/stale.rs".to_owned(),
-        ]),
-        &canonical,
-        &forbidden,
-    )
-    .expect_err("stale fixture consumer must fail closed");
-    assert!(stale_declaration.contains("crates/stale.rs"));
-}
-
-#[test]
-fn fixture_consumer_policy_rejects_forbidden_private_fixture_paths() {
-    let canonical = format!("{}/{}", "tests/fixtures", "dns-tls");
-    let forbidden = format!("{}/{}", "crates/ferrum2-dns/tests", "fixtures");
-    let sources = BTreeMap::from([(
-        "crates/legacy.rs".to_owned(),
-        format!("include_bytes!(\"../../../{forbidden}/root.der\");"),
-    )]);
-    let error = validate_fixture_consumer_policy(
-        &sources,
-        &BTreeSet::new(),
-        &canonical,
-        &BTreeSet::from([forbidden]),
-    )
-    .expect_err("private fixture path must fail closed");
-    assert!(error.contains("crates/legacy.rs"));
+fn dependency_allowlists_accept_removal_but_reject_undeclared_edges() {
+    let allowed = BTreeSet::from(["ferrum2-core".to_owned(), "ferrum2-net".to_owned()]);
+    let reduced = BTreeSet::from(["ferrum2-core".to_owned()]);
+    assert!(validate_dependency_allowlist("ferrum2-runtime", &reduced, &allowed).is_ok());
+    let extended = BTreeSet::from(["ferrum2-core".to_owned(), "ferrum2-dns".to_owned()]);
+    let error = validate_dependency_allowlist("ferrum2-runtime", &extended, &allowed)
+        .expect_err("new undeclared dependency must fail");
+    assert!(error.contains("ferrum2-runtime") && error.contains("ferrum2-dns"));
 }

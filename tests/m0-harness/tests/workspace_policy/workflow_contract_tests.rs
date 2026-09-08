@@ -202,6 +202,56 @@ fn hosted_execution_mutations_fail_closed() {
 }
 
 #[test]
+fn hosted_execution_accepts_equivalent_commands_and_display_names() {
+    let main = fs::read_to_string(workspace_root().join(".github/workflows/m0.yml"))
+        .expect("main workflow source");
+    let renamed = main
+        .replace(
+            "Run portable TUN and Windows platform unit tests",
+            "Portable library execution",
+        )
+        .replace(
+            "Run hosted-safe Windows TUN unit tests",
+            "Windows TUN execution",
+        )
+        .replace(
+            "Run hosted-safe Windows platform unit tests",
+            "Windows platform execution",
+        )
+        .replace(
+            "Prove hosted-safe Windows test imports",
+            "Inspect executable imports",
+        )
+        .replace(
+            "Compile Rule qualification tests",
+            "Compile qualification workload",
+        );
+    validate_hosted_library_execution(&renamed).expect("display names do not own execution");
+
+    let reordered = renamed
+        .replace(
+            "--lib --no-default-features --features fuzzing --locked",
+            "--locked --features=fuzzing --no-default-features --lib",
+        )
+        .replace("-p ferrum2-tun", "--package=ferrum2-tun")
+        .replace("-p ferrum2-platform-windows", "--package ferrum2-platform-windows")
+        .replace(
+            "cargo test -p ferrum2-rule-qualification --no-run --locked",
+            "cargo test --locked --no-run --package=ferrum2-rule-qualification",
+        )
+        .replace(
+            "--exclude ferrum2-client --exclude ferrum2-tun --exclude ferrum2-platform-windows --exclude ferrum2-rule-qualification",
+            "--exclude=ferrum2-rule-qualification --exclude=ferrum2-platform-windows --exclude=ferrum2-tun --exclude=ferrum2-client",
+        )
+        .replace(
+            "          cargo test --package=ferrum2-tun",
+            "          # This remains an unconditional execution step.\n          cargo test \\\n            --package=ferrum2-tun",
+        );
+    validate_hosted_library_execution(&reordered)
+        .expect("paired flags and continuations preserve execution");
+}
+
+#[test]
 fn qualification_workloads_cannot_enter_ordinary_test_execution() {
     let main = fs::read_to_string(workspace_root().join(".github/workflows/m0.yml"))
         .expect("main workflow source");

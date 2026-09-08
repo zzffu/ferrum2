@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::{WorkflowStep, command_words, continuation_statements};
+use super::{WorkflowStep, command_words, commands_equivalent, continuation_statements};
 
 fn has_comparison(step: &WorkflowStep, left: &str, operator: &str, right: &str) -> bool {
     step.run_lines.iter().any(|line| {
@@ -74,34 +74,15 @@ fn powershell_array(step: &WorkflowStep, variable: &str) -> Result<Vec<String>, 
 
 fn resolves_exact_hosted_test(step: &WorkflowStep) -> bool {
     continuation_statements(step, '`').iter().any(|statement| {
-        let words = command_words(statement);
-        let actual: Vec<_> = words
-            .iter()
-            .map(|word| word.trim_matches(|character| matches!(character, '"' | '\'')))
-            .collect();
-        actual
-            == [
-                "$events",
-                "=",
-                "&",
-                "cargo",
-                "+1.97.1",
-                "test",
-                "-p",
-                "$Package",
-                "--lib",
-                "--no-default-features",
-                "--features",
-                "fuzzing",
-                "--locked",
-                "--no-run",
-                "--message-format=json",
-                "--target",
-                "${{",
-                "matrix.target",
-                "}}",
-                "2>&1",
-            ]
+        statement
+            .strip_prefix("$events = & ")
+            .and_then(|command| command.strip_suffix(" 2>&1"))
+            .is_some_and(|command| {
+                commands_equivalent(
+                    command,
+                    "cargo +1.97.1 test -p $Package --lib --no-default-features --features fuzzing --locked --no-run --message-format=json --target ${{ matrix.target }}",
+                )
+            })
     })
 }
 
@@ -120,9 +101,17 @@ pub(super) fn validate_hosted_pe_imports(step: &WorkflowStep) -> Result<(), Stri
         ("ferrum2-platform-windows", "ferrum2_platform_windows"),
     ] {
         let call = format!(
-            "Path = Resolve-HostedTestExecutable -Package '{package}' -TargetName '{target_name}'"
+            "Resolve-HostedTestExecutable -Package '{package}' -TargetName '{target_name}'"
         );
-        if trimmed_line_count(step, &call) != 1 {
+        let matches = continuation_statements(step, '`')
+            .iter()
+            .filter(|statement| {
+                statement
+                    .strip_prefix("Path = ")
+                    .is_some_and(|command| commands_equivalent(command, &call))
+            })
+            .count();
+        if matches != 1 {
             return Err(format!("hosted PE resolver call drifted for {package}"));
         }
     }
@@ -130,7 +119,7 @@ pub(super) fn validate_hosted_pe_imports(step: &WorkflowStep) -> Result<(), Stri
         .run_lines
         .iter()
         .filter(|line| {
-            line.contains("Resolve-HostedTestExecutable -Package")
+            line.contains("Resolve-HostedTestExecutable")
                 && !line.trim_start().starts_with("function ")
         })
         .count();
@@ -169,6 +158,46 @@ pub(super) fn validate_hosted_pe_imports(step: &WorkflowStep) -> Result<(), Stri
             return Err(format!(
                 "hosted PE import readback lost exact guard: {exact}"
             ));
+        }
+    }
+
+    // Exit status must be consumed before artifact parsing/import filtering.
+    // Keep this ordered PowerShell envelope narrow rather than accepting
+    // arbitrary expressions that merely mention the expected status variable.
+    let statements: Vec<_> = continuation_statements(step, '`')
+        .into_iter()
+        .filter(|statement| !statement.is_empty() && !statement.starts_with('#'))
+        .collect();
+    for (invocation, guard) in [
+        (
+            "$events = & ",
+            &[
+                "$status = $LASTEXITCODE",
+                "if ($status -ne 0) {",
+                "$events | ForEach-Object { Write-Output ([string] $_) }",
+            ][..],
+        ),
+        (
+            "$imports = & $dumpbin /imports ",
+            &["if ($LASTEXITCODE -ne 0 -or $imports -notmatch 'Dump of file') {"][..],
+        ),
+    ] {
+        let Some(index) = statements
+            .iter()
+            .position(|line| line.starts_with(invocation))
+        else {
+            return Err("hosted PE invocation is missing".to_owned());
+        };
+        if !statements[index + 1..]
+            .iter()
+            .map(String::as_str)
+            .take(guard.len())
+            .eq(guard.iter().copied())
+            || !statements
+                .get(index + 1 + guard.len())
+                .is_some_and(|line| line.starts_with("throw "))
+        {
+            return Err("hosted PE command failure is not immediately propagated".to_owned());
         }
     }
 
@@ -258,4 +287,60 @@ pub(super) fn validate_hosted_pe_imports(step: &WorkflowStep) -> Result<(), Stri
         return Err(format!("hosted PE import denylist drifted: {actual:?}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosted_resolver_accepts_argument_order_but_preserves_identity_and_failures() {
+        let source =
+            std::fs::read_to_string(crate::workspace_root().join(".github/workflows/m0.yml"))
+                .expect("ordinary workflow");
+        let jobs = super::super::workflow_jobs(&source).expect("workflow jobs");
+        let mut step = jobs
+            .into_values()
+            .flat_map(|job| job.steps)
+            .find(|step| {
+                step.run_lines
+                    .iter()
+                    .any(|line| line.contains("function Resolve-HostedTestExecutable"))
+            })
+            .expect("hosted resolver role");
+        step.properties.insert(
+            "name".to_owned(),
+            "Inspect safe executable imports".to_owned(),
+        );
+        for line in &mut step.run_lines {
+            *line = line
+                .replace(
+                    "-Package 'ferrum2-tun' -TargetName 'ferrum2_tun'",
+                    "-TargetName 'ferrum2_tun' -Package 'ferrum2-tun'",
+                )
+                .replace("--features fuzzing --locked", "--locked --features=fuzzing");
+        }
+        validate_hosted_pe_imports(&step).expect("equivalent resolver");
+        for (from, to) in [
+            ("--features=fuzzing", "--features=system"),
+            ("-TargetName 'ferrum2_tun'", "-TargetName 'ferrum2_client'"),
+            ("if ($status -ne 0)", "if ($status -eq 0)"),
+            (
+                "if ($LASTEXITCODE -ne 0 -or $imports",
+                "if ($LASTEXITCODE -eq 0 -or $imports",
+            ),
+        ] {
+            let mut mutated = WorkflowStep {
+                properties: step.properties.clone(),
+                environment: step.environment.clone(),
+                inputs: step.inputs.clone(),
+                run_lines: step.run_lines.clone(),
+            };
+            assert!(mutated.run_lines.iter().any(|line| line.contains(from)));
+            for line in &mut mutated.run_lines {
+                *line = line.replace(from, to);
+            }
+            assert!(validate_hosted_pe_imports(&mutated).is_err());
+        }
+    }
 }

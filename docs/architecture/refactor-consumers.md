@@ -4,6 +4,23 @@ Use this ledger before renaming a crate, package, target, test, controller or st
 listed consumers are updated atomically; a repository-wide search and the listed readbacks must be
 clean before merge.
 
+Architecture policy constrains ownership and execution rather than incidental source layout:
+
+- Internal dependency allowlists are upper bounds: removing an edge is permitted; adding an
+  undeclared edge or violating a direct/transitive prohibition is not.
+- Shared TLS consumers may move, split or add helpers without registering source filenames.
+  Canonical ownership, provenance, byte lengths/SHA-256, forbidden legacy directories and private
+  copies remain checked. Rust path operations are token-inspected; comments and arbitrary string
+  mentions are not consumer registrations.
+- Unsafe tokens and weakening `allow`/`expect`/`warn(unsafe_code)` attributes, including multi-lint
+  and `cfg_attr` forms, must stay within reviewed files/subtrees. Allowance counts are not fixed.
+- Workflow display-step names and supported equivalent option ordering/spelling are not identities.
+  Package/feature/target selection, actual execution, dependency results, budgets and failure
+  propagation remain mandatory. Machine job IDs and required status contexts remain fixed.
+  Command comparison preserves option-value pairing and positional order; it is not a shell
+  interpreter. Reviewed PowerShell provenance and bounded Bash execution envelopes remain narrow
+  and reject unsupported control flow rather than accepting matching substrings.
+
 | Identity | Canonical producer | Known consumers | Required readback |
 |---|---|---|---|
 | `ferrum2-platform-windows` package/path | root workspace and crate manifest | root manifests/lock, bins/TUN manifests, fuzz manifest/lock, m0 workspace policy, all root workflows, host qualification runbook | no old Cargo identity; root metadata; both locks; Windows no-run |
@@ -14,7 +31,7 @@ clean before merge.
 | qualification evidence schema family | schema-v1 plan, build, runtime, worker, cleanup, and final documents | operator and final supervisor | candidate/source identities agree; all checks pass; final status is `QUALIFIED`; cleanup counts are zero; elapsed is below 900s |
 | Windows TUN performance source closure | `tools/powershell/Ferrum2.Performance/bundle.json`; `tools/windows-tun/performance/run_windows_tun_performance_host.ps1` | host performance recipe, runner, evidence, and static controller tests | exact closed host runner/module/C# set, including `HostProfiles.ps1` and shared `HostCleanup.ps1`, plus the independent exact M4 Rust workload closure; every path/byte/hash is bound; no qualification source |
 | `python -B -m tools.performance_candidate` | Python controller CLI | offline performance evidence validation and tests | The package entrypoint is unique; Windows plan/evidence schemas use host execution identity only and retain no guest compatibility reader |
-| shared `resolver.test` TLS fixture set | `tests/fixtures/dns-tls` README + architecture policy hashes | DNS interop root/runtime owner, RuleSet HTTPS contract, m0 external DNS qualification | exact byte length/SHA-256 and every canonical path pass `workspace_policy`; DNS interop and RuleSet HTTPS tests compile and run |
+| shared `resolver.test` TLS fixture set | `tests/fixtures/dns-tls` README + architecture policy hashes | DNS interop root/runtime owner, RuleSet HTTPS contract, m0 external DNS qualification; source-file inventory is not fixed | canonical ownership, byte length/SHA-256 and absence of private copies pass `workspace_policy`; DNS interop and RuleSet HTTPS tests compile and run |
 | M4 JSON/JSONL schemas | `ferrum2-m4-qualification`; current profile-trial schema v4 | performance controller, workflows, policy/tests | producer self-check, consumer tests, exact schema/version |
 | Linux candidate six-pair schemas | `python -B -m tools.performance_candidate`; plan v6, profile trial v4, summary v7, schedule `abba-six-pairs`, exactly 6 pairs | manual performance workflow, policy and owner-split tests | workflow input permits only 6; producer/consumer schema constants and all 12 parent/candidate trials agree |
 | Windows TUN host candidate schemas | host plan/runtime/summary v2, trial v4, build/cleanup v1, and recovery ledger v2; M4 workload v5; one explicit `ClientDirect` or `EndToEnd` topology; Quick uses exactly 3 interleaved pairs across 4 scenarios (24 trials), Confirm exactly 5 across 5 scenarios (50 trials); Lifecycle runs 20 start/probe/stop cycles | local host runner and static controller tests | runner bundle, baseline/candidate commits, topology, metric direction, checked work, actual elapsed/tail work, CPU/I/O/memory, route proofs, failure counters, and independent cleanup readbacks agree; recovery retains historical identities and the pre-start adapter GUID baseline; server measurements are null in ClientDirect; no aggregate score hides a scenario regression |
