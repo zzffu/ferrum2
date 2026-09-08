@@ -6,7 +6,9 @@ export function bytes(value: string | number | null | undefined) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "不可用";
   const unit =
-    n > 0 ? Math.min(4, Math.floor(Math.log(n) / Math.log(1024))) : 0;
+    n > 0
+      ? Math.max(0, Math.min(4, Math.floor(Math.log(n) / Math.log(1024))))
+      : 0;
   return `${(n / 1024 ** unit).toLocaleString("zh-CN", { maximumFractionDigits: 1 })} ${["B", "KiB", "MiB", "GiB", "TiB"][unit]}`;
 }
 export function duration(ms: number) {

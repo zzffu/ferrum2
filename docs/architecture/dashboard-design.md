@@ -124,6 +124,12 @@ Windows creates the temporary file with the protected original DACL atomically, 
 
 Apply validates before stopping the current generation. Materialization/listener failure after restart is reported as failed; do not promise seamless rollback across exclusive network resources. Disk revision and running revision remain distinct. A failure never displays as applied. CLI management listener/token settings require process restart; network configuration uses a controlled proxy-generation restart.
 
+After save/apply, the editor pairs the submitted source with the revision returned by that
+command. A later read may refresh running-revision information but never silently adopts a
+different disk revision for the old draft. External edits remain conflicts until explicitly
+reloaded. Clearing or unmounting the editor invalidates pending read/save continuations so
+sensitive source cannot reappear after it has been hidden.
+
 UI-only settings include theme, table density/columns and refresh interval. These are safe local browser preferences; credentials and sensitive query state are not persisted.
 
 ## Build and packaging
@@ -163,6 +169,23 @@ Format/lint/test affected packages once integration is settled. The client test 
 - Chromium exercised all seven pages, an actual DNS form submission, dark mode and a narrow viewport. Screenshots confirmed layout; no external script/style/font resources were requested and there was no horizontal page overflow.
 - Default HTTP port 80 was exercised in Chromium: canonical Host/Origin without `:80` reached authenticated snapshot and command handling; invalid source still returned `config.invalid` rather than an origin rejection.
 - Linux GNU cross-check was attempted but stopped in `ring` because `x86_64-linux-gnu-gcc` is missing. No Linux runtime result or privileged TUN qualification is claimed.
+
+### Review corrections and real HTTP verification
+
+- The post-save revision race was reproduced through Vite and the real Rust HTTP backend:
+  an external file edit between save and reread was overwritten by the next save before the
+  correction. The corrected editor retained the saved base revision, received HTTP 409 on
+  the next save, and preserved the external file.
+- A delayed real config response no longer restores a cleared editor. Fractional rates such
+  as 0.5 B/s retain the byte unit rather than selecting an undefined unit.
+- All seven pages were exercised through the documented Vite development entrypoint.
+  A real SOCKS TCP echo exposed 3,200 live bytes in each direction before closure;
+  an authenticated individual-close command then closed the actual application socket.
+- Actual HTTP checks returned 401 without authentication, 403 for a foreign Origin,
+  400 for invalid apply without changing disk/runtime, and 409 for an old-generation
+  command after a successful restart.
+- The rebuilt embedded HTML repeated revision-conflict and clear-invalidation checks on the
+  real Rust HTTP listener, with matching CSP hashes, `no-referrer` and `nosniff` headers.
 
 ## Running the dashboard
 

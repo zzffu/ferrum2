@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { loadConfig, preferences, useDashboard } from "./store";
 import type { LogView } from "./protocol";
 import {
@@ -162,47 +162,83 @@ export function SettingsPage() {
   const [source, setSource] = useState("");
   const [reading, setReading] = useState(false);
   const [readError, setReadError] = useState("");
+  const editorEpoch = useRef(0);
+  useEffect(
+    () => () => {
+      editorEpoch.current++;
+    },
+    [],
+  );
   const [confirm, setConfirm] = useState<{
     action: string;
     source: string;
     revision: string;
     generation: string;
   } | null>(null);
+  function clearEditor() {
+    editorEpoch.current++;
+    setEditor(null);
+    setSource("");
+    setReading(false);
+    setReadError("");
+    setConfirm(null);
+  }
   async function readSource() {
+    const epoch = ++editorEpoch.current;
     setReading(true);
     setReadError("");
     try {
       const value = await loadConfig();
+      if (epoch !== editorEpoch.current) return;
       setEditor(value);
       setSource(value.source);
     } catch (e) {
-      setReadError(e instanceof Error ? e.message : "读取失败");
+      if (epoch === editorEpoch.current)
+        setReadError(e instanceof Error ? e.message : "读取失败");
     } finally {
-      setReading(false);
+      if (epoch === editorEpoch.current) setReading(false);
     }
   }
   async function commit() {
     if (!confirm) return;
     const fixed = confirm;
+    const epoch = ++editorEpoch.current;
+    setReadError("");
     setConfirm(null);
     const result = await action.run(
       fixed.action,
       { source: fixed.source, revision: fixed.revision },
       fixed.generation,
     );
+    if (epoch !== editorEpoch.current) return;
     if (result !== undefined) {
-      // Re-read the disk revision after successful mutation. A failed apply is never labelled applied.
+      const { revision } = result as { revision: string };
+      // Keep the saved source and its authoritative revision paired, even if disk changes again.
+      setEditor((current) => ({
+        source: fixed.source,
+        revision,
+        running_revision: current?.running_revision ?? null,
+      }));
       setReading(true);
       try {
         const next = await loadConfig();
-        setEditor(next);
+        if (epoch !== editorEpoch.current) return;
+        setEditor({
+          source: fixed.source,
+          revision,
+          running_revision: next.running_revision,
+        });
+        if (next.revision !== revision)
+          setReadError(
+            "磁盘配置已被外部修改；当前草稿未更新，请重新读取后再保存。",
+          );
       } catch {
-        setReadError(
-          "操作已返回成功，但无法读取新修订；请重新加载配置后再保存。",
-        );
-        setEditor(null);
+        if (epoch === editorEpoch.current)
+          setReadError(
+            "保存已成功，但无法读取最新运行修订信息；请重新读取配置。",
+          );
       } finally {
-        setReading(false);
+        if (epoch === editorEpoch.current) setReading(false);
       }
     }
   }
@@ -277,16 +313,7 @@ export function SettingsPage() {
           >
             {reading ? "读取中…" : editor ? "重新读取磁盘配置" : "读取敏感配置"}
           </button>
-          {editor && (
-            <button
-              onClick={() => {
-                setEditor(null);
-                setSource("");
-              }}
-            >
-              清除编辑器内容
-            </button>
-          )}
+          {editor && <button onClick={clearEditor}>清除编辑器内容</button>}
         </div>
         {readError && (
           <p role="alert" className="notice danger">
