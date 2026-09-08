@@ -111,6 +111,10 @@ HTTP readiness probes from automatically consuming a future listener port. It do
 an inherited socket to the product, so an unrelated explicit bind during the final handoff is still
 possible and remains a failed trial. Early product exit is reported before further metrics polling.
 There is no hidden startup retry, changed timed load, or successful-result substitution.
+TCP reservations bind and listen; UDP reservations bind only. Setting `ExclusiveAddressUse` before
+a TCP `Bind` is insufficient on Unix .NET, whose bind implementation enables address reuse.
+The finite ownership/handoff tests therefore run on both Windows and Linux with PowerShell 7;
+a Linux run without `pwsh` skips that coverage and is not evidence of cross-platform exclusivity.
 
 The Windows performance PowerShell implementation is owned by
 `tools/powershell/Ferrum2.Performance`. Its only public composition root is

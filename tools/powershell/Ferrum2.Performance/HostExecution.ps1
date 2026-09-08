@@ -335,6 +335,8 @@ function New-Ferrum2PortReservation {
                 $sockets.Add($socket)
                 $socket.ExclusiveAddressUse = $true
                 $socket.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $port))
+                # Unix .NET TCP Bind enables address reuse; listening makes the reservation exclusive.
+                if ($protocol -ceq 'tcp') { $socket.Listen(1) }
             }
             return [pscustomobject]@{ port = $port; sockets = $sockets.ToArray() }
         } catch {
