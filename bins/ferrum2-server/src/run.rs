@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, OnceLock};
 
-use ferrum2_config::{DnsConfig, PreparedServerV2, ValidatedServerConfig};
+use ferrum2_config::{DnsConfig, PreparedServerV2, ServerInboundProtocol, ValidatedServerConfig};
 use ferrum2_crypto::{MethodSinglePskProvider, SystemClock, SystemRandom};
 use ferrum2_dns::TaggedResolver;
 use ferrum2_net::{DialOptions, RouteNetworkOptions};
@@ -305,16 +305,32 @@ where
             _ => return Err(RunError::StartupProtocol),
         };
         let dns_drain = dns.as_ref().map(|_| ServerDnsDrain::new());
-        let replay = Arc::new(
-            TcpReplayStore::new(config.replay.capacity).map_err(|_| RunError::StartupProtocol)?,
-        );
-        let keys = Arc::new(MethodKeyAdapter::new(MethodSinglePskProvider::new(
-            config.psk,
-        )));
-        let udp_protocol = if config.udp.enabled {
-            Some(Arc::new(
-                UdpServer::new(keys.as_ref()).map_err(|_| RunError::StartupProtocol)?,
+        let has_ss = config
+            .inbounds
+            .iter()
+            .any(|inbound| matches!(inbound.protocol, ServerInboundProtocol::Shadowsocks));
+        let has_f2p = config
+            .inbounds
+            .iter()
+            .any(|inbound| matches!(inbound.protocol, ServerInboundProtocol::F2p(_)));
+        let ss = if has_ss {
+            Some((
+                Arc::new(MethodKeyAdapter::new(MethodSinglePskProvider::new(
+                    config.psk.ok_or(RunError::StartupProtocol)?,
+                ))),
+                Arc::new(
+                    TcpReplayStore::new(config.replay.capacity)
+                        .map_err(|_| RunError::StartupProtocol)?,
+                ),
             ))
+        } else {
+            None
+        };
+        let udp_protocol = if config.udp.enabled {
+            ss.as_ref()
+                .map(|(keys, _)| UdpServer::new(keys.as_ref()).map(Arc::new))
+                .transpose()
+                .map_err(|_| RunError::StartupProtocol)?
         } else {
             None
         };
@@ -323,6 +339,12 @@ where
         let shutdown_grace = config.runtime.shutdown_grace;
         let connect_timeout = config.runtime.connect_timeout;
         let udp_config = config.udp;
+        let udp_limits = udp_runtime_limits(&udp_config).ok_or(RunError::StartupProtocol)?;
+        let udp_sessions = UdpSessionManager::new(udp_limits, registry.clone());
+        let f2p_udp = Arc::new(tcp::UdpBudget::new(
+            config.udp.enabled && has_f2p,
+            udp_sessions.clone(),
+        ));
         let clock = Arc::new(SystemClock::new());
         let routing = Arc::new(ServerRouting {
             program: config.route,
@@ -400,13 +422,30 @@ where
         for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
             let listen = inbound.listen;
             tcp_listens.push(listen);
+            let protocol = match &inbound.protocol {
+                ServerInboundProtocol::Shadowsocks => {
+                    let (keys, replay) = ss.as_ref().ok_or(RunError::StartupProtocol)?;
+                    tcp::ServerProtocol::Shadowsocks {
+                        keys: Arc::clone(keys),
+                        replay: Arc::clone(replay),
+                    }
+                }
+                ServerInboundProtocol::F2p(config) => tcp::ServerProtocol::F2p(
+                    ferrum2_f2p::ServerConfig::load(
+                        &config.token_file,
+                        &config.certificate_file,
+                        &config.private_key_file,
+                    )
+                    .map_err(|_| RunError::StartupProtocol)?,
+                ),
+            };
             let context = Arc::new(ServerContext {
                 inbound: inbound_id,
                 routing: Arc::clone(&routing),
-                keys: Arc::clone(&keys),
+                protocol,
+                f2p_udp: Arc::clone(&f2p_udp),
                 clock: Arc::clone(&clock),
                 random: SystemRandom,
-                replay: Arc::clone(&replay),
                 runtime: config.runtime,
                 direct_resolvers: Arc::clone(&direct_resolvers),
                 outbound_dial_options: Arc::clone(&outbound_dial_options),
@@ -422,8 +461,7 @@ where
         // successful external TCP-connect readiness probe also orders after all
         // required UDP binds.
         if let Some(protocol) = udp_protocol {
-            let limits = udp_runtime_limits(&udp_config).ok_or(RunError::StartupProtocol)?;
-            let sessions = UdpSessionManager::new(limits, registry.clone());
+            let sessions = udp_sessions.clone();
             let mappings = Arc::new(UdpMappings::new(udp_config.max_sessions));
             let admission = Arc::new(tokio::sync::Mutex::new(()));
             #[cfg(all(windows, not(test)))]
@@ -452,6 +490,9 @@ where
                 metrics: Arc::clone(&metrics),
             };
             for (inbound_id, inbound) in config.inbounds.iter().enumerate() {
+                if !matches!(inbound.protocol, ServerInboundProtocol::Shadowsocks) {
+                    continue;
+                }
                 let listen = inbound.listen;
                 let shared = shared.clone();
                 let udp_dns_lease = dns_drain.as_ref().map(ServerDnsDrain::lease);

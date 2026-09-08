@@ -267,6 +267,17 @@ pub(super) fn validate_client_graph(
             outbound.raw.inet4_bind_address.as_deref(),
             outbound.raw.inet6_bind_address.as_deref(),
         )?;
+        if outbound.outbound_type.as_deref() != Some("f2p") {
+            if outbound.profile.is_some() {
+                return Err(ConfigError::semantic(ConfigField::OutboundsProfile));
+            }
+            if outbound.auth.is_some() {
+                return Err(ConfigError::semantic(ConfigField::OutboundsAuth));
+            }
+            if outbound.tls.is_some() {
+                return Err(ConfigError::semantic(ConfigField::OutboundsTls));
+            }
+        }
         match outbound
             .raw
             .outbound_type
@@ -320,6 +331,60 @@ pub(super) fn validate_client_graph(
                     psk,
                     dial_options,
                 });
+            }
+            "f2p" => {
+                if outbound.method.is_some() {
+                    return Err(ConfigError::semantic(ConfigField::OutboundsMethod));
+                }
+                if outbound.psk.is_some() {
+                    return Err(ConfigError::semantic(ConfigField::OutboundsPsk));
+                }
+                let profile = match outbound.profile.as_deref().unwrap_or("balanced") {
+                    "balanced" => ferrum2_f2p::Profile::Balanced,
+                    "realtime" => ferrum2_f2p::Profile::Realtime,
+                    _ => return Err(ConfigError::semantic(ConfigField::OutboundsProfile)),
+                };
+                let auth = outbound
+                    .auth
+                    .as_ref()
+                    .filter(|auth| !auth.token_file.as_os_str().is_empty())
+                    .ok_or_else(|| ConfigError::semantic(ConfigField::OutboundsAuth))?;
+                let tls = outbound
+                    .tls
+                    .as_ref()
+                    .filter(|tls| {
+                        super::common::valid_tls_name(&tls.server_name)
+                            || tls.server_name.parse::<std::net::IpAddr>().is_ok()
+                    })
+                    .filter(|tls| {
+                        tls.ca_file
+                            .as_ref()
+                            .is_none_or(|path| !path.as_os_str().is_empty())
+                    })
+                    .ok_or_else(|| ConfigError::semantic(ConfigField::OutboundsTls))?;
+                let server = parse_socket(
+                    outbound
+                        .server
+                        .as_deref()
+                        .ok_or_else(|| ConfigError::semantic(ConfigField::OutboundsServer))?,
+                    ConfigField::OutboundsServer,
+                )?;
+                if listens
+                    .iter()
+                    .any(|listen| sockets_alias(SocketAddr::V4(*listen), server))
+                {
+                    return Err(ConfigError::semantic(ConfigField::OutboundsServer));
+                }
+                validated_outbounds.push(ClientOutboundConfig::F2p(
+                    crate::model::F2pClientConfig {
+                        server,
+                        profile,
+                        token_file: auth.token_file.clone(),
+                        server_name: tls.server_name.clone().into_boxed_str(),
+                        ca_file: tls.ca_file.clone(),
+                        dial_options,
+                    },
+                ));
             }
             _ => return Err(ConfigError::semantic(ConfigField::OutboundsType)),
         }

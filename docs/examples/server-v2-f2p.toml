@@ -1,0 +1,25 @@
+schema_version = 2
+
+[[inbounds]]
+tag = "f2p-in"
+type = "f2p"
+# Loopback-only example. Change deliberately for remote client access.
+listen = "127.0.0.1:8443"
+outbound = "direct"
+
+[inbounds.auth]
+token_file = "secrets/f2p.token"
+
+[inbounds.tls]
+# PEM leaf certificate followed by any intermediate certificates, and its key.
+certificate_file = "certs/fullchain.pem"
+private_key_file = "certs/private-key.pem"
+
+[[outbounds]]
+tag = "direct"
+
+[udp]
+enabled = true
+max_sessions = 4096
+max_buffered_bytes = 16777216
+idle_timeout_ms = 300000

@@ -457,6 +457,7 @@ dependencies = [
  "ferrum2-core",
  "ferrum2-crypto",
  "ferrum2-dns",
+ "ferrum2-f2p",
  "ferrum2-net",
  "ferrum2-observability",
  "ferrum2-platform-windows",
@@ -480,6 +481,7 @@ dependencies = [
  "base64",
  "ferrum2-core",
  "ferrum2-crypto",
+ "ferrum2-f2p",
  "ferrum2-rule",
  "ipnet",
  "serde",
@@ -531,10 +533,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrum2-f2p"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "constant_time_eq",
+ "ferrum2-core",
+ "rustls",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots",
+ "zeroize",
+]
+
+[[package]]
 name = "ferrum2-m0-harness"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "base64",
  "blake3",
  "hex",
  "hickory-proto",
@@ -669,6 +687,7 @@ dependencies = [
  "ferrum2-core",
  "ferrum2-crypto",
  "ferrum2-dns",
+ "ferrum2-f2p",
  "ferrum2-net",
  "ferrum2-observability",
  "ferrum2-platform-windows",

@@ -16,6 +16,7 @@ ferrum2-config.workspace = true
 ferrum2-core.workspace = true
 ferrum2-crypto.workspace = true
 ferrum2-dns.workspace = true
+ferrum2-f2p.workspace = true
 ferrum2-net.workspace = true
 ferrum2-observability.workspace = true
 ferrum2-runtime.workspace = true

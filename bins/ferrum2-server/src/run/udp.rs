@@ -3,9 +3,9 @@ mod commit;
 mod completion;
 mod identity;
 mod listener;
-mod physical;
+pub(in crate::run) mod physical;
 mod response_codec;
-mod route;
+pub(in crate::run) mod route;
 mod run_loop;
 #[cfg(test)]
 mod tests;

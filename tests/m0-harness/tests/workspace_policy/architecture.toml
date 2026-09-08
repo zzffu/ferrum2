@@ -7,6 +7,7 @@ workspace_members = [
     "ferrum2-core",
     "ferrum2-crypto",
     "ferrum2-dns",
+    "ferrum2-f2p",
     "ferrum2-m0-harness",
     "ferrum2-m4-qualification",
     "ferrum2-net",
@@ -38,6 +39,10 @@ allowed = ["ferrum2-core", "ferrum2-dns", "ferrum2-rule"]
 package = "ferrum2-observability"
 allowed = []
 
+[[internal_dependency_allowlists]]
+package = "ferrum2-f2p"
+allowed = ["ferrum2-core"]
+
 [unsafe_boundary]
 allow_declarations = 2
 legacy_file = "crates/ferrum2-platform-windows/src/windows.rs"
@@ -55,8 +60,10 @@ forbidden_consumer_paths = ["crates/ferrum2-dns/tests/fixtures"]
 consumers = [
     "crates/ferrum2-dns/src/resolver.rs",
     "crates/ferrum2-dns/src/runtime_owner/tests.rs",
+    "crates/ferrum2-f2p/src/tests.rs",
     "crates/ferrum2-ruleset/tests/ruleset_https.rs",
     "tests/m0-harness/src/external_support/dns_case.rs",
+    "tests/m0-harness/tests/f2p_local_e2e.rs",
 ]
 
 [[shared_dns_tls.files]]

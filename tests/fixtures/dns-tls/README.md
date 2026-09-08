@@ -1,9 +1,11 @@
-# Shared encrypted-DNS and RuleSet HTTPS test fixtures
+# Shared TLS test fixtures
 
 These files are shared by `ferrum2-dns` encrypted-transport tests, `ferrum2-ruleset` HTTPS
-transport tests, and the m0 harness's external DNS qualification. The DNS crate's private
-`__interop-test-root` feature also embeds the CA for test builds. Exact source consumers and file
-digests are recorded in `tests/m0-harness/tests/workspace_policy/architecture.toml`.
+transport tests, `ferrum2-f2p` TLS tests, and the m0 harness's external DNS and F2P
+loopback qualification. F2P tests convert these immutable bytes into temporary PEM files;
+they do not embed this CA in production trust. The DNS crate's private `__interop-test-root`
+feature embeds the CA only for test builds. Exact source consumers and file digests are
+recorded in `tests/m0-harness/tests/workspace_policy/architecture.toml`.
 They are synthetic test-only artifacts generated locally with
 `OpenSSL 4.0.1 9 Jun 2026`.
 They contain no production identity or secret. The CA private key and generation intermediates were

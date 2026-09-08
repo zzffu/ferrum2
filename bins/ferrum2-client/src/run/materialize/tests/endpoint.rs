@@ -60,6 +60,70 @@ final = "direct"
 }
 
 #[tokio::test]
+async fn f2p_materialization_requires_credentials_before_startup() {
+    let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
+        std::num::NonZeroU16::new(16).unwrap(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let listen = reserve_address();
+    let file = TestConfig::new(|cache| {
+        format!(
+            r#"schema_version = 2
+[[inbounds]]
+tag = "proxy"
+listen = "{listen}"
+[[outbounds]]
+tag = "f2p"
+type = "f2p"
+server = "192.0.2.10:443"
+profile = "realtime"
+[outbounds.auth]
+token_file = "{cache}/token"
+[outbounds.tls]
+server_name = "proxy.example"
+[route]
+final = "f2p"
+"#
+        )
+    });
+    let prepare = || ferrum2_config::prepare_client(&file.path).expect("prepare F2P config");
+    let materializer = || {
+        ClientV2Materializer::with_downloader(
+            system.clone(),
+            Arc::new(Metrics::new()),
+            Arc::new(RecordingDownloader::failure()),
+        )
+    };
+    assert!(matches!(
+        materializer().materialize(prepare()).await,
+        Err(RunError::StartupProtocol)
+    ));
+    std::fs::create_dir_all(&file.cache_dir).expect("create credential directory");
+    std::fs::write(
+        file.cache_dir.join("token"),
+        "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    )
+    .expect("write F2P token");
+    let materialized = materializer()
+        .materialize(prepare())
+        .await
+        .expect("materialize authenticated F2P configuration");
+    materialized
+        .validate_only()
+        .expect("validation-only cleanup");
+    std::fs::write(file.cache_dir.join("token"), "invalid-token").expect("replace F2P token");
+    assert!(matches!(
+        materializer().materialize(prepare()).await,
+        Err(RunError::StartupProtocol)
+    ));
+    system_owner
+        .shutdown()
+        .await
+        .expect("join test system resolver");
+}
+
+#[tokio::test]
 async fn numeric_bootstrap_materializes_domain_dns_upstream_in_dependency_order() {
     let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
         std::num::NonZeroU16::new(16).unwrap(),

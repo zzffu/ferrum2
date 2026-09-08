@@ -1,8 +1,8 @@
 # Ferrum2
 
-Ferrum2 是一个使用 Rust 2024 编写的代理工作区，包含 SOCKS5 客户端和 Shadowsocks
-服务端，支持 Shadowsocks 2022 TCP/UDP、路由规则、DNS 策略、远程二进制 RuleSet，以及
-Windows x86_64 上的托管 Wintun。
+Ferrum2 是一个使用 Rust 2024 编写的代理工作区，包含 SOCKS5 客户端和代理服务端，
+支持 Shadowsocks 2022 TCP/UDP、F2P TCP 与 UDP over TCP、路由规则、DNS 策略、
+远程二进制 RuleSet，以及 Windows x86_64 上的托管 Wintun。
 
 当前仅接受 `schema_version = 2`，不提供旧配置兼容层或自动迁移。许可证为
 [GPL-3.0-only](LICENSE)。
@@ -61,6 +61,7 @@ SOCKS5 入站为无认证模式，示例因此只监听回环地址。
 
 - [文档索引](docs/README.md)：配置、架构、验证流程和性能证据。
 - [DNS 与 RuleSet 配置](docs/config-v2-dns-rulesets.md)。
+- [F2P 设计、配置与验证](docs/architecture/f2p-design.md)：TLS 1.3/TCP 承载，`balanced`／`realtime` 调度；[客户端](docs/examples/client-v2-f2p.toml)与[服务端](docs/examples/server-v2-f2p.toml)配置示例。UDP over TCP 不消除队头阻塞，尚无 WAN 性能优势结论。
 - [Windows TUN 配置](docs/config-v2-tun.md)与[旧网络模型迁移说明](docs/network-model-v2-migration.md)。
 - [Windows TUN 正确性验证](docs/windows-tun-qualification.md)：真实网卡验证的专用流程。
 - [性能证据说明](docs/performance-evidence.md)：Linux 配对测量和 Windows 主机性能流程。

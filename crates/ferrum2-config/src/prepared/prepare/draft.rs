@@ -185,7 +185,7 @@ fn prepare_client_outbound(
                 default_strategy,
             )?),
         ),
-        Some("shadowsocks") => (
+        Some("shadowsocks" | "f2p") => (
             raw.server
                 .as_deref()
                 .map(|server| {

@@ -55,6 +55,7 @@ impl PreparedClientV2 {
         let endpoint = self.outbound_endpoints.get(index_usize)?.as_ref();
         let (kind, psk) = match outbound {
             ClientOutboundConfig::Direct { .. } => (PreparedClientOutboundKind::Direct, None),
+            ClientOutboundConfig::F2p(_) => (PreparedClientOutboundKind::F2p, None),
             ClientOutboundConfig::Shadowsocks { psk, .. } => {
                 (PreparedClientOutboundKind::Shadowsocks, Some(psk))
             }
@@ -64,6 +65,10 @@ impl PreparedClientV2 {
             kind,
             method: outbound.method(),
             psk,
+            f2p: match outbound {
+                ClientOutboundConfig::F2p(config) => Some(config),
+                _ => None,
+            },
             endpoint,
             domain_resolver: outbound.direct_domain_resolver(),
             dial_options: outbound.dial_options(),

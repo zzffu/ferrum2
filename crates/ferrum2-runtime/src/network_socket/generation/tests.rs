@@ -128,3 +128,85 @@ async fn tcp_drop_closes_stream_before_ack_and_parent_retains_unpolled_monitor()
     owner.shutdown().await.unwrap();
     assert_eq!(owners.snapshot().network_socket_monitors, 0);
 }
+
+async fn receive_peer(
+    socket: &GenerationBoundUdpSocket<tokio::net::UdpSocket>,
+    destination: &mut [u8],
+) -> io::Result<usize> {
+    loop {
+        socket.readable().await?;
+        match socket.try_receive_connected(destination) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            result => return result,
+        }
+    }
+}
+
+#[tokio::test]
+async fn connected_udp_filters_peers_and_reset_cancels_pending_receive() {
+    let owners = OwnerRegistry::new();
+    let (coordinator, resolved) = context(&owners);
+    let runtime = coordinator
+        .register_runtime_owner(1, NetworkRuntimeOwnerKind::UdpAssociation)
+        .unwrap();
+    let (registrar, mut owner) =
+        NetworkSocketOwner::new(NonZeroUsize::new(1).unwrap(), owners.clone());
+    let raw = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = raw.local_addr().unwrap();
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let stranger = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let socket =
+        GenerationBoundUdpSocket::new(raw, resolved, runtime, registrar.reserve().unwrap())
+            .unwrap();
+    socket
+        .connect_peer(peer.local_addr().unwrap())
+        .await
+        .unwrap();
+    stranger.send_to(b"wrong peer", address).await.unwrap();
+    let mut buffer = [0_u8; 32];
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            receive_peer(&socket, &mut buffer),
+        )
+        .await
+        .is_err()
+    );
+    peer.send_to(&[], address).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), receive_peer(&socket, &mut buffer))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    let reset = coordinator.reset_network(
+        Arc::new(NetworkSnapshot::new(2, None, None).unwrap()),
+        crate::NetworkResetIntent::Ordinary(crate::NetworkResetReason::RouteChanged),
+    );
+    let (received, reset) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(receive_peer(&socket, &mut buffer), reset)
+    })
+    .await
+    .unwrap();
+    assert!(received.is_err());
+    reset.unwrap();
+    assert!(
+        socket
+            .connect_peer(peer.local_addr().unwrap())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        socket
+            .try_receive_connected(&mut buffer)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::ConnectionAborted
+    );
+    drop(socket);
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
+    assert_eq!(owners.snapshot().network_socket_monitors, 0);
+    drop(tokio::net::UdpSocket::bind(address).await.unwrap());
+}

@@ -124,7 +124,10 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         debug_assert_eq!(outbounds.len(), direct_resolvers.len());
         let connector = Arc::new(connector);
         let route_network = RouteNetworkOptions::default();
-        let network_reset_state = Arc::new(ClientEgressNetworkResetState::new(udp.as_ref()));
+        let network_reset_state = Arc::new(ClientEgressNetworkResetState::new(
+            udp.as_ref(),
+            Arc::clone(&outbounds),
+        ));
         let network_reset_hub = ClientNetworkResetHub::default();
         let network_reset_registration = network_reset_hub
             .register(&network_reset_state)
@@ -225,6 +228,13 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         for hop in hops {
             match self.outbounds.get(*hop) {
                 Some(ClientOutboundContext::Shadowsocks(_)) => {}
+                Some(ClientOutboundContext::F2p(_)) => {
+                    return if hops.len() == 1 {
+                        Ok(SelectedEgress::F2p { outbound: *hop })
+                    } else {
+                        Err(ClientPlanFailure::Invalid)
+                    };
+                }
                 Some(ClientOutboundContext::Direct { .. }) => direct += 1,
                 None => return Err(ClientPlanFailure::Invalid),
             }
@@ -264,6 +274,54 @@ impl<C, T, R> ClientEgressEngine<C, T, R> {
         let selected = self
             .classify_selected(origin, plan.as_ref(), Some(application_target))
             .map_err(ClientOpenFailure::Plan)?;
+        if let SelectedEgress::F2p { outbound } = selected {
+            let ClientOutboundContext::F2p(config) = &self.outbounds[outbound] else {
+                return Err(ClientOpenFailure::Plan(ClientPlanFailure::Invalid));
+            };
+            let generation = self.connector.network_generation();
+            let deadlines = timeout_limit.map_or(self.phase_deadlines, |limit| {
+                (
+                    limit.min(self.phase_deadlines.0),
+                    limit.min(self.phase_deadlines.1),
+                )
+            });
+            let io = tokio::time::timeout(
+                deadlines.0,
+                self.connector.connect_physical(
+                    &config.server,
+                    &config.dial_options,
+                    &self.route_network,
+                ),
+            )
+            .await
+            .map_err(|_| ClientOpenFailure::Connect(ConnectErrorKind::Timeout))?
+            .map_err(|error| ClientOpenFailure::Connect(error.kind()))?;
+            let stream = tokio::time::timeout(
+                deadlines.1,
+                ferrum2_f2p::connect_tcp(
+                    super::f2p::SuppliedIo(io),
+                    &config.config,
+                    config.profile,
+                    application_target,
+                ),
+            )
+            .await
+            .map_err(|_| ClientOpenFailure::HandshakeTimeout)?
+            .map_err(|error| {
+                ClientOpenFailure::Connect(match error.kind() {
+                    std::io::ErrorKind::PermissionDenied => ConnectErrorKind::PolicyDenied,
+                    std::io::ErrorKind::ConnectionRefused => ConnectErrorKind::ConnectionRefused,
+                    std::io::ErrorKind::TimedOut => ConnectErrorKind::Timeout,
+                    std::io::ErrorKind::NetworkUnreachable => ConnectErrorKind::NetworkUnreachable,
+                    std::io::ErrorKind::HostUnreachable => ConnectErrorKind::HostUnreachable,
+                    _ => ConnectErrorKind::Other,
+                })
+            })?;
+            if !self.connector.network_generation_is_admissible(generation) {
+                return Err(ClientOpenFailure::Connect(ConnectErrorKind::Other));
+            }
+            return Ok(tcp::ClientTcpFlow::F2p(Box::new(stream)));
+        }
         if let SelectedEgress::Direct { outbound } = selected {
             let deadline = timeout_limit
                 .unwrap_or(self.phase_deadlines.0)

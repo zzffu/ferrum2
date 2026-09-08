@@ -11,7 +11,7 @@ use crate::run::routing::{
     RouteProgramObservation, ServerRouting, ServerTerminalRoute, route_metadata, sniff_order,
 };
 
-pub(super) fn select_udp_route(
+pub(in crate::run) fn select_udp_route(
     routing: &ServerRouting,
     inbound: usize,
     target: &TargetAddr,

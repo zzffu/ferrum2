@@ -72,6 +72,7 @@ closed_dimension! {
         Listen => "listen",
         Socks5 => "socks5",
         Shadowsocks => "shadowsocks",
+        F2p => "f2p",
         Sniff => "sniff",
         Direct => "direct",
         Relay => "relay",

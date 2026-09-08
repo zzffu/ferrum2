@@ -36,6 +36,7 @@ mod process;
 #[cfg(test)]
 pub(crate) mod process;
 mod readiness;
+mod tcp;
 
 #[allow(unused_imports)]
 pub use config::{
@@ -65,6 +66,8 @@ pub use readiness::{
     active_child_count, wait_for_bound, wait_for_listener, wait_for_metrics,
     wait_for_metrics_ready, wait_for_metrics_sample, wait_for_tcp_udp_bound,
 };
+#[allow(unused_imports)]
+pub use tcp::{EchoWorker, socks_connect_wire, start_echo, start_echo_at};
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack

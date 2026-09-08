@@ -1,4 +1,3 @@
-use std::pin::Pin;
 use std::time::Instant;
 
 use ferrum2_config::RouteAction;
@@ -7,7 +6,6 @@ use ferrum2_core::route::Network;
 use ferrum2_observability::Transport as ObservationTransport;
 use ferrum2_rule::{RouteMetadata, RouteProgramAction, RuleCompileError};
 use ferrum2_runtime::{PrefixDecision, SniffPrefix, SniffPrefixOutcome, collect_sniff_prefix};
-use ferrum2_shadowsocks::PlainDuplex;
 use ferrum2_sniff::{Progress as SniffProgress, Transport};
 
 use super::outbound::ServerContext;
@@ -45,12 +43,12 @@ impl<P: AsRef<[u8]>> AsRef<[u8]> for TcpRoutePrefix<P> {
 pub(super) async fn select_tcp_route<F, C, P>(
     context: &ServerContext,
     target: &TargetAddr,
-    stream: &mut F,
+    mut read: F,
     initial_payload: P,
     cancellation: C,
 ) -> Result<TcpRouteSelection<P>, TcpRouteFailure>
 where
-    F: PlainDuplex + Unpin,
+    F: FnMut(&mut std::task::Context<'_>, &mut [u8]) -> std::task::Poll<std::io::Result<usize>>,
     C: std::future::Future,
     P: AsRef<[u8]>,
 {
@@ -59,7 +57,6 @@ where
     let mut scratch = match program.evaluation_scratch() {
         Ok(scratch) => scratch,
         Err(error) => {
-            let _ = stream.mark_abortive_plain();
             return Err(TcpRouteFailure::Rule(error));
         }
     };
@@ -114,9 +111,7 @@ where
                         &context.registry,
                         program.sniff.timeout,
                         cancellation.as_mut(),
-                        |context, destination| {
-                            Pin::new(&mut *stream).poll_read_plain(context, destination)
-                        },
+                        &mut read,
                         |bytes| {
                             let parsed = ferrum2_sniff::sniff_tcp_prefix(
                                 bytes,
@@ -148,7 +143,6 @@ where
                                 &context.metrics,
                                 SniffAttempt::tcp_collection(progress, outcome),
                             );
-                            let _ = stream.mark_abortive_plain();
                             return Err(match outcome {
                                 SniffPrefixOutcome::Cancelled => TcpRouteFailure::Cancelled,
                                 SniffPrefixOutcome::ReadError => TcpRouteFailure::Read,
@@ -173,7 +167,6 @@ where
             }
             RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
             RouteProgramAction::Continue(_) => {
-                let _ = stream.mark_abortive_plain();
                 return Ok(TcpRouteSelection {
                     terminal: ServerTerminalRoute::Reject,
                     prefix,
@@ -181,9 +174,6 @@ where
             }
             RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
                 let terminal = context.routing.terminal(action);
-                if terminal == ServerTerminalRoute::Reject {
-                    let _ = stream.mark_abortive_plain();
-                }
                 return Ok(TcpRouteSelection { terminal, prefix });
             }
         }

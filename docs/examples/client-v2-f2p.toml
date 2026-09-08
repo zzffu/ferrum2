@@ -1,0 +1,32 @@
+schema_version = 2
+
+[[inbounds]]
+tag = "local"
+listen = "127.0.0.1:1080"
+outbound = "proxy"
+
+[[outbounds]]
+tag = "proxy"
+type = "f2p"
+server = "127.0.0.1:8443"
+# balanced: everyday mixed traffic; realtime: tighter UDP scheduling budgets.
+# This does not remove TCP head-of-line blocking or promise lower WAN latency.
+profile = "balanced"
+
+[outbounds.auth]
+# One base64-encoded 32-byte random token, matching the server's file.
+# Paths are relative to the process working directory, not this TOML file.
+token_file = "secrets/f2p.token"
+
+[outbounds.tls]
+# Must match the server certificate's DNS identity.
+server_name = "proxy.example.com"
+# Optional private CA PEM. When present it replaces the public trust roots.
+# Remove this field when using a publicly trusted server certificate.
+ca_file = "certs/ca.pem"
+
+[udp]
+enabled = true
+max_sessions = 4096
+max_buffered_bytes = 16777216
+idle_timeout_ms = 300000

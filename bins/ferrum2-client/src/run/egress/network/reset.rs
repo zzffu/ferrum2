@@ -15,14 +15,19 @@ pub(in crate::run) struct ClientDnsResetAction {
 
 pub(in crate::run) struct ClientEgressNetworkResetState {
     udp_manager: Option<ferrum2_runtime::UdpSessionManager>,
+    outbounds: Arc<[crate::run::egress::ClientOutboundContext]>,
     dns_actions: Mutex<Vec<Weak<ClientDnsResetAction>>>,
     closed: AtomicBool,
 }
 
 impl ClientEgressNetworkResetState {
-    pub(in crate::run) fn new(udp: Option<&ClientUdpContext>) -> Self {
+    pub(in crate::run) fn new(
+        udp: Option<&ClientUdpContext>,
+        outbounds: Arc<[crate::run::egress::ClientOutboundContext]>,
+    ) -> Self {
         Self {
             udp_manager: udp.map(|udp| udp.manager.clone()),
+            outbounds,
             dns_actions: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
         }
@@ -61,6 +66,7 @@ impl ClientEgressNetworkResetState {
             self.closed.store(true, Ordering::Release);
             actions.iter().filter_map(Weak::upgrade).collect::<Vec<_>>()
         };
+        self.close_f2p();
         if let Some(manager) = &self.udp_manager {
             manager
                 .fence_network_generation(generation)
@@ -96,7 +102,20 @@ impl ClientEgressNetworkResetState {
                 .map_err(|_| ())?;
         }
         self.closed.store(false, Ordering::Release);
+        for outbound in self.outbounds.iter() {
+            if let crate::run::egress::ClientOutboundContext::F2p(config) = outbound {
+                config.reopen();
+            }
+        }
         Ok(())
+    }
+
+    fn close_f2p(&self) {
+        for outbound in self.outbounds.iter() {
+            if let crate::run::egress::ClientOutboundContext::F2p(config) = outbound {
+                config.fence();
+            }
+        }
     }
 }
 
@@ -234,6 +253,9 @@ impl ClientNetworkResetHub {
     pub(in crate::run) fn stop(&self) -> Result<(), ()> {
         let mut state = self.inner.lock().map_err(|_| ())?;
         state.stopped = true;
+        for target in state.targets.values().filter_map(Weak::upgrade) {
+            target.close_f2p();
+        }
         let mut failed = state.cleanup_failed;
         if let Some(cohort) = &mut state.pending {
             for target in &cohort.targets {

@@ -377,8 +377,8 @@ pub(super) fn validate_tun_targets(
         .iter()
         .filter_map(|index| outbounds.get(*index))
     {
-        if let ClientOutboundConfig::Shadowsocks { server, .. } = outbound {
-            tun.physical_endpoints.push(*server);
+        if let Some(server) = outbound.server() {
+            tun.physical_endpoints.push(server);
         }
     }
     if let Some(dns) = dns {

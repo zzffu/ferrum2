@@ -17,6 +17,7 @@ path = "src/lib.rs"
 ferrum2-core.workspace = true
 ferrum2-rule.workspace = true
 ferrum2-crypto.workspace = true
+ferrum2-f2p.workspace = true
 base64.workspace = true
 ipnet.workspace = true
 serde.workspace = true

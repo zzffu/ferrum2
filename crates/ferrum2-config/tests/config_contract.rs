@@ -1,5 +1,6 @@
 mod config_contract {
     mod dns;
+    mod f2p;
     mod graph;
     mod m16;
     mod route;

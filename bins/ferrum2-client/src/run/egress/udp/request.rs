@@ -118,6 +118,9 @@ pub(in crate::run) fn composed_udp_plan_limit(
         return 0;
     }
     let socks = MAX_SOCKS_UDP_DATAGRAM_BYTES.saturating_sub(3 + encoded_target_len);
+    if hops.len() == 1 && matches!(outbounds.get(hops[0]), Some(ClientOutboundContext::F2p(_))) {
+        return socks.min(65_507);
+    }
     if hops.len() == 1
         && outbounds
             .get(hops[0])

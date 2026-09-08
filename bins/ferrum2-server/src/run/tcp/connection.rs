@@ -30,11 +30,15 @@ pub(super) async fn server_connection(
             return;
         }
     };
+    let super::outbound::ServerProtocol::Shadowsocks { keys, replay } = &context.protocol else {
+        super::f2p::connection(stream, cancellation, context).await;
+        return;
+    };
     let inbound = ShadowsocksTcpInbound::new(
-        context.keys.as_ref(),
+        keys.as_ref(),
         context.clock.as_ref(),
         &context.random,
-        context.replay.as_ref(),
+        replay.as_ref(),
     );
     let accepted = tokio::select! {
         _ = cancellation.cancelled() => return,
@@ -85,11 +89,20 @@ pub(super) async fn server_connection(
     let selection = select_tcp_route(
         &context,
         &target,
-        &mut stream,
+        |cx, destination| {
+            use ferrum2_shadowsocks::PlainDuplex as _;
+            std::pin::Pin::new(&mut stream)
+                .poll_read_plain(cx, destination)
+                .map_err(|_| std::io::Error::other("inbound read failed"))
+        },
         initial_payload,
         cancellation.cancelled(),
     )
     .await;
+    if !matches!(&selection, Ok(selection) if selection.terminal != ServerTerminalRoute::Reject) {
+        use ferrum2_shadowsocks::PlainDuplex as _;
+        let _ = stream.mark_abortive_plain();
+    }
     let selection = match selection {
         Ok(selection) => selection,
         Err(TcpRouteFailure::Cancelled) => {

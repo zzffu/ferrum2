@@ -195,8 +195,8 @@ impl NetworkServiceConnector {
     }
 }
 
-pub(in crate::run) trait ClientPhysicalConnector: Send + Sync {
-    type Stream: LocalEndpoint;
+pub(in crate::run) trait ClientPhysicalConnector: Send + Sync + 'static {
+    type Stream: LocalEndpoint + ferrum2_shadowsocks::TransportIo + 'static;
 
     fn connect_physical(
         &self,
@@ -223,7 +223,8 @@ pub(in crate::run) trait ClientPhysicalConnector: Send + Sync {
 
 impl<C> ClientPhysicalConnector for C
 where
-    C: Connector,
+    C: Connector + 'static,
+    C::Stream: ferrum2_shadowsocks::TransportIo + 'static,
 {
     type Stream = C::Stream;
 

@@ -159,7 +159,8 @@ pub(super) fn record_udp_failure(
 }
 
 pub(super) fn update_replay_metric(context: &ServerContext) {
-    if let Ok(entries) = context.replay.entry_count()
+    if let super::tcp::ServerProtocol::Shadowsocks { replay, .. } = &context.protocol
+        && let Ok(entries) = replay.entry_count()
         && let Ok(entries) = u32::try_from(entries)
     {
         context.metrics.set_replay_entries(entries);

@@ -94,11 +94,6 @@ fn schema_v2_fixture_cohort_normalizes_defaults_boundaries_and_choices() {
                 assert_eq!(config.inbounds.len(), 1, "{}", case.name);
                 assert_eq!(config.outbounds.len(), 1, "{}", case.name);
                 assert_eq!(
-                    config.inbounds[0].listen, config.inbounds[0].listen,
-                    "{}",
-                    case.name
-                );
-                assert_eq!(
                     config.outbounds[selected(&config.route, 0)].server(),
                     outbound.server()
                 );
@@ -109,7 +104,6 @@ fn schema_v2_fixture_cohort_normalizes_defaults_boundaries_and_choices() {
                 let actual = (
                     config.inbounds[0].listen,
                     config.method(),
-                    format!("{:?}", config.psk),
                     Some(config.replay.capacity),
                     config.udp.enabled,
                     config.udp.max_sessions,
@@ -120,8 +114,7 @@ fn schema_v2_fixture_cohort_normalizes_defaults_boundaries_and_choices() {
                 );
                 let expected = (
                     SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388),
-                    case.method,
-                    "MethodPsk([REDACTED])".to_owned(),
+                    Some(case.method),
                     case.replay_capacity,
                     expected_udp.0,
                     expected_udp.1,
@@ -135,11 +128,6 @@ fn schema_v2_fixture_cohort_normalizes_defaults_boundaries_and_choices() {
                 assert!(config.dns.is_none(), "{}", case.name);
                 assert_eq!(config.inbounds.len(), 1, "{}", case.name);
                 assert_eq!(config.outbounds.len(), 1, "{}", case.name);
-                assert_eq!(
-                    config.inbounds[0].listen, config.inbounds[0].listen,
-                    "{}",
-                    case.name
-                );
             }
         }
         assert_eq!(

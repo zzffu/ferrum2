@@ -42,9 +42,9 @@ where
             .and_then(Option::as_ref)
             .ok_or(())?
             .for_ingress(ingress),
-        SelectedEgress::Direct { outbound: None } | SelectedEgress::Shadowsocks { .. } => {
-            egress.application_resolver.for_ingress(ingress)
-        }
+        SelectedEgress::Direct { outbound: None }
+        | SelectedEgress::Shadowsocks { .. }
+        | SelectedEgress::F2p { .. } => egress.application_resolver.for_ingress(ingress),
     };
     let pending_session = udp
         .manager
@@ -57,7 +57,7 @@ where
         }
     };
     let fixed_buffer_count = match selected {
-        SelectedEgress::Direct { .. } => 1,
+        SelectedEgress::Direct { .. } | SelectedEgress::F2p { .. } => 1,
         SelectedEgress::Shadowsocks { .. } => {
             if plan.as_ref().ok_or(())?.hops().len() == 1 {
                 2
@@ -69,12 +69,33 @@ where
     let mut fixed_capacity = Vec::with_capacity(fixed_buffer_count);
     for _ in 0..fixed_buffer_count {
         let capacity = match selected {
-            SelectedEgress::Direct { .. } => MAX_UDP_WIRE_DATAGRAM_BYTES,
+            SelectedEgress::Direct { .. } | SelectedEgress::F2p { .. } => {
+                MAX_UDP_WIRE_DATAGRAM_BYTES
+            }
             SelectedEgress::Shadowsocks { .. } => MAX_UDP_WIRE_LEN,
         };
         fixed_capacity.push(budget.reserve(capacity).map_err(|_| ())?);
     }
     let path = match selected {
+        SelectedEgress::F2p { outbound } => {
+            let ClientOutboundContext::F2p(config) = &egress.outbounds[outbound] else {
+                return Err(());
+            };
+            let tunnel = config
+                .tunnel(
+                    &egress.connector,
+                    &egress.route_network,
+                    &udp.manager.buffer_budget(),
+                    egress.phase_deadlines,
+                    udp.manager.limits(),
+                )
+                .await
+                .map_err(|_| ())?;
+            UdpPath::F2p(
+                super::f2p::F2pAssociation::new(plan.ok_or(())?, tunnel, &budget)
+                    .map_err(|_| ())?,
+            )
+        }
         SelectedEgress::Shadowsocks {
             first_outbound,
             first_server,
