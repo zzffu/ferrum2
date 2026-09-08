@@ -1,6 +1,6 @@
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ferrum2_rule::{RuleEngineRegistry, RuleSetId};
 use tokio::time::Instant;
@@ -19,6 +19,16 @@ pub enum RuleSetRefreshOutcome {
     NotModified,
     RetainedCache(RuleSetLoadDisposition),
     Failed(RuleSetLoadErrorKind),
+}
+
+/// Source-free status from the refresh owner and its current compiled registry.
+pub struct RuleSetRefreshSnapshot {
+    pub index: usize,
+    pub name: String,
+    pub generation: u64,
+    pub initial: RuleSetLoadDisposition,
+    pub initial_failure: Option<RuleSetLoadErrorKind>,
+    pub last_refresh: Option<RuleSetRefreshOutcome>,
 }
 
 /// Identity-free observer seam for refresh telemetry.
@@ -50,6 +60,8 @@ pub struct RuleSetRefreshService<D> {
     registry: Arc<RuleEngineRegistry>,
     entries: Box<[RuleSetEntry]>,
     observer: Arc<dyn RuleSetRefreshObserver>,
+    initial: Box<[(RuleSetLoadDisposition, Option<RuleSetLoadErrorKind>)]>,
+    outcomes: Mutex<Box<[Option<RuleSetRefreshOutcome>]>>,
 }
 
 impl<D> RuleSetRefreshService<D>
@@ -60,6 +72,13 @@ where
         loader: Arc<RuleSetLoader<D>>,
         materialized: MaterializedRuleSets,
     ) -> Result<Self, RuleSetLoadError> {
+        let initial = materialized
+            .dispositions()
+            .iter()
+            .copied()
+            .zip(materialized.degraded_failures().iter().copied())
+            .collect();
+        let outcomes = Mutex::new(vec![None; materialized.rule_set_ids().len()].into_boxed_slice());
         let registry = materialized.registry;
         let entries = materialized.entries;
         if !refresh_identities_match(&registry, &entries, &materialized.rule_set_ids) {
@@ -70,6 +89,8 @@ where
             registry,
             entries,
             observer: Arc::new(NoopRuleSetRefreshObserver),
+            initial,
+            outcomes,
         })
     }
 
@@ -83,13 +104,50 @@ where
         self.loader.shutdown().await
     }
 
+    /// Refreshes through the shared loader and records each completed attempt once.
     pub async fn refresh_once(&self, index: usize) -> RuleSetRefreshOutcome {
-        let Some(entry) = self.entries.get(index) else {
-            return RuleSetRefreshOutcome::Failed(RuleSetLoadErrorKind::RegistryCompile);
+        let outcome = match self.entries.get(index) {
+            Some(entry) => {
+                self.loader
+                    .refresh(&entry.source, Arc::clone(&self.registry), entry.rule_set)
+                    .await
+            }
+            None => RuleSetRefreshOutcome::Failed(RuleSetLoadErrorKind::RegistryCompile),
         };
-        self.loader
-            .refresh(&entry.source, Arc::clone(&self.registry), entry.rule_set)
-            .await
+        if let Some(slot) = self
+            .outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(index)
+        {
+            *slot = Some(outcome);
+        }
+        self.observer.record(outcome);
+        outcome
+    }
+
+    /// Captures declaration-order identities without exposing source URLs or paths.
+    pub fn snapshot(&self) -> Vec<RuleSetRefreshSnapshot> {
+        let outcomes = self
+            .outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snapshot = self.registry.snapshot();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let descriptor = snapshot.rule_set(entry.rule_set)?;
+                Some(RuleSetRefreshSnapshot {
+                    index,
+                    name: descriptor.tag().to_owned(),
+                    generation: snapshot.generation(),
+                    initial: self.initial[index].0,
+                    initial_failure: self.initial[index].1,
+                    last_refresh: outcomes[index],
+                })
+            })
+            .collect()
     }
 
     /// Runs until process quiescing. Dropping an in-flight download future
@@ -126,11 +184,10 @@ where
                     // process-root failure. The old registry remains live.
                     let refresh = self.refresh_once(index);
                     tokio::pin!(refresh);
-                    let outcome = tokio::select! {
+                    tokio::select! {
                         () = &mut stop => return Ok(()),
-                        outcome = &mut refresh => outcome,
-                    };
-                    self.observer.record(outcome);
+                        _ = &mut refresh => {},
+                    }
                     *deadline = self.entries[index]
                         .source
                         .update_interval

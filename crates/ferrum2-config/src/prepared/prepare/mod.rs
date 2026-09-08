@@ -5,7 +5,7 @@ mod draft;
 mod graph;
 mod rule_egress;
 
-pub use core::{prepare_client, prepare_server};
+pub use core::{prepare_client, prepare_client_source, prepare_server};
 #[cfg(feature = "fuzzing")]
 pub(crate) use core::{validate_client_source, validate_server_source};
 pub(crate) use dns::PreparedDnsDraft;

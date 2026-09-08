@@ -133,6 +133,7 @@ impl<P: Clone + Ord, A> OrderedRouteProgram<P, A> {
         snapshot: Option<Arc<RuleEngineSnapshot>>,
         scratch: &'scratch mut RuleEvaluationScratch,
     ) -> RouteProgramEvaluationWithScratch<'program, 'target, 'scratch, P, A> {
+        scratch.selected_rule = None;
         if self.compiled.mode() == RuleProgramMode::Indexed {
             scratch.assert_words(words_for(self.compiled.len()));
         }

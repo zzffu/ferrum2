@@ -58,6 +58,11 @@ impl<'program, P: Ord, A> RouteProgramEvaluationWithScratch<'program, '_, '_, P,
         self.last_match
     }
 
+    /// Original rule index of the latest selected action, or `None` for a final action.
+    pub const fn selected_rule_index(&self) -> Option<usize> {
+        self.scratch.selected_rule_index()
+    }
+
     /// Enables allocation-free category telemetry for subsequent steps.
     pub fn enable_match_observation(&mut self) {
         self.observe_matches = true;
@@ -100,9 +105,11 @@ fn next_action<'program, P: Ord, A>(
     if *finished {
         return None;
     }
+    scratch.selected_rule = None;
     if let Some(index) = program.find_next(
         *cursor, inbound, network, original, metadata, snapshot, scratch,
     ) {
+        scratch.selected_rule = Some(index);
         *cursor = index + 1;
         *last_match = if observe_matches {
             program.compiled.rules()[index]

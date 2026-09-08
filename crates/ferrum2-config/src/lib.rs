@@ -52,5 +52,5 @@ pub use prepared::{
     PreparedRouteRuleSets, PreparedRuleSet, PreparedRuleSetDownloadMode,
     PreparedServerOutboundDescriptor, PreparedServerV2, ResolvedDnsEndpoint,
     ResolvedOutboundEndpoint, RuleSetLoaderConfig, ServerV2Resources, finish_client_v2,
-    finish_server_v2, prepare_client, prepare_server,
+    finish_server_v2, prepare_client, prepare_client_source, prepare_server,
 };

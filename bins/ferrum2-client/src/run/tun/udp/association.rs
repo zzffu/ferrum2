@@ -58,6 +58,7 @@ pub(super) struct DispatchServices {
     pub(super) inbound: usize,
     synthetic_dns: SyntheticDns,
     proxy: Option<Arc<DnsProxy>>,
+    pub(super) observation: Option<ferrum2_dashboard::Connection>,
 }
 
 pub(super) struct OrdinaryGeneration {
@@ -162,6 +163,11 @@ impl DispatchServices {
                 snapshot,
                 request_payload_bound,
             } => {
+                crate::run::context::observe_route(
+                    self.observation.as_ref(),
+                    &snapshot,
+                    scratch.selected_rule_index(),
+                );
                 if !target_payload_within_bound(payload.len(), request_payload_bound) {
                     return None;
                 }
@@ -172,11 +178,15 @@ impl DispatchServices {
                         &target,
                         snapshot,
                         request_payload_bound,
+                        scratch.selected_rule_index(),
                     )
                     .await?,
                 ))
             }
             TunUdpPlan::HijackDns => {
+                if let Some(observation) = &self.observation {
+                    observation.set_route(Some("hijack_dns".into()), None);
+                }
                 self.proxy.as_ref()?;
                 OrdinaryTerminal::HijackDns
             }
@@ -200,8 +210,11 @@ pub(in crate::run::tun) async fn run_udp(
     synthetic_dns: SyntheticDns,
     session_cancellation: ferrum2_tun::SessionCancellation,
 ) {
-    let services = DispatchServices {
+    let observed_source = candidate.source();
+    let observed_target = TargetAddr::ip(candidate.first_target()).ok();
+    let mut services = DispatchServices {
         proxy: tun_dns_proxy(&context),
+        observation: None,
         cancellation,
         session_cancellation,
         context,
@@ -229,6 +242,23 @@ pub(in crate::run::tun) async fn run_udp(
     let Ok(association) = candidate.commit_association().await else {
         return;
     };
+    services.observation = services.context.observe(
+        "udp",
+        "tun",
+        Some(observed_source),
+        observed_target.as_ref(),
+    );
+    if let Some(observation) = &services.observation {
+        match ordinary.terminal() {
+            Some(OrdinaryTerminal::Route(route)) => {
+                route.observe_path(observation);
+            }
+            Some(OrdinaryTerminal::HijackDns) => {
+                observation.set_route(Some("hijack_dns".into()), None)
+            }
+            Some(OrdinaryTerminal::Reject) | None => {}
+        }
+    }
     let response_sink = association.response_sink();
     let peer_policy = association.peer_policy();
     TunUdpDispatch {
@@ -400,6 +430,10 @@ impl TunUdpDispatch {
             biased;
             () = forced.forced() => DispatchEvent::Stop,
             () = self.services.session_cancellation.cancelled() => DispatchEvent::Stop,
+            () = crate::run::context::observation_cancelled(self.services.observation.as_ref()) => {
+                if let Some(observation) = &self.services.observation { observation.finish("cancelled"); }
+                DispatchEvent::Stop
+            },
             () = super::route::wait_for_optional_udp_route_generation_change(generation_change) => DispatchEvent::Stop,
             () = async { match egress_cancelled { Some(cancelled) => { let _ = cancelled.changed().await; }, None => std::future::pending().await } } => DispatchEvent::Stop,
             deadline = async { match idle_deadline { Some(deadline) => { tokio::time::sleep_until(deadline).await; deadline }, None => std::future::pending().await } } => DispatchEvent::Idle(deadline),

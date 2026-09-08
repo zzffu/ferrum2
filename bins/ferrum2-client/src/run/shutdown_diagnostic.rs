@@ -14,6 +14,7 @@ pub(super) enum ClientRootName {
     Network,
     Metrics,
     Tun,
+    Dashboard,
 }
 
 impl ClientRootName {
@@ -26,6 +27,7 @@ impl ClientRootName {
             Self::Network => "network",
             Self::Metrics => "metrics",
             Self::Tun => "tun",
+            Self::Dashboard => "dashboard",
         }
     }
 }

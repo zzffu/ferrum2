@@ -16,7 +16,6 @@ use ferrum2_dns::{
 };
 use ferrum2_net::NetworkSnapshot;
 use ferrum2_observability::{Metrics, Role, json_subscriber};
-use ferrum2_rule::RuleCompileError;
 use ferrum2_runtime::{
     AffineConnectionExecutor, MAX_UDP_MAX_BUFFERED_BYTES, MIN_UDP_IDLE_TIMEOUT,
     MIN_UDP_MAX_BUFFERED_BYTES, OwnerRegistry, ProcessCause, ProcessReport, ProcessRoot,
@@ -30,9 +29,13 @@ use ferrum2_socks5::Socks5Inbound;
 mod egress;
 
 mod context;
+pub(crate) mod dashboard_control;
 mod dns;
 #[path = "dns_egress.rs"]
 mod dns_egress;
+mod error;
+mod generation;
+pub(crate) mod management;
 mod materialize;
 #[cfg(all(windows, not(test)))]
 mod network_owner;
@@ -46,6 +49,9 @@ mod socks;
 mod tokio_io;
 #[path = "run/tun/mod.rs"]
 mod tun;
+pub(crate) use error::RunError;
+use error::run_error_for_rule_compile;
+pub(crate) use generation::{run_generation, run_prepared};
 
 use context::{ClientContext, ClientRouting};
 use dns::{
@@ -56,7 +62,8 @@ use ferrum2_shadowsocks::tokio::TokioConnector;
 use observation::{ClientMetricsRoot, log_level, publish_rule_program_metadata};
 use shutdown_diagnostic::{ClientRootName, ClientRootNames, ShutdownDiagnostic};
 use socks::{ClientTcpListeners, ClientTcpRoot};
-use tokio_io::{bind_listener, shutdown_signal};
+use tokio_io::bind_listener;
+pub(crate) use tokio_io::shutdown_signal;
 
 #[cfg(test)]
 use egress::IdSequenceRandom;
@@ -80,130 +87,6 @@ fn initial_network_snapshot() -> Result<Arc<NetworkSnapshot>, RunError> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RunError {
-    StartupObservability,
-    StartupRuntime,
-    StartupBind,
-    StartupProtocol,
-    StartupRecording,
-    RecordingIncomplete,
-    ConfigResourceMaterialization,
-    DnsResolve,
-    RuleCompile,
-    RuleAllocation,
-    RuleSetDownload,
-    RuleSetCache,
-    RuleSetFormat,
-    RuleSetUnsupportedMatcher,
-    RuleSetCompile,
-    RuntimeListener,
-    RuntimeChild,
-    RuntimeRoot,
-    ShutdownCleanup,
-}
-
-impl std::fmt::Display for RunError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::StartupObservability => {
-                "error[startup.observability] process: unable to initialize diagnostics"
-            }
-            Self::StartupRuntime => {
-                "error[startup.runtime] process: unable to create asynchronous runtime"
-            }
-            Self::StartupBind => "error[startup.bind] process: unable to prepare required endpoint",
-            Self::StartupProtocol => {
-                "error[startup.protocol] process: unable to prepare protocol resources"
-            }
-            Self::ConfigResourceMaterialization => {
-                "error[config.resource_materialization] configuration: supplied resources are invalid"
-            }
-            Self::DnsResolve => {
-                "error[dns.resolve] materialization: fixed endpoint resolution failed"
-            }
-            Self::RuleCompile => {
-                "error[rule.compile] materialization: rule compilation failed"
-            }
-            Self::RuleAllocation => {
-                "error[rule.allocation] materialization: rule allocation failed"
-            }
-            Self::RuleSetDownload => {
-                "error[ruleset.download] materialization: RuleSet download failed"
-            }
-            Self::RuleSetCache => {
-                "error[ruleset.cache] materialization: RuleSet cache failed"
-            }
-            Self::RuleSetFormat => {
-                "error[ruleset.format] materialization: RuleSet format is invalid"
-            }
-            Self::RuleSetUnsupportedMatcher => {
-                "error[ruleset.unsupported_matcher] materialization: RuleSet matcher is unsupported"
-            }
-            Self::RuleSetCompile => {
-                "error[ruleset.compile] materialization: RuleSet compilation failed"
-            }
-            Self::RuntimeListener => "error[runtime.listener] process: required listener failed",
-            Self::RuntimeChild => "error[runtime.child] process: required child failed",
-            Self::RuntimeRoot => "error[runtime.root] process: required root stopped",
-            Self::StartupRecording => "error[recording.startup] process: unable to start recording",
-            Self::RecordingIncomplete => "error[recording.incomplete] process: recording is incomplete",
-            Self::ShutdownCleanup => {
-                "error[shutdown.cleanup] process: unable to reap all process owners"
-            }
-        })
-    }
-}
-
-impl RunError {
-    const fn diagnostic_category(self) -> &'static str {
-        match self {
-            Self::StartupObservability => "startup.observability",
-            Self::StartupRuntime => "startup.runtime",
-            Self::StartupBind => "startup.bind",
-            Self::StartupProtocol => "startup.protocol",
-            Self::StartupRecording => "recording.startup",
-            Self::RecordingIncomplete => "recording.incomplete",
-            Self::ConfigResourceMaterialization => "config.resource_materialization",
-            Self::DnsResolve => "dns.resolve",
-            Self::RuleCompile => "rule.compile",
-            Self::RuleAllocation => "rule.allocation",
-            Self::RuleSetDownload => "ruleset.download",
-            Self::RuleSetCache => "ruleset.cache",
-            Self::RuleSetFormat => "ruleset.format",
-            Self::RuleSetUnsupportedMatcher => "ruleset.unsupported_matcher",
-            Self::RuleSetCompile => "ruleset.compile",
-            Self::RuntimeListener => "runtime.listener",
-            Self::RuntimeChild => "runtime.child",
-            Self::RuntimeRoot => "runtime.root",
-            Self::ShutdownCleanup => "shutdown.cleanup",
-        }
-    }
-}
-
-/// Classifies rule scratch construction failures after configuration has
-/// already passed semantic validation. Allocation and index-capacity failures
-/// retain their operator-visible category; every other closed compiler failure
-/// is an internal compilation failure at this production boundary.
-const fn run_error_for_rule_compile(error: RuleCompileError) -> RunError {
-    match error {
-        RuleCompileError::Allocation | RuleCompileError::IndexOverflow => RunError::RuleAllocation,
-        RuleCompileError::EmptyMatcher
-        | RuleCompileError::EmptyField
-        | RuleCompileError::DuplicateField
-        | RuleCompileError::DuplicateValue
-        | RuleCompileError::ConflictingFields
-        | RuleCompileError::InvalidDomain
-        | RuleCompileError::NonCanonicalCidr
-        | RuleCompileError::InvalidId
-        | RuleCompileError::InvalidTag
-        | RuleCompileError::DuplicateRuleSet
-        | RuleCompileError::InvalidGeneration
-        | RuleCompileError::ResourceLimit
-        | RuleCompileError::Internal => RunError::RuleCompile,
-    }
-}
-
 #[derive(Debug, Default)]
 struct ClientProcessRoots {
     roots: Vec<ProcessRoot<RunError>>,
@@ -220,137 +103,6 @@ impl ClientProcessRoots {
         debug_assert_eq!(self.roots.len(), self.names.len());
         (self.roots, ClientRootNames::new(self.names))
     }
-}
-
-/// Fully materializes a prepared schema-v2 client before any listener or TUN
-/// root is allowed to prepare. The returned process owns the bootstrap DNS,
-/// RuleSet refresh, and egress bridge lifecycle for its entire run.
-pub(crate) fn run_prepared(prepared: PreparedClientV2) -> Result<(), RunError> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| RunError::StartupRuntime)?;
-    runtime.block_on(async move {
-        let (system, mut system_owner) = ferrum2_dns::SystemResolution::start(
-            prepared.dns_max_inflight().unwrap_or_else(|| {
-                std::num::NonZeroU16::new(prepared.runtime().max_connections.get().min(4096))
-                    .expect("validated positive connection limit")
-            }),
-            prepared.runtime().connect_timeout,
-        )
-        .map_err(|_| RunError::StartupRuntime)?;
-        let result = async {
-            let metrics = Arc::new(Metrics::new());
-            let registry = OwnerRegistry::new();
-            #[cfg(all(windows, not(test)))]
-            let monitor = if prepared.has_tun() {
-                None
-            } else {
-                Some(
-                    ferrum2_platform_windows::WindowsNetworkChangeMonitor::new()
-                        .map_err(|_| RunError::StartupRuntime)?,
-                )
-            };
-            #[cfg(all(windows, not(test)))]
-            let mut network = network_owner::ClientNetworkRuntime::prepare(
-                registry.clone(),
-                Arc::clone(&metrics),
-                monitor,
-            )?;
-            let result = async {
-                #[cfg(all(windows, not(test)))]
-                let network_reset_coordinator = network.coordinator.clone();
-                #[cfg(all(windows, not(test)))]
-                let network_interface_catalog = network.catalog.clone();
-                #[cfg(all(windows, not(test)))]
-                let network_socket_service = Arc::clone(&network.sockets);
-                #[cfg(all(windows, not(test)))]
-                let network_change_monitor = network.waiter();
-                #[cfg(not(all(windows, not(test))))]
-                let network_reset_coordinator =
-                    tun::network_reset_coordinator(initial_network_snapshot()?, registry.clone());
-                let underlay = ferrum2_tun::UnderlayPublisher::new();
-                let materializer = materialize::ClientV2Materializer::new(
-                    system.clone(),
-                    Arc::clone(&metrics),
-                    #[cfg(all(windows, not(test)))]
-                    Arc::clone(&network_socket_service),
-                );
-                let materialized = match materializer.materialize(prepared).await {
-                    Ok(materialized) => materialized,
-                    Err(error) => {
-                        return Err(error);
-                    }
-                };
-                let subscriber = json_subscriber(
-                    std::io::stderr,
-                    log_level(materialized.config().logging.level),
-                );
-                if tracing::subscriber::set_global_default(subscriber).is_err() {
-                    let materialized_cleanup = materialized.validate_only();
-                    materialized_cleanup?;
-                    return Err(RunError::StartupObservability);
-                }
-                let materialize::MaterializedRunParts {
-                    config,
-                    materialization_root,
-                    cache: materialized_cache,
-                } = match materialized.into_run_parts().await {
-                    Ok(parts) => parts,
-                    Err(error) => {
-                        return Err(error);
-                    }
-                };
-                let dns_specs = config
-                    .dns
-                    .as_ref()
-                    .map(|dns| dns_egress::dns_runtime_specs(&dns.servers));
-                run_with_registry_and_metrics_inner_using_system(
-                    system.clone(),
-                    config,
-                    registry,
-                    shutdown_signal(),
-                    metrics,
-                    #[cfg(test)]
-                    ClientTestOverrides::default(),
-                    ClientRunResources {
-                        process_resources: {
-                            #[cfg(all(windows, not(test)))]
-                            {
-                                Some(network.process_resources())
-                            }
-                            #[cfg(not(all(windows, not(test))))]
-                            {
-                                None
-                            }
-                        },
-                        materialization_root,
-                        materialized_cache,
-                        materialized_underlay: Some(underlay),
-                        dns_specs,
-                        network_reset_coordinator: Some(network_reset_coordinator),
-                        #[cfg(all(windows, not(test)))]
-                        network_interface_catalog: Some(network_interface_catalog),
-                        #[cfg(all(windows, not(test)))]
-                        network_socket_service: Some(network_socket_service),
-                        #[cfg(all(windows, not(test)))]
-                        network_change_monitor,
-                    },
-                )
-                .await
-            }
-            .await;
-            #[cfg(all(windows, not(test)))]
-            network.shutdown().await?;
-            result
-        }
-        .await;
-        system_owner
-            .shutdown()
-            .await
-            .map_err(|_| RunError::ShutdownCleanup)?;
-        result
-    })
 }
 
 /// Performs the opt-in networked validation pass, then explicitly joins every
@@ -404,6 +156,7 @@ pub(crate) fn validate_prepared_materialization(
 }
 
 struct ClientRunResources {
+    management: Option<management::Management>,
     process_resources: Option<ferrum2_runtime::ProcessResources<RunError>>,
     materialization_root: Option<materialize::ClientV2RuntimeRoot>,
     materialized_cache: Option<DnsCache>,
@@ -422,6 +175,7 @@ impl ClientRunResources {
     #[cfg(test)]
     const fn test_unmaterialized(dns_specs: Option<Vec<ferrum2_dns::DnsUpstreamSpec>>) -> Self {
         Self {
+            management: None,
             process_resources: None,
             materialization_root: None,
             materialized_cache: None,
@@ -495,6 +249,7 @@ where
         mut dns_observer,
     } = overrides;
     let ClientRunResources {
+        management,
         process_resources,
         mut materialization_root,
         materialized_cache,
@@ -541,6 +296,15 @@ where
             .transpose()?;
         publish_rule_program_metadata(&config, &metrics);
         let selector = config.selector_control();
+        let control_cache = management.as_ref().and(materialized_cache.clone());
+        let control_refresh = if management.is_some() {
+            materialization_root
+                .as_ref()
+                .map(|root| root.service())
+                .transpose()?
+        } else {
+            None
+        };
         let tun_config = config.tun;
         let tun_direct = tun_config.is_some()
             && config.outbounds.iter().any(|outbound| {
@@ -691,6 +455,9 @@ where
         let egress = Arc::new(egress);
         let context = Arc::new(ClientContext {
             inbound: Socks5Inbound::new(),
+            dashboard: management
+                .as_ref()
+                .map(|management| management.dashboard.clone()),
             recorder: recording.as_ref().map(ferrum2_rocom::Recording::recorder),
             egress: Arc::clone(&egress),
             #[cfg(test)]
@@ -709,6 +476,24 @@ where
             program: config.route,
             outbounds,
             selector,
+        });
+        let management_root = management.map(|management| management::ManagementRoot {
+            management,
+            control: Arc::new(dashboard_control::ClientDashboardControl::new(
+                Arc::clone(&routing),
+                Arc::clone(&egress),
+                ordinary_dns.as_ref().map(Arc::clone),
+                Arc::clone(&tagged_dns),
+                control_cache,
+                control_refresh,
+                Arc::clone(&metrics),
+                config.inbounds.len() + usize::from(tun_config.is_some()),
+            )),
+            registry: registry.clone(),
+            socks_count: config.inbounds.len(),
+            dns_enabled: ordinary_dns.is_some(),
+            tun_enabled: tun_config.is_some(),
+            recording_max_bytes: config.rocom.as_ref().map(|settings| settings.max_bytes),
         });
         // Probe caller-owned route scratch before any listener is prepared so
         // an allocation/capacity failure has a stable process-level category.
@@ -855,6 +640,12 @@ where
                 ),
             );
         }
+        if let Some(root) = management_root {
+            roots.push(
+                ClientRootName::Dashboard,
+                ProcessRoot::new(move || async move { Ok(root) }),
+            );
+        }
         let (roots, root_names) = roots.into_parts();
         let owner_baseline = process_resources
             .as_ref()
@@ -887,6 +678,17 @@ where
             owner_baseline,
             owner_stopped,
         );
+        if let Some(dashboard) = &context.dashboard
+            && let Ok(mut event) =
+                serde_json::from_str::<serde_json::Value>(&diagnostic.to_string())
+        {
+            event["level"] = serde_json::json!(if report.cleanup_failure().is_some() {
+                "ERROR"
+            } else {
+                "INFO"
+            });
+            dashboard.record_log(event);
+        }
         // This record is closed over client enums, monotonic durations, and owner
         // counters: no config, addresses, payloads, keys, or error text can enter it.
         // Diagnostics must never replace the process result when stderr is closed.

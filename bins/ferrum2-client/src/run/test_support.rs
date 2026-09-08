@@ -742,6 +742,7 @@ pub(in crate::run) fn udp_test_context_for_psk(
     };
     let context = ClientContext {
         inbound: Socks5Inbound::new(),
+        dashboard: None,
         recorder: None,
         egress: Arc::new(ClientEgressEngine::new(
             outbounds,

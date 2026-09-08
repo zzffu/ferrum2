@@ -22,7 +22,9 @@ pub use https::{
     RuleSetHostResolverKind, SystemRuleSetDialer, SystemRuleSetHostResolver,
 };
 pub use loader::{LoadedRuleSet, RuleSetLoadDisposition, RuleSetLoader};
-pub use refresh::{RuleSetRefreshObserver, RuleSetRefreshOutcome, RuleSetRefreshService};
+pub use refresh::{
+    RuleSetRefreshObserver, RuleSetRefreshOutcome, RuleSetRefreshService, RuleSetRefreshSnapshot,
+};
 pub use snapshot::{MaterializedRuleSets, materialize_rule_sets};
 pub use source::{
     RuleSetCacheName, RuleSetDownloadMode, RuleSetDownloadResolver, RuleSetLoaderConfig,

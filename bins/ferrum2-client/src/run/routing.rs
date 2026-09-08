@@ -29,6 +29,7 @@ pub(super) enum ClientTerminalRoute {
 pub(super) struct TcpRouteSelection {
     pub(super) terminal: ClientTerminalRoute,
     pub(super) prefix: TcpRoutePrefix,
+    pub(super) rule_index: Option<usize>,
 }
 
 pub(super) enum TcpRoutePrefix {
@@ -263,12 +264,14 @@ impl ClientRouting {
                     return Ok(Some(TcpRouteSelection {
                         terminal: ClientTerminalRoute::Reject,
                         prefix,
+                        rule_index: evaluation.selected_rule_index(),
                     }));
                 }
                 RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
                     return Ok(Some(TcpRouteSelection {
                         terminal: terminal(action),
                         prefix,
+                        rule_index: evaluation.selected_rule_index(),
                     }));
                 }
             }
@@ -429,6 +432,7 @@ pub(super) async fn relay_hijacked_tcp<IO, C>(
     proxy: &DnsProxy,
     idle_timeout: std::time::Duration,
     cancellation: C,
+    observation: Option<&ferrum2_dashboard::Connection>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
     C: Future,
@@ -445,6 +449,9 @@ pub(super) async fn relay_hijacked_tcp<IO, C>(
             }
             let mut request = vec![0; usize::from(length)];
             stream.read_exact(&mut request).await?;
+            if let Some(observation) = observation {
+                observation.upload(request.len() + 2);
+            }
             let response = proxy
                 .answer(
                     ProxyIngress::Ordinary(inbound),
@@ -455,13 +462,39 @@ pub(super) async fn relay_hijacked_tcp<IO, C>(
                 .ok_or_else(|| io::Error::other("DNS answer unavailable"))?;
             let length = u16::try_from(response.len())
                 .map_err(|_| io::Error::other("DNS answer exceeds TCP frame"))?;
-            stream.write_u16(length).await?;
-            stream.write_all(&response).await
+            let prefix = length.to_be_bytes();
+            for mut bytes in [&prefix[..], &response[..]] {
+                while !bytes.is_empty() {
+                    let written = stream.write(bytes).await?;
+                    if written == 0 {
+                        return Err(io::Error::from(io::ErrorKind::WriteZero));
+                    }
+                    if let Some(observation) = observation {
+                        observation.download(written);
+                    }
+                    bytes = &bytes[written..];
+                }
+            }
+            Ok::<_, io::Error>(())
         };
         let result = tokio::select! {
-            _ = cancellation.as_mut() => return,
+            _ = super::context::observation_cancelled(observation) => {
+                if let Some(observation) = observation { observation.finish("cancelled"); }
+                return;
+            },
+            _ = cancellation.as_mut() => {
+                if let Some(observation) = observation { observation.finish("cancelled"); }
+                return;
+            },
             result = tokio::time::timeout(idle_timeout, exchange) => result,
         };
+        if let Some(observation) = observation {
+            match &result {
+                Err(_) => observation.finish("idle_timeout"),
+                Ok(Err(_)) => observation.finish("io"),
+                Ok(Ok(())) => {}
+            }
+        }
         if !matches!(result, Ok(Ok(()))) {
             return;
         }

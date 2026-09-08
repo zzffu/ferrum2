@@ -157,24 +157,42 @@ pub(super) struct RouteEgress {
     pub(super) egress: crate::run::egress::ClientUdpAssociation,
     pub(super) cancelled: tokio::sync::watch::Receiver<bool>,
     request_payload_bound: usize,
+    observed_path: Option<ferrum2_core::route::EgressPlanSnapshot>,
+    observed_rule: Option<usize>,
 }
 
 impl RouteEgress {
+    pub(super) fn observe_path(&self, observation: &ferrum2_dashboard::Connection) {
+        if let Some(plan) = &self.observed_path {
+            crate::run::context::observe_route(Some(observation), plan, self.observed_rule);
+        }
+    }
+
     pub(super) async fn prepare(
         services: &super::association::DispatchServices,
         generation: &mut super::association::OrdinaryGeneration,
         first_target: &TargetAddr,
         snapshot: ferrum2_core::route::EgressPlanSnapshot,
         request_payload_bound: usize,
+        observed_rule: Option<usize>,
     ) -> Option<Self> {
         if !services.current(Some(generation)) {
             return None;
         }
         let mut forced = services.cancellation.clone();
+        let observed_path = services
+            .context
+            .dashboard
+            .as_ref()
+            .map(|_| snapshot.clone());
         let mut egress = tokio::select! {
             biased;
             () = forced.forced() => return None,
             () = services.session_cancellation.cancelled() => return None,
+            () = crate::run::context::observation_cancelled(services.observation.as_ref()) => {
+                if let Some(observation) = &services.observation { observation.finish("cancelled"); }
+                return None;
+            },
             () = &mut generation.changed => return None,
             prepared = services.context.egress.prepare_udp_for_ingress(
                 crate::run::egress::ClientRequestOrigin::Tun, services.inbound,
@@ -190,6 +208,8 @@ impl RouteEgress {
             egress,
             cancelled,
             request_payload_bound,
+            observed_path,
+            observed_rule,
         })
     }
 
@@ -232,6 +252,10 @@ impl RouteEgress {
             biased;
             () = forced.forced() => return false,
             () = services.session_cancellation.cancelled() => return false,
+            () = crate::run::context::observation_cancelled(services.observation.as_ref()) => {
+                if let Some(observation) = &services.observation { observation.finish("cancelled"); }
+                return false;
+            },
             () = &mut generation.changed => return false,
             changed = self.cancelled.changed() => { let _ = changed; return false; }
             result = self.egress.send_encoded_request(wire_len) => result,
@@ -252,6 +276,9 @@ impl RouteEgress {
             Direction::ClientToTarget,
             payload_len as u64,
         );
+        if let Some(observation) = &services.observation {
+            observation.upload(payload_len);
+        }
         true
     }
 
@@ -295,6 +322,9 @@ impl RouteEgress {
                 Direction::TargetToClient,
                 payload.len() as u64,
             );
+            if let Some(observation) = &services.observation {
+                observation.download(payload.len());
+            }
         }
         self.egress.recycle_application_response(response);
         true

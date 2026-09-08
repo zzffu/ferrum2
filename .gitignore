@@ -8,3 +8,7 @@ __pycache__/
 # Local performance-rule evidence
 /tests/performance_rule/release-*.json
 /tests/performance_rule/reviewed-*.json
+
+# Dashboard development outputs; embedded shipping assets and bun.lock are tracked.
+/ui/dashboard/node_modules/
+/ui/dashboard/dist/

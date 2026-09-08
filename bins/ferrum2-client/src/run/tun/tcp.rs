@@ -25,6 +25,8 @@ pub(super) async fn run_tcp<IO>(
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    let observed_target = TargetAddr::ip(target).ok();
+    let observation = context.observe("tcp", "tun", None, observed_target.as_ref());
     if synthetic_dns.matches(target) {
         let Some(proxy) = context
             .dns
@@ -46,6 +48,7 @@ pub(super) async fn run_tcp<IO>(
                     () = wait_for_session_cancellation(&session_cancellation) => {},
                 }
             },
+            observation.as_ref(),
         )
         .await;
         return;
@@ -63,6 +66,7 @@ pub(super) async fn run_tcp<IO>(
                 tokio::select! {
                     () = process_cancelled.forced() => {},
                     () = wait_for_session_cancellation(&session_cancellation) => {},
+                    () = crate::run::context::observation_cancelled(observation.as_ref()) => {},
                 }
             },
             &context.registry,
@@ -74,8 +78,15 @@ pub(super) async fn run_tcp<IO>(
     };
     let mut flow = ReplayIo::new(flow, selection.prefix);
     match selection.terminal {
-        ClientTerminalRoute::Reject => {}
+        ClientTerminalRoute::Reject => {
+            if let Some(observation) = &observation {
+                observation.finish("rejected");
+            }
+        }
         ClientTerminalRoute::HijackDns => {
+            if let Some(observation) = &observation {
+                observation.set_route(Some("hijack_dns".into()), None);
+            }
             let Some(proxy) = context
                 .dns
                 .as_ref()
@@ -96,11 +107,17 @@ pub(super) async fn run_tcp<IO>(
                         () = wait_for_session_cancellation(&session_cancellation) => {},
                     }
                 },
+                observation.as_ref(),
             )
             .await;
         }
         ClientTerminalRoute::Route(plan) => {
+            crate::run::context::observe_route(observation.as_ref(), &plan, selection.rule_index);
             let opened = tokio::select! {
+                () = crate::run::context::observation_cancelled(observation.as_ref()) => {
+                    if let Some(observation) = &observation { observation.finish("cancelled"); }
+                    return;
+                },
                 _ = cancellation.forced() => return,
                 () = wait_for_session_cancellation(&session_cancellation) => return,
                 opened = context.egress.open_tcp_for_ingress(
@@ -114,6 +131,9 @@ pub(super) async fn run_tcp<IO>(
                 ) => opened,
             };
             let Ok(opened) = opened else {
+                if let Some(observation) = &observation {
+                    observation.finish("connect_error");
+                }
                 return;
             };
             let mut opened = TokioFramed::new(opened);
@@ -131,6 +151,7 @@ pub(super) async fn run_tcp<IO>(
                             () = wait_for_session_cancellation(&session_cancellation) => {},
                         }
                     },
+                    observation.as_ref(),
                 )
                 .await;
         }

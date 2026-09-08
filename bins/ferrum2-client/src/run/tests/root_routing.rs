@@ -1,31 +1,5 @@
 use super::*;
 
-#[test]
-fn rule_scratch_failures_keep_closed_runtime_categories() {
-    for error in [
-        RuleCompileError::Allocation,
-        RuleCompileError::IndexOverflow,
-    ] {
-        assert_eq!(run_error_for_rule_compile(error), RunError::RuleAllocation);
-    }
-    for error in [
-        RuleCompileError::EmptyMatcher,
-        RuleCompileError::EmptyField,
-        RuleCompileError::DuplicateField,
-        RuleCompileError::DuplicateValue,
-        RuleCompileError::ConflictingFields,
-        RuleCompileError::InvalidDomain,
-        RuleCompileError::NonCanonicalCidr,
-        RuleCompileError::InvalidId,
-        RuleCompileError::InvalidTag,
-        RuleCompileError::DuplicateRuleSet,
-        RuleCompileError::InvalidGeneration,
-        RuleCompileError::Internal,
-    ] {
-        assert_eq!(run_error_for_rule_compile(error), RunError::RuleCompile);
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn tun_tcp_sniff_outcomes_are_fail_closed_and_replay_each_prefix_once() {
     use ferrum2_runtime::SniffPrefixOutcome;

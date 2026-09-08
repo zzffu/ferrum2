@@ -53,6 +53,21 @@ cargo run -p ferrum2-client --locked -- --config docs/examples/client-v2-socks5.
 用于真实部署前，应复制配置、替换测试密钥和地址，并保持两端方法和密钥一致。
 SOCKS5 入站为无认证模式，示例因此只监听回环地址。
 
+## 内嵌仪表盘
+
+client 内嵌 React 仪表盘，提供连接、出站选择、路由、DNS、日志与配置管理。
+前端发布为一个 HTML，运行 client 不需要 Bun、Node.js 或独立 Web 服务。
+
+先按[仪表盘架构与使用说明](docs/architecture/dashboard-design.md#running-the-dashboard)
+创建私有令牌文件，再启动：
+
+```text
+cargo run -p ferrum2-client --locked -- --config client.toml --dashboard-listen 127.0.0.1:9090 --dashboard-token-file dashboard.token --dashboard-details
+```
+
+使用打印的本机 URL，在页面输入令牌。省略 `--dashboard-details` 可隐藏连接地址；
+关闭页面不会停止代理。修改配置与重启使用现有运行时清理机制，不绕过 TUN 权限。
+
 ## 配置与文档
 
 `--check-config` 只解析和验证配置，不进行 DNS、HTTP、监听或 TUN 操作。

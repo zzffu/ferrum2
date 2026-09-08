@@ -23,6 +23,7 @@ pub(super) async fn relay_admitted<IO: AsyncRead + AsyncWrite + Unpin>(
     routing: &ClientRouting,
     first: AdmittedRequest,
 ) {
+    let observation = endpoint.observation.clone();
     let Ok(mut session_cancellation) = prepared.cancellation() else {
         return;
     };
@@ -33,6 +34,7 @@ pub(super) async fn relay_admitted<IO: AsyncRead + AsyncWrite + Unpin>(
         context,
         first,
         control,
+        observation.as_ref(),
     )
     .await
     {
@@ -46,6 +48,10 @@ pub(super) async fn relay_admitted<IO: AsyncRead + AsyncWrite + Unpin>(
         };
         tokio::select! {
             _ = cancellation.cancelled() => return,
+            () = crate::run::context::observation_cancelled(observation.as_ref()) => {
+                if let Some(observation) = &observation { observation.finish("cancelled"); }
+                return;
+            },
             changed = session_cancellation.changed() => {
                 let _ = changed;
                 return;
@@ -68,7 +74,7 @@ pub(super) async fn relay_admitted<IO: AsyncRead + AsyncWrite + Unpin>(
                 };
                 match admit_request(endpoint, prepared, context, routing, candidate) {
                     RequestDisposition::Admitted(admitted) => {
-                        if !send_admitted_request(prepared, cancellation, &mut session_cancellation, context, admitted, control).await { return; }
+                        if !send_admitted_request(prepared, cancellation, &mut session_cancellation, context, admitted, control, observation.as_ref()).await { return; }
                     }
                     RequestDisposition::Dropped => continue,
                     RequestDisposition::Terminated => return,
@@ -114,27 +120,36 @@ pub(super) async fn relay_admitted<IO: AsyncRead + AsyncWrite + Unpin>(
                 match send_with_control(
                         endpoint.send(target, payload),
                         control,
-                        cancellation.cancelled(),
+                        async {
+                            tokio::select! {
+                                () = cancellation.cancelled() => {},
+                                () = crate::run::context::observation_cancelled(observation.as_ref()) => {},
+                            }
+                        },
                         &mut session_cancellation,
                         send_deadline,
                     ).await {
                     Ok(_) => {}
                     Err(SocksSendError::ControlClosed) => return,
                     Err(SocksSendError::Io) => {
+                        if let Some(observation) = &observation { observation.finish("io"); }
                         record_udp_terminal(context, Stage::Relay, Reason::Send, Outcome::Failed);
                         return;
                     }
                     Err(SocksSendError::Cancelled) => {
+                        if let Some(observation) = &observation { observation.finish("cancelled"); }
                         record_udp_terminal(context, Stage::Relay, Reason::Cancelled, Outcome::Cancelled);
                         return;
                     }
                     Err(SocksSendError::Idle) => {
+                        if let Some(observation) = &observation { observation.finish("idle_timeout"); }
                         record_udp_terminal(context, Stage::Relay, Reason::Idle, Outcome::Timeout);
                         return;
                     }
                 }
                 context.metrics.udp_datagram(Role::Client, Direction::TargetToClient, Outcome::Accepted);
                 context.metrics.add_udp_bytes(Role::Client, Direction::TargetToClient, payload.len() as u64);
+                if let Some(observation) = &observation { observation.download(payload.len()); }
                 prepared.recycle_application_response(response);
             }
         }
@@ -147,6 +162,7 @@ async fn send_admitted_request<IO: AsyncRead + Unpin>(
     context: &ClientContext,
     admitted: AdmittedRequest,
     control: &mut IO,
+    observation: Option<&ferrum2_dashboard::Connection>,
 ) -> bool {
     let AdmittedRequest {
         wire_len,
@@ -169,7 +185,12 @@ async fn send_admitted_request<IO: AsyncRead + Unpin>(
                 send_with_control(
                     prepared.send_encoded_request(wire_len),
                     control,
-                    cancellation.cancelled(),
+                    async {
+                        tokio::select! {
+                            () = cancellation.cancelled() => {},
+                            () = crate::run::context::observation_cancelled(observation) => {},
+                        }
+                    },
                     session_cancellation,
                     send_deadline,
                 )
@@ -182,14 +203,23 @@ async fn send_admitted_request<IO: AsyncRead + Unpin>(
         Err(SocksSendError::ControlClosed) => return false,
         Ok(sent) if sent == wire_len => {}
         Ok(_) | Err(SocksSendError::Io) => {
+            if let Some(observation) = observation {
+                observation.finish("io");
+            }
             record_udp_terminal(context, Stage::Relay, Reason::Send, Outcome::Failed);
             return false;
         }
         Err(SocksSendError::Cancelled) => {
+            if let Some(observation) = observation {
+                observation.finish("cancelled");
+            }
             record_udp_terminal(context, Stage::Relay, Reason::Cancelled, Outcome::Cancelled);
             return false;
         }
         Err(SocksSendError::Idle) => {
+            if let Some(observation) = observation {
+                observation.finish("idle_timeout");
+            }
             record_udp_terminal(context, Stage::Relay, Reason::Idle, Outcome::Timeout);
             return false;
         }
@@ -200,6 +230,9 @@ async fn send_admitted_request<IO: AsyncRead + Unpin>(
     context
         .metrics
         .add_udp_bytes(Role::Client, Direction::ClientToTarget, payload_len as u64);
+    if let Some(observation) = observation {
+        observation.upload(payload_len);
+    }
     true
 }
 

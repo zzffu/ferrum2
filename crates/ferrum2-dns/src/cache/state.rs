@@ -30,6 +30,17 @@ pub(super) struct DnsCacheState {
 }
 
 impl DnsCacheState {
+    pub(super) fn clear(&mut self) -> usize {
+        let removed = self.index.len();
+        self.index.clear();
+        self.slots.clear();
+        self.free.clear();
+        self.deadlines.clear();
+        self.oldest = None;
+        self.newest = None;
+        removed
+    }
+
     pub(super) fn try_new(capacity: usize) -> Result<Self, DnsCacheError> {
         let mut index = HashMap::new();
         index

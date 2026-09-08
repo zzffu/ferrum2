@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::error::{ConfigError, ConfigField};
+use crate::error::{ConfigError, ConfigErrorKind, ConfigField};
 use crate::load::{parse_v2_toml, read_bounded_utf8};
 #[cfg(feature = "fuzzing")]
 use crate::model::{ValidatedClientConfig, ValidatedServerConfig};
@@ -26,7 +26,14 @@ pub fn prepare_client(path: impl AsRef<Path>) -> Result<PreparedClientV2, Config
     prepare_client_source(&source)
 }
 
-pub(super) fn prepare_client_source(source: &str) -> Result<PreparedClientV2, ConfigError> {
+/// Prepares bounded client schema-v2 source without reading resource files or performing I/O.
+pub fn prepare_client_source(source: &str) -> Result<PreparedClientV2, ConfigError> {
+    if source.len() > crate::MAX_CONFIG_BYTES {
+        return Err(ConfigError::new(
+            ConfigErrorKind::TooLarge,
+            ConfigField::Config,
+        ));
+    }
     let raw: RawClientRoot = parse_v2_toml(source)?;
     prepare_client_inner(raw)
 }

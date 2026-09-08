@@ -66,7 +66,7 @@ fn newline_json_uses_only_closed_fields_and_redacts_sentinels() {
     const TARGET: &str = "example.invalid:443";
 
     let capture = Captured::default();
-    let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
+    let subscriber = json_subscriber(capture.clone(), move || LogLevel::Trace);
     let dispatch = Dispatch::new(subscriber);
     tracing::dispatcher::with_default(&dispatch, || {
         tracing::event!(
@@ -167,7 +167,7 @@ fn newline_json_uses_only_closed_fields_and_redacts_sentinels() {
 #[test]
 fn minimal_udp_record_omits_optional_fields_and_honors_level_filtering() {
     let capture = Captured::default();
-    let subscriber = json_subscriber(capture.clone(), LogLevel::Info);
+    let subscriber = json_subscriber(capture.clone(), move || LogLevel::Info);
     let dispatch = Dispatch::new(subscriber);
     tracing::dispatcher::with_default(&dispatch, || {
         ferrum2_observability::emit(TraceRecord::new(
@@ -214,9 +214,43 @@ fn minimal_udp_record_omits_optional_fields_and_honors_level_filtering() {
 }
 
 #[test]
+fn changing_severity_does_not_cache_old_callsite_interest_or_admit_foreign_events() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let verbose = Arc::new(AtomicBool::new(false));
+    let source = Arc::clone(&verbose);
+    let capture = Captured::default();
+    let subscriber = json_subscriber(capture.clone(), move || {
+        if source.load(Ordering::Relaxed) {
+            LogLevel::Debug
+        } else {
+            LogLevel::Error
+        }
+    });
+    tracing::dispatcher::with_default(&Dispatch::new(subscriber), || {
+        for enabled in [false, true, false] {
+            verbose.store(enabled, Ordering::Relaxed);
+            ferrum2_observability::emit(TraceRecord::new(
+                LogLevel::Debug,
+                Event::Lifecycle,
+                Role::Client,
+                Stage::Relay,
+                Outcome::Completed,
+            ));
+            tracing::debug!("UNTRUSTED_DYNAMIC_FILTER_SENTINEL");
+        }
+    });
+    let text = capture.text();
+    assert_eq!(text.lines().count(), 1);
+    let event: Value = serde_json::from_str(text.trim()).unwrap();
+    assert_eq!(event["level"], "DEBUG");
+    assert_eq!(event["stage"], "relay");
+    assert!(!text.contains("UNTRUSTED_DYNAMIC_FILTER_SENTINEL"));
+}
+
+#[test]
 fn sniff_trace_has_one_exact_closed_tuple_and_no_identity_channel() {
     let capture = Captured::default();
-    let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
+    let subscriber = json_subscriber(capture.clone(), move || LogLevel::Trace);
     let dispatch = Dispatch::new(subscriber);
     tracing::dispatcher::with_default(&dispatch, || {
         Metrics::new().sniff(
@@ -254,7 +288,7 @@ fn sniff_trace_has_one_exact_closed_tuple_and_no_identity_channel() {
 #[test]
 fn tun_diagnostics_have_only_fixed_reason_and_family_fields() {
     let capture = Captured::default();
-    let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
+    let subscriber = json_subscriber(capture.clone(), move || LogLevel::Trace);
     let dispatch = Dispatch::new(subscriber);
     tracing::dispatcher::with_default(&dispatch, || {
         emit_tun_diagnostic(
@@ -312,7 +346,7 @@ fn network_diagnostics_are_closed_numeric_and_identity_free() {
     const ADAPTER: &str = "WINTUN_ADAPTER_TRACE_SENTINEL";
 
     let capture = Captured::default();
-    let subscriber = json_subscriber(capture.clone(), LogLevel::Trace);
+    let subscriber = json_subscriber(capture.clone(), move || LogLevel::Trace);
     let dispatch = Dispatch::new(subscriber);
     tracing::dispatcher::with_default(&dispatch, || {
         tracing::event!(
@@ -466,7 +500,7 @@ fn network_diagnostics_are_closed_numeric_and_identity_free() {
 fn socket_and_reset_diagnostics_require_debug_logging() {
     for level in [LogLevel::Info, LogLevel::Debug] {
         let capture = Captured::default();
-        let dispatch = Dispatch::new(json_subscriber(capture.clone(), level));
+        let dispatch = Dispatch::new(json_subscriber(capture.clone(), move || level));
         tracing::dispatcher::with_default(&dispatch, || {
             for (result, cache) in [
                 (
