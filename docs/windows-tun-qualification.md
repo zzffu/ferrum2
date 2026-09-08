@@ -5,13 +5,13 @@ an explicitly authorized Windows host. There are no suites, profiles, guest stag
 virtual-machine fallbacks.
 
 The qualification is intentionally fixed and bounded. It builds one exact candidate and exercises
-one real IPv4 Wintun adapter through eight required checks:
+one real single-stack Wintun adapter (`-AddressFamily IPv4|IPv6`, default `IPv4`) through eight required checks:
 
 1. one candidate build bound to the requested commit;
 2. Wintun creation and deletion, including normal-exit cleanup of both product-owned dynamic WFP
    sessions;
 3. sustained, checked system TCP and UDP/fragment traffic through the run-owned TUN;
-4. isolation to run-owned `/32` routes;
+4. isolation to run-owned `/32` IPv4 or `/128` IPv6 routes, with the owned TUN's connected prefix;
 5. simultaneous live readback of the persistent strict-route identity and the exact, process-owned
    TCP-ingress filter;
 6. a real network reset with active work that preserves strict-route filter IDs and sublayer weight,
@@ -19,9 +19,9 @@ one real IPv4 Wintun adapter through eight required checks:
 7. forced process-tree termination followed by ownership-safe recovery and dynamic-WFP absence;
 8. zero adapter, route, address, process, port, strict-route WFP, and TCP-ingress WFP residue.
 
-The live runner proves only this IPv4 scenario. It neither establishes an IPv6 address/route nor
-claims IPv6 host correctness; packet-level IPv6 coverage is not a substitute for separately
-authorized live IPv6 qualification.
+Each run proves only its selected family. IPv4 and IPv6 require separate successful runs; neither
+proves dual-stack correctness. All product, support, metrics, workload and listener endpoints use
+the selected family, and IPv6 sockets disable IPv4-mapped operation.
 
 A result is qualified only when every check passes, cleanup reports zero residue, and the complete
 supervised command finishes in less than 900 seconds.
@@ -35,8 +35,10 @@ verifies another request, then sends a final request with write-half shutdown an
 and remote EOF. Each paused TCP flow also completes four small UDP and four 4096-byte UDP requests.
 The support endpoint validates every request byte and returns a small acknowledgement binding its
 length and generation/flow identity; it does not send oversized UDP responses unsupported by TUN.
-The runner reads back the owned IPv4 interface's `NlMtu = 1420`, so those larger requests exercise
-the fragmented ingress path. No throughput threshold turns this into a performance test.
+The runner reads back the selected-family owned interface's `NlMtu = 1420`. IPv6 workload UDP
+sockets explicitly enable source fragmentation with `IPV6_MTU_DISCOVER = IP_PMTUDISC_DONT`;
+the live fragment/reassembly counters must independently prove fragmented ingress. Loopback
+self-checks do not establish IP fragmentation. No throughput threshold makes this a performance test.
 
 Before route reset, another TCP flow has an unsatisfied checked transfer and the workload has sent
 one UDP request without consuming its reply. The ready/release handshake binds this work to the
@@ -73,12 +75,18 @@ Real execution requires:
   `%LOCALAPPDATA%\Ferrum2`, or the current user's Downloads directory. Its required SHA-256 is
   `07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51`.
 
-The runner may create only one run-owned Wintun adapter at a time, a run-owned RFC 2544 loopback
-support address, run-owned RFC 2544 `/32` routes, bounded child processes and ports, the product
-process's dynamic WFP sessions, and narrowly scoped, ledger-owned Windows Firewall rules for the
-current test executable paths. Rules are installed before launching each new build so previous-path
-authorization is not relied upon; there is no automatic clicking of security dialogs.
-The ingress filter is a hard permit at `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4`, scoped by all of the
+The runner may create only one run-owned Wintun adapter at a time, one run-owned loopback support
+address, exact run-owned host routes, bounded child processes and ports, the product process's
+dynamic WFP sessions, and narrowly scoped, ledger-owned Windows Firewall rules for the current
+test executable paths. IPv4 retains RFC 2544 addresses and `/32` explicit routes, with a `/30`
+connected prefix on the owned TUN. IPv6 derives a run-unique ULA namespace from the run ID:
+the TUN uses `fd00:<run-id groups>::2/126`, its synthetic peer is `::1` in that prefix, and support
+and reset use distinct `/128` addresses in the same run's separate `:1::` namespace. Only the
+owned TUN may receive the `/126` connected route; all explicit IPv6 routes remain `/128`.
+Rules are installed before launching each new build so previous-path authorization is not relied
+upon; there is no automatic clicking of security dialogs.
+The ingress filter is a hard permit at the selected family's `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4`
+or `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6`, scoped by all of the
 candidate application ID, TCP protocol, run-owned TUN LUID, exact listener address and ephemeral
 port, and exact synthetic peer. The product's WFP session and sublayer remain process-owned and
 dynamic. Runner-owned firewall rules are separate: they use Windows PersistentStore and must be
@@ -86,7 +94,7 @@ deleted by normal cleanup or recovery, not mistaken for kernel-dynamic rules.
 
 The client listener uses a closed two-phase rule because Windows cannot resolve an interface alias
 before the product creates that TUN. Before launch, the rule is limited to the exact executable,
-run-owned local IPv4 address, synthetic peer and observed dynamic TCP port range, without an
+run-owned local address, synthetic peer and observed dynamic TCP port range, without an
 interface filter. After adapter identity and MTU readback, the same rule is narrowed to that exact
 TUN alias before test traffic. The planned alias and transition are written before each mutation;
 recovery accepts only the two recorded transition states, never an arbitrary foreign interface.
@@ -105,13 +113,15 @@ It must not change a default route, system DNS, physical adapter, WLAN state, si
 resource. A catastrophic interruption can leave run-owned rules until recovery; the durable ledger
 retains exact rule and executable identities, and ambiguous ownership never authorizes deletion.
 
-The reset stimulus records two successive `/32` rows for an otherwise unused RFC 2544 address:
-first through an existing hardware interface's current gateway, then it removes that exact owned
-row before adding a lower-metric on-link row on the same interface. Existing unrelated routes and
-interface settings are not modified. A selector keeps
-the probe endpoint in the underlay snapshot while retaining the normal proxy as its selected exit;
-no workload traffic uses the probe endpoint. An unrelated loopback route notification alone does
-not constitute the required semantic reset.
+IPv4 preserves its reset stimulus: two successive `/32` rows for an otherwise unused RFC 2544
+address, first through an existing hardware interface's current gateway and then on-link at a
+lower metric after removing the exact first owned row. IPv6 uses an unused run-owned ULA `/128`
+on the existing loopback interface, replacing an on-link metric-4094 row with metric 4093.
+IPv6 needs no physical IPv6 gateway. Neither path modifies existing routes or interface settings.
+A selector keeps the unused endpoint in the underlay snapshot while retaining the normal proxy
+as selected exit; no workload traffic uses the probe. Both paths must observe an actual session
+generation change, old-TCP retirement and a replaced ingress epoch. A route notification alone
+does not constitute the required semantic reset.
 
 The evidence directory must be an absolute or relative path whose final directory does not already
 exist. Keep it outside the repository. The persistent recovery ledger is under
@@ -134,6 +144,16 @@ to another lifetime and is never removed. Missing birth information or a changed
 the same lifetime still fails closed. ISO strings and PowerShell's materialized UTC DateTime values
 are normalized to ticks before comparison.
 
+### Standing authorization on the owner's development host
+
+On 2026-09-08 the repository owner authorized subsequent IPv4 and IPv6 single-stack qualification
+runs on this Windows development host without repeated interactive confirmation, including the
+test TUN's IPv6 `/126` connected prefix. This authorization is limited to the ledger-owned,
+bounded resources above and requires independently verified zero residue. It does not authorize
+other hosts, default routes, physical adapter configuration, system DNS or unrelated firewall/WFP
+changes. The runner still requires elevation and the literal `-AcknowledgeHostNetworkMutation`
+switch on every real run; automation supplies that switch under this recorded authorization.
+
 ## Inspect the fixed plan
 
 `-PlanOnly` is unprivileged and nonmutating:
@@ -143,11 +163,13 @@ $candidate = (git rev-parse HEAD).Trim()
 pwsh -NoProfile -File tests/platform/run_windows_tun_qualification_host.ps1 `
   -PlanOnly `
   -CandidateSha $candidate
+pwsh -NoProfile -File tests/platform/run_windows_tun_qualification_host.ps1 `
+  -PlanOnly -CandidateSha $candidate -AddressFamily IPv6
 ```
 
 The plan must report `maximum_elapsed_seconds = 900`, `worker_timeout_seconds = 840`,
-`build_timeout_seconds = 600`, the eight checks above,
-`live_address_family = "IPv4 only (RFC2544 198.18.0.0/15)"`, the full exact TCP-ingress scope,
+`build_timeout_seconds = 600`, the eight checks above, selected `address_family`,
+`tun_connected_prefix_length` of 30 or 126, the full exact TCP-ingress scope,
 dynamic-only WFP lifetime, and `execution = explicit-authorized-windows-host`.
 
 ## Execute qualification
@@ -161,6 +183,7 @@ $evidence = Join-Path $env:TEMP (
 )
 pwsh -NoProfile -File tests/platform/run_windows_tun_qualification_host.ps1 `
   -CandidateSha $candidate `
+  -AddressFamily IPv6 `
   -EvidenceDirectory $evidence `
   -AcknowledgeHostNetworkMutation
 ```
@@ -169,7 +192,8 @@ The outer supervisor terminates the worker process group after 840 seconds, rese
 bounded recovery, and rejects any successful-looking result at or beyond 900 seconds. The candidate
 build itself is capped at 600 seconds. The fixed check set has no operator-adjustable repeat count.
 The acknowledgement authorizes the narrowly enumerated temporary host mutations above; it does not
-authorize retaining rules after cleanup, changing unrelated firewall policy or expanding the run beyond IPv4.
+authorize retaining rules after cleanup, changing unrelated firewall policy or enabling another family.
+Omit `-AddressFamily IPv6` (or pass `IPv4`) for the retained IPv4 qualification. Run families serially.
 
 After an interrupted run, inspect and recover run-owned residue with:
 
@@ -177,14 +201,16 @@ After an interrupted run, inspect and recover run-owned residue with:
 pwsh -NoProfile -File tests/platform/run_windows_tun_qualification_host.ps1 -RecoveryOnly
 ```
 
-`-RecoveryOnly` refuses ambiguous planned resources. Removing live, ledger-owned network resources
-still requires an elevated shell.
+`-RecoveryOnly` derives the family from the durable ledger and verified resource identities; it
+accepts no family override and refuses ambiguous ownership. Removing live, ledger-owned network
+resources still requires an elevated shell.
 
 ## Evidence and verdict
 
 `tools/powershell/Ferrum2.Qualification.Host/bundle.json` is the closed qualification source identity.
-Every listed canonical path, byte length, and SHA-256 must match before planning or mutation. The
-qualification writes:
+Every listed canonical path, byte length, and SHA-256 must match before planning or mutation.
+Plan, build, runtime, worker, cleanup, final verdict and native workload/reset handshakes carry
+`address_family`; mismatched families fail closed. The qualification writes:
 
 - `plan.json`: candidate, time limits, fixed checks, exact ingress scope, and safety contract;
 - `build.json`: exact candidate and reviewed Wintun identities;

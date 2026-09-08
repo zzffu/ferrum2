@@ -1,25 +1,25 @@
 Set-StrictMode -Version Latest
 $script:QualificationSessionKey = '{8ea35b4e-6629-4e26-9776-95c5bf9c6b01}'
 $script:QualificationSublayerKey = '{ddbc2fa2-d52f-4a79-8a63-8446c308cf02}'
-$script:QualificationFilterKeys = @(
-    '{a158b31d-7a59-40bc-9339-38b5e8701001}',
-    '{a158b31d-7a59-40bc-9339-38b5e8701002}',
-    '{a158b31d-7a59-40bc-9339-38b5e8701003}',
-    '{a158b31d-7a59-40bc-9339-38b5e8701004}',
-    '{a158b31d-7a59-40bc-9339-38b5e8701006}'
-)
-$script:QualificationFilterNames = @(
-    'Ferrum2 app permit IPv4',
-    'Ferrum2 app permit IPv6',
-    'Ferrum2 TUN permit IPv4',
-    'Ferrum2 TUN permit IPv6',
-    'Ferrum2 family block IPv6'
-)
+$script:QualificationFilterKeys = @(1..10 | ForEach-Object {
+    '{a158b31d-7a59-40bc-9339-38b5e870100' + $_.ToString('x') + '}'
+})
+
+function Get-Ferrum2QualificationStrictFilterIdentities {
+    param([ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4')
+    $names = @('Ferrum2 app permit IPv4', 'Ferrum2 app permit IPv6',
+        'Ferrum2 TUN permit IPv4', 'Ferrum2 TUN permit IPv6')
+    for ($index = 0; $index -lt $names.Count; $index++) {
+        [pscustomobject]@{ name = $names[$index]; key = $script:QualificationFilterKeys[$index] }
+    }
+    $blockIndex = if ($AddressFamily -ceq 'IPv6') { 4 } else { 5 }
+    $absentFamily = if ($AddressFamily -ceq 'IPv6') { 'IPv4' } else { 'IPv6' }
+    [pscustomobject]@{ name = "Ferrum2 family block $absentFamily"; key = $script:QualificationFilterKeys[$blockIndex] }
+}
 $script:QualificationTcpIngressSessionKey = '{41b9d0c7-65ac-49a7-8d97-bf8ad5abbe01}'
 $script:QualificationTcpIngressSublayerKey = '{5e741969-f578-43bd-a1e2-a420c49a7f01}'
 $script:QualificationTcpIngressSessionName = 'Ferrum2 TCP ingress dynamic session'
 $script:QualificationTcpIngressSublayerName = 'Ferrum2 TCP ingress'
-$script:QualificationTcpIngressFilterNameV4 = 'Ferrum2 TCP ingress IPv4'
 function ConvertFrom-Ferrum2QualificationWfpStateXml {
     param([Parameter(Mandatory = $true)][string]$Text)
     $bom = [string][char]0xfeff
@@ -111,6 +111,19 @@ function Get-Ferrum2QualificationWfpTypedValue {
     if ($null -eq $typeNode -or [string]::IsNullOrWhiteSpace($typeNode.InnerText)) {
         throw "host qualification $Identity WFP value type is unavailable"
     }
+    if ($typeNode.InnerText.Trim() -ceq 'FWP_BYTE_ARRAY16_TYPE') {
+        $children = @($Node.SelectNodes("./*"))
+        $arrays = @($Node.SelectNodes("./*[local-name()='byteArray16']"))
+        if ($children.Count -ne 2 -or $arrays.Count -ne 1 -or
+            @($arrays[0].SelectNodes("./*")).Count -ne 0) {
+            throw "host qualification $Identity WFP IPv6 byte array form is unknown"
+        }
+        $hex = $arrays[0].InnerText.Trim() -replace '\s', ''
+        if ($hex -cnotmatch '\A[0-9a-fA-F]{32}\z') {
+            throw "host qualification $Identity WFP IPv6 byte array must contain exactly sixteen bytes"
+        }
+        return [pscustomobject][ordered]@{ type = 'FWP_BYTE_ARRAY16_TYPE'; value = $hex.ToLowerInvariant() }
+    }
     $valueNodes = if ($typeNode.InnerText.Trim() -ceq 'FWP_BYTE_BLOB_TYPE') {
         @($Node.SelectNodes(".//*[local-name()='byteBlob']/*[local-name()='data']"))
     } else {
@@ -176,6 +189,23 @@ function Test-Ferrum2QualificationWfpIpv4Value {
     return $Actual -ceq $decimal -or $Actual -ceq $hex
 }
 
+function Test-Ferrum2QualificationWfpAddressValue {
+    param(
+        [string]$Actual, [string]$Expected,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily
+    )
+    $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily
+    $address = $null
+    if (-not [Net.IPAddress]::TryParse($Expected, [ref]$address) -or
+        $address.AddressFamily -ne $profile.socket_family -or
+        $address.ToString() -cne $Expected -or $address.IsIPv4MappedToIPv6) { return $false }
+    if ($AddressFamily -ceq 'IPv4') {
+        return Test-Ferrum2QualificationWfpIpv4Value -Actual $Actual -Expected $Expected
+    }
+    return $Actual -cmatch '\A[0-9a-fA-F]{32}\z' -and
+        $Actual.Equals([Convert]::ToHexString($address.GetAddressBytes()), [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Test-Ferrum2QualificationWfpAppId {
     param(
         [Parameter(Mandatory = $true)][string]$Actual,
@@ -199,23 +229,26 @@ function Test-Ferrum2QualificationWfpAppId {
 function Get-Ferrum2QualificationStrictRouteWfpWitness {
     param(
         [Parameter(Mandatory = $true)][Xml.XmlDocument]$Document,
-        [Parameter(Mandatory = $true)][object]$Runtime
+        [Parameter(Mandatory = $true)][object]$Runtime,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4'
     )
     $sublayerKey = $script:QualificationSublayerKey.ToLowerInvariant()
     $sessionKey = $script:QualificationSessionKey.ToLowerInvariant()
+    $identities = @(Get-Ferrum2QualificationStrictFilterIdentities -AddressFamily $AddressFamily)
     $filters = @($Document.SelectNodes("//*[local-name()='item']") | Where-Object {
         $key = $_.SelectSingleNode("./*[local-name()='subLayerKey']")
         $id = $_.SelectSingleNode("./*[local-name()='filterId']")
         $null -ne $key -and $null -ne $id -and
             $key.InnerText.ToLowerInvariant() -ceq $sublayerKey
     })
-    if ($filters.Count -ne $script:QualificationFilterKeys.Count) {
+    if ($filters.Count -ne $identities.Count) {
         throw 'host qualification strict-route WFP filter count is not exact'
     }
     $filterRows = [Collections.Generic.List[object]]::new()
     $appId = $null
     $tunLuid = $null
-    foreach ($expectedName in $script:QualificationFilterNames) {
+    foreach ($identity in $identities) {
+        $expectedName = $identity.name
         $matches = @($filters | Where-Object {
             $name = $_.SelectSingleNode("./*[local-name()='displayData']/*[local-name()='name']")
             $null -ne $name -and $name.InnerText -ceq $expectedName
@@ -227,7 +260,7 @@ function Get-Ferrum2QualificationStrictRouteWfpWitness {
         $key = $filter.SelectSingleNode("./*[local-name()='filterKey']")
         $id = $filter.SelectSingleNode("./*[local-name()='filterId']")
         if ($null -eq $key -or
-            $key.InnerText.ToLowerInvariant() -cnotin $script:QualificationFilterKeys -or
+            $key.InnerText.ToLowerInvariant() -cne $identity.key -or
             $null -eq $id -or [string]$id.InnerText -cnotmatch '^[1-9][0-9]*$') {
             throw "host qualification WFP filter readback is invalid: $expectedName"
         }
@@ -283,6 +316,7 @@ function Get-Ferrum2QualificationStrictRouteWfpWitness {
         throw 'host qualification strict-route WFP owner process is not exact'
     }
     return [pscustomobject][ordered]@{
+        address_family = $AddressFamily
         session_key = $script:QualificationSessionKey.Trim('{}')
         sublayer_key = $script:QualificationSublayerKey.Trim('{}')
         sublayer_weight = [string]$weightNode.InnerText
@@ -311,7 +345,7 @@ function Get-Ferrum2QualificationTcpIngressListener {
         throw 'host qualification TCP ingress listener address scope is not exact'
     }
     return [pscustomobject][ordered]@{
-        address_family = 'IPv4'
+        address_family = [string]$Network.address_family
         local_address = [string]$exact[0].LocalAddress
         local_port = [uint16]$exact[0].LocalPort
         process_id = [uint32]$Runtime.client.pid
@@ -328,6 +362,14 @@ function Get-Ferrum2QualificationTcpIngressWfpWitness {
         [Parameter(Mandatory = $true)][object]$Listener,
         [Parameter(Mandatory = $true)][string]$ExecutablePath
     )
+    $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $Network.address_family
+    $filterName = "Ferrum2 TCP ingress $($profile.address_family)"
+    if ($Listener.address_family -cne $profile.address_family -or
+        $StrictRoute.address_family -cne $profile.address_family -or
+        $Listener.local_address -cne $Network.tun_address -or
+        [int]$Network.tun_prefix_length -ne $profile.tun_prefix_length) {
+        throw 'host qualification TCP ingress selected family or listener identity differs'
+    }
     $sessionKey = $script:QualificationTcpIngressSessionKey.ToLowerInvariant()
     $sublayerKey = $script:QualificationTcpIngressSublayerKey.ToLowerInvariant()
     $sessions = @($Document.SelectNodes("//*[local-name()='item']") | Where-Object {
@@ -371,7 +413,7 @@ function Get-Ferrum2QualificationTcpIngressWfpWitness {
             $key.InnerText.ToLowerInvariant() -ceq $sublayerKey
     })
     if ($filters.Count -ne 1) {
-        throw 'host qualification TCP ingress WFP filter count is not exact for IPv4'
+        throw 'host qualification TCP ingress WFP filter count is not exact for selected family'
     }
     $filter = $filters[0]
     $name = $filter.SelectSingleNode("./*[local-name()='displayData']/*[local-name()='name']")
@@ -393,11 +435,11 @@ function Get-Ferrum2QualificationTcpIngressWfpWitness {
     $rawContext = $filter.SelectSingleNode("./*[local-name()='rawContext']")
     $filterFlags = @(Get-Ferrum2QualificationWfpFlags -Item $filter -Identity 'TCP ingress filter')
     $allowedFlags = @('FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT', 'FWPM_FILTER_FLAG_INDEXED')
-    if ($null -eq $name -or $name.InnerText -cne $script:QualificationTcpIngressFilterNameV4 -or
+    if ($null -eq $name -or $name.InnerText -cne $filterName -or
         $null -eq $key -or $null -eq $id -or
         [string]$id.InnerText -cnotmatch '^[1-9][0-9]*$' -or
         $null -eq $layer -or
-        $layer.InnerText.Trim() -cne 'FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4' -or
+        $layer.InnerText.Trim() -cne $profile.wfp_layer -or
         $null -eq $action -or $action.InnerText.Trim() -cne 'FWP_ACTION_PERMIT' -or
         $null -eq $actionFilterType -or
         @($actionFilterType.SelectNodes("./*")).Count -ne 0 -or
@@ -480,12 +522,7 @@ function Get-Ferrum2QualificationTcpIngressWfpWitness {
         -FieldKey 'FWPM_CONDITION_IP_LOCAL_PORT'
     $remoteAddress = Get-Ferrum2QualificationWfpCondition -Filter $filter `
         -FieldKey 'FWPM_CONDITION_IP_REMOTE_ADDRESS'
-    $octets = @($Network.tun_address.Split('.'))
-    if ([int]$Network.tun_prefix_length -ne 30 -or $octets.Count -ne 4 -or
-        [int]$octets[3] -le 0) {
-        throw 'host qualification IPv4 TCP ingress peer derivation is invalid'
-    }
-    $peerAddress = "$($octets[0]).$($octets[1]).$($octets[2]).$([int]$octets[3] - 1)"
+    $peerAddress = [string]$Network.peer_address
     if ($app.type -cne 'FWP_BYTE_BLOB_TYPE' -or
         $app.value -cne $StrictRoute.app_id.value -or
         -not (Test-Ferrum2QualificationWfpAppId `
@@ -493,17 +530,18 @@ function Get-Ferrum2QualificationTcpIngressWfpWitness {
         $luid.type -cne 'FWP_UINT64' -or
         $luid.value -cne $StrictRoute.tun_luid.value -or
         $protocol.type -cne 'FWP_UINT8' -or $protocol.value -cne '6' -or
-        $localAddress.type -cne 'FWP_UINT32' -or
-        -not (Test-Ferrum2QualificationWfpIpv4Value `
+        $localAddress.type -cne $profile.wfp_address_type -or
+        -not (Test-Ferrum2QualificationWfpAddressValue -AddressFamily $profile.address_family `
             -Actual $localAddress.value -Expected $Listener.local_address) -or
         $localPort.type -cne 'FWP_UINT16' -or
         [uint16]$localPort.value -ne [uint16]$Listener.local_port -or
-        $remoteAddress.type -cne 'FWP_UINT32' -or
-        -not (Test-Ferrum2QualificationWfpIpv4Value `
+        $remoteAddress.type -cne $profile.wfp_address_type -or
+        -not (Test-Ferrum2QualificationWfpAddressValue -AddressFamily $profile.address_family `
             -Actual $remoteAddress.value -Expected $peerAddress)) {
         throw 'host qualification TCP ingress WFP condition identity changed'
     }
     return [pscustomobject][ordered]@{
+        address_family = $profile.address_family
         session_key = $script:QualificationTcpIngressSessionKey.Trim('{}')
         session_flags = $sessionFlags
         sublayer_key = $script:QualificationTcpIngressSublayerKey.Trim('{}')
@@ -512,10 +550,10 @@ function Get-Ferrum2QualificationTcpIngressWfpWitness {
         listener = $Listener
         peer_address = $peerAddress
         filter = [pscustomobject][ordered]@{
-            name = $script:QualificationTcpIngressFilterNameV4
+            name = $filterName
             key = $filterGuid
             id = [string]$id.InnerText
-            layer = 'FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4'
+            layer = $profile.wfp_layer
             action = 'FWP_ACTION_PERMIT'
             flags = $filterFlags
             requested_weight = $weight
@@ -540,7 +578,7 @@ function Get-Ferrum2QualificationLiveWfpWitness {
     )
     [xml]$document = Invoke-Ferrum2QualificationWfpState -Context $Context -Label $Label
     $strictRoute = Get-Ferrum2QualificationStrictRouteWfpWitness `
-        -Document $document -Runtime $Runtime
+        -Document $document -Runtime $Runtime -AddressFamily $Network.address_family
     $interfaceLuid = [Ferrum2QualificationRouteNotification]::InterfaceLuid(
         [uint32]$Runtime.adapter.ifIndex
     )
@@ -554,6 +592,7 @@ function Get-Ferrum2QualificationLiveWfpWitness {
         -Document $document -Runtime $Runtime -Network $Network `
         -StrictRoute $strictRoute -Listener $listener -ExecutablePath $ExecutablePath
     return [pscustomobject][ordered]@{
+        address_family = [string]$Network.address_family
         strict_route = $strictRoute
         tcp_ingress = $tcpIngress
     }
@@ -564,7 +603,8 @@ function Compare-Ferrum2QualificationTcpIngressEpoch {
         [Parameter(Mandatory = $true)][object]$Before,
         [Parameter(Mandatory = $true)][object]$After
     )
-    if ($Before.listener.local_address -cne $After.listener.local_address -or
+    if ($Before.address_family -cne $After.address_family -or
+        $Before.listener.local_address -cne $After.listener.local_address -or
         $Before.peer_address -cne $After.peer_address -or
         $Before.process_id -ne $After.process_id -or
         $Before.listener.local_port -eq $After.listener.local_port -or
@@ -573,6 +613,7 @@ function Compare-Ferrum2QualificationTcpIngressEpoch {
         throw 'host qualification TCP ingress listener epoch was not replaced exactly'
     }
     return [pscustomobject][ordered]@{
+        address_family = [string]$Before.address_family
         old_filter_key = $Before.filter.key
         old_filter_id = $Before.filter.id
         old_local_port = [uint16]$Before.listener.local_port
@@ -586,7 +627,8 @@ function Compare-Ferrum2QualificationTcpIngressEpoch {
 function Assert-Ferrum2QualificationWfpDocumentAbsent {
     param(
         [Parameter(Mandatory = $true)][Xml.XmlDocument]$Document,
-        [Parameter(Mandatory = $true)][string]$Label
+        [Parameter(Mandatory = $true)][string]$Label,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4'
     )
     $keys = @(
         $script:QualificationSessionKey,
@@ -606,6 +648,7 @@ function Assert-Ferrum2QualificationWfpDocumentAbsent {
         throw 'host qualification product-owned dynamic WFP objects remain after process exit'
     }
     return [pscustomobject][ordered]@{
+        address_family = $AddressFamily
         label = $Label
         strict_route_objects = 0
         tcp_ingress_objects = 0
@@ -618,5 +661,5 @@ function Assert-Ferrum2QualificationWfpAbsent {
         [Parameter(Mandatory = $true)][string]$Label
     )
     [xml]$document = Invoke-Ferrum2QualificationWfpState -Context $Context -Label $Label
-    return Assert-Ferrum2QualificationWfpDocumentAbsent -Document $document -Label $Label
+    return Assert-Ferrum2QualificationWfpDocumentAbsent -Document $document -Label $Label -AddressFamily $Context.address_family
 }

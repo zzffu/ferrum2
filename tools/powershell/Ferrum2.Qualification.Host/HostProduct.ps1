@@ -9,6 +9,8 @@ function Start-Ferrum2HostProduct {
         [Parameter(Mandatory = $true)][int]$Sequence,
         [AllowNull()][Net.IPEndPoint]$ResetProbeEndpoint = $null
     )
+    $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $Context.address_family
+    if ($Network.address_family -cne $profile.address_family) { throw 'product address family mismatch' }
     $adapterName = "$($Network.adapter_name_prefix)-$('{0:D3}' -f $Sequence)"
     Set-Ferrum2OwnedAdapterPlan -Context $Context -AdapterName $adapterName
     $ports = New-Ferrum2ProductPorts -Context $Context -Sequence $Sequence
@@ -24,22 +26,20 @@ function Start-Ferrum2HostProduct {
                 Sort-Object -Unique).Count -ne 3) {
             throw "product ports are not distinct"
         }
-        Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address "127.0.0.1" `
+        Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address $profile.loopback_address `
             -Port $serverPort -Purpose "server-tcp"
-        Add-Ferrum2OwnedPort -Context $Context -Protocol "udp" -Address "127.0.0.1" `
+        Add-Ferrum2OwnedPort -Context $Context -Protocol "udp" -Address $profile.loopback_address `
             -Port $serverPort -Purpose "server-udp"
-        Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address "127.0.0.1" `
+        Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address $profile.loopback_address `
             -Port $serverMetrics -Purpose "server-metrics"
-        Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address "127.0.0.1" `
+        Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address $profile.loopback_address `
             -Port $clientMetrics -Purpose "client-metrics"
         $tcpRanges = @($ports.dynamic_ranges | Where-Object { $_.protocol -ceq 'tcp' })
         if ($tcpRanges.Count -ne 1) { throw 'qualification TCP dynamic port identity is unavailable' }
         $tcpRange = "$($tcpRanges[0].start_port)-$($tcpRanges[0].end_port)"
-        $octets = $Network.tun_address.Split('.')
-        $peerAddress = "$($octets[0]).$($octets[1]).$($octets[2]).$([int]$octets[3] - 1)"
         $ingressFirewall = Add-Ferrum2OwnedFirewallRule -Context $Context -Executable $Member.client `
             -Protocol TCP -LocalAddress $Network.tun_address -LocalPort $tcpRange `
-            -RemoteAddress $peerAddress -InterfaceAlias $adapterName `
+            -RemoteAddress $Network.peer_address -InterfaceAlias $adapterName `
             -Purpose "client-ingress-$Sequence" -DeferInterface
         foreach ($entry in @(
             @{ executable = $Member.client; port = $clientMetrics; protocol = 'TCP'; purpose = 'client-metrics' },
@@ -48,8 +48,8 @@ function Start-Ferrum2HostProduct {
             @{ executable = $Member.server; port = $serverMetrics; protocol = 'TCP'; purpose = 'server-metrics' }
         )) {
             [void](Add-Ferrum2OwnedFirewallRule -Context $Context -Executable $entry.executable `
-                -Protocol $entry.protocol -LocalAddress '127.0.0.1' -LocalPort ([string]$entry.port) `
-                -RemoteAddress '127.0.0.1' -InterfaceAlias $Loopback.interface_alias `
+                -Protocol $entry.protocol -LocalAddress $profile.loopback_address -LocalPort ([string]$entry.port) `
+                -RemoteAddress $profile.loopback_address -InterfaceAlias $Loopback.interface_alias `
                 -Purpose "$($entry.purpose)-$Sequence")
         }
         $configOptions = @{}
@@ -67,24 +67,27 @@ function Start-Ferrum2HostProduct {
             -Arguments "--config `"$($configs.client)`"" `
             -WorkingDirectory (Split-Path -Parent $Member.client) `
             -LogPrefix "qualification-$Sequence-client" -Purpose "qualification-$Sequence-client"
-        [void](Wait-Ferrum2Metric -Process $client -Port $clientMetrics -Name "ferrum2_tun_session_active" -Minimum 1)
+        [void](Wait-Ferrum2Metric -Process $client -Port $clientMetrics -Name "ferrum2_tun_session_active" -Minimum 1 -AddressFamily $profile.address_family)
         $adapter = Complete-Ferrum2OwnedAdapterIdentity -Context $Context -AdapterName $adapterName
-        $interfaces = @(Get-NetIPInterface -AddressFamily IPv4 `
+        $interfaces = @(Get-NetIPInterface -AddressFamily $profile.address_family `
             -InterfaceIndex ([uint32]$adapter.ifIndex) -ErrorAction Stop)
         if ($interfaces.Count -ne 1 -or [uint32]$interfaces[0].NlMtu -ne 1420) {
-            throw 'qualification owned IPv4 TUN MTU must read back as 1420 bytes'
+            throw "qualification owned $($profile.address_family) TUN MTU must read back as 1420 bytes"
         }
         Complete-Ferrum2FirewallInterface -Context $Context -Row $ingressFirewall
-        $route = @(Get-NetRoute -AddressFamily IPv4 `
-            -DestinationPrefix "$($Network.support_address)/32" `
+        $route = @(Get-NetRoute -AddressFamily $profile.address_family `
+            -DestinationPrefix "$($Network.support_address)/$($profile.host_prefix_length)" `
             -InterfaceIndex ([uint32]$adapter.ifIndex) -ErrorAction Stop)
-        if ($route.Count -ne 1 -or [string]$route[0].NextHop -cne "0.0.0.0") {
+        if ($route.Count -ne 1 -or [string]$route[0].NextHop -cne $profile.unspecified_address) {
             throw "product-owned qualification route identity is invalid"
         }
         $routeRow = [pscustomobject][ordered]@{
-            destination_prefix = "$($Network.support_address)/32"
+            address_family = $profile.address_family
+            run_id = $Context.run_id
+            interface_guid = ([guid]$adapter.InterfaceGuid).ToString('D').ToLowerInvariant()
+            destination_prefix = "$($Network.support_address)/$($profile.host_prefix_length)"
             interface_index = [uint32]$adapter.ifIndex
-            next_hop = "0.0.0.0"
+            next_hop = $profile.unspecified_address
             route_metric = [uint16]$route[0].RouteMetric
             policy_store = "ActiveStore"
             kind = "product"
@@ -100,11 +103,12 @@ function Start-Ferrum2HostProduct {
             -Arguments "--config `"$($configs.server)`"" `
             -WorkingDirectory (Split-Path -Parent $Member.server) `
             -LogPrefix "qualification-$Sequence-server" -Purpose "qualification-$Sequence-server"
-        [void](Wait-Ferrum2Metric -Process $server -Port $serverMetrics -Name "ferrum2_network_generation" -Minimum 1)
+        [void](Wait-Ferrum2Metric -Process $server -Port $serverMetrics -Name "ferrum2_network_generation" -Minimum 1 -AddressFamily $profile.address_family)
         $proofs = Get-Ferrum2HostRouteProofs -Network $Network -Loopback $Loopback `
             -TunInterfaceIndex ([uint32]$adapter.ifIndex)
         return [pscustomobject]@{
-                adapter = $adapter
+            address_family = $profile.address_family
+            adapter = $adapter
             adapter_name = $adapterName
             sequence = $Sequence
             mtu_bytes = [uint32]$interfaces[0].NlMtu

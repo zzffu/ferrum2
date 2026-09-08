@@ -8,6 +8,8 @@ function Read-Ferrum2HostQualificationSourceBundle {
     $expectedPaths = @(
         "tests/platform/invoke_windows_tun_qualification_host_worker.ps1"
         "tests/platform/run_windows_tun_qualification_host.ps1"
+        "tools/powershell/Ferrum2.Qualification.Host/AddressFamily.ps1"
+        "tools/powershell/Ferrum2.Qualification.Host/HostNetwork.ps1"
         "tools/powershell/Ferrum2.Qualification.Host/HostExecution.ps1"
         "tools/powershell/Ferrum2.Qualification.Host/HostProduct.ps1"
         "tools/powershell/Ferrum2.Qualification.Host/HostOwnership.ps1"

@@ -20,7 +20,14 @@ function Assert-Ferrum2QualificationInteger {
 }
 
 function Assert-Ferrum2QualificationResetReady {
-    param([Parameter(Mandatory = $true)][object]$Witness)
+    param(
+        [Parameter(Mandatory = $true)][object]$Witness,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4'
+    )
+    $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily
+    if ($Witness.address_family -cne $AddressFamily) {
+        throw 'qualification reset-ready address family differs'
+    }
     if ($Witness.schema_version -cne 1 -or
         $Witness.kind -cne 'ferrum2.windows-tun-reset-ready' -or
         $Witness.generation -cne 1 -or $Witness.tcp_pending -isnot [bool] -or
@@ -33,13 +40,23 @@ function Assert-Ferrum2QualificationResetReady {
     Assert-Ferrum2QualificationInteger $Witness.udp_pending_datagrams 1 1
     $endpoint = $null
     if (-not [Net.IPEndPoint]::TryParse([string]$Witness.udp_local_endpoint, [ref]$endpoint) -or
-        $endpoint.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or $endpoint.Port -eq 0) {
+        $endpoint.AddressFamily -ne $profile.socket_family -or
+        $endpoint.Address.IsIPv4MappedToIPv6 -or
+        $endpoint.Address.Equals([Net.IPAddress]::Any) -or
+        $endpoint.Address.Equals([Net.IPAddress]::IPv6Any) -or $endpoint.Port -eq 0) {
         throw 'qualification reset UDP socket identity is invalid'
     }
 }
 
 function Assert-Ferrum2QualificationWorkloadWitness {
-    param([Parameter(Mandatory = $true)][object]$Witness)
+    param(
+        [Parameter(Mandatory = $true)][object]$Witness,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4'
+    )
+    $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily
+    if ($Witness.address_family -cne $AddressFamily) {
+        throw 'qualification workload address family differs'
+    }
     if ($Witness.schema_version -cne 1 -or
         $Witness.kind -cne 'ferrum2.windows-tun-qualification' -or
         $Witness.status -cne 'PASS' -or @($Witness.generations).Count -ne 2) {
@@ -65,9 +82,12 @@ function Assert-Ferrum2QualificationWorkloadWitness {
             }
             $endpoint = $null
             if (-not [Net.IPEndPoint]::TryParse([string]$flow.local_endpoint, [ref]$endpoint) -or
-                $endpoint.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
-                $endpoint.Port -eq 0 -or -not $endpoints.Add([string]$flow.local_endpoint)) {
-                throw 'qualification workload requires distinct real IPv4 connections'
+                $endpoint.AddressFamily -ne $profile.socket_family -or
+                $endpoint.Address.IsIPv4MappedToIPv6 -or
+                $endpoint.Address.Equals([Net.IPAddress]::Any) -or
+                $endpoint.Address.Equals([Net.IPAddress]::IPv6Any) -or
+                $endpoint.Port -eq 0 -or -not $endpoints.Add($endpoint.ToString())) {
+                throw 'qualification workload requires distinct real selected-family connections'
             }
             Assert-Ferrum2QualificationInteger $flow.bulk_bytes 8388608 8388608
             Assert-Ferrum2QualificationInteger $flow.paused_bytes_sent 1 8388607
@@ -102,7 +122,10 @@ function Assert-Ferrum2QualificationWorkloadWitness {
     Assert-Ferrum2QualificationInteger $reset.old_udp_buffered_replies 0 1
     $endpoint = $null
     if (-not [Net.IPEndPoint]::TryParse([string]$reset.udp_local_endpoint, [ref]$endpoint) -or
-        $endpoint.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or $endpoint.Port -eq 0) {
+        $endpoint.AddressFamily -ne $profile.socket_family -or
+        $endpoint.Address.IsIPv4MappedToIPv6 -or
+        $endpoint.Address.Equals([Net.IPAddress]::Any) -or
+        $endpoint.Address.Equals([Net.IPAddress]::IPv6Any) -or $endpoint.Port -eq 0) {
         throw 'qualification reset UDP socket identity is invalid'
     }
 }

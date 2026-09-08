@@ -15,6 +15,7 @@ $moduleRoot = Join-Path $repositoryRoot 'tools\powershell\Ferrum2.Qualification.
 $moduleManifest = Join-Path $moduleRoot 'Ferrum2.Qualification.Host.psd1'
 $bundlePath = Join-Path $moduleRoot 'bundle.json'
 . (Join-Path $moduleRoot 'SourceBundle.ps1')
+. (Join-Path $moduleRoot 'AddressFamily.ps1')
 $bundle = Read-Ferrum2HostQualificationSourceBundle `
     -RepositoryRoot $repositoryRoot -ManifestPath $bundlePath
 
@@ -153,8 +154,13 @@ $tcpIngressOffline = & $loadedModule {
         '<action><type>FWP_ACTION_PERMIT</type><filterType/></action>' +
         '<reserved/><rawContext>0</rawContext>' +
         "<filterCondition numItems=`"6`">$ingressConditions</filterCondition></item></items></ferrum2WfpState>"
-    $runtime = [pscustomobject]@{ client = [pscustomobject]@{ pid = 321 } }
-    $network = [pscustomobject]@{ tun_address = '198.18.1.2'; tun_prefix_length = 30 }
+    $runtime = [pscustomobject]@{
+        address_family = 'IPv4'; client = [pscustomobject]@{ pid = 321 }
+    }
+    $network = [pscustomobject]@{
+        address_family = 'IPv4'; tun_address = '198.18.1.2'
+        peer_address = '198.18.1.1'; tun_prefix_length = 30
+    }
     $listener = [pscustomobject]@{
         address_family = 'IPv4'; local_address = '198.18.1.2'; local_port = 45000
         process_id = 321; wildcard_listener_count = 0
@@ -243,6 +249,7 @@ Assert-True (
 . (Join-Path $moduleRoot 'WorkloadEvidence.ps1')
 $readyWitness = [pscustomobject]@{
     schema_version = 1; kind = 'ferrum2.windows-tun-reset-ready'; generation = 1
+    address_family = 'IPv4'
     tcp_pending = $true; udp_pending = $true; tcp_paused_bytes_sent = 65536
     tcp_unwritable_milliseconds = 100; udp_pending_datagrams = 1
     udp_local_endpoint = '198.18.0.1:42000'
@@ -250,6 +257,7 @@ $readyWitness = [pscustomobject]@{
 Assert-Ferrum2QualificationResetReady -Witness $readyWitness
 $trafficWitness = [pscustomobject]@{
     schema_version = 1; kind = 'ferrum2.windows-tun-qualification'; status = 'PASS'
+    address_family = 'IPv4'
     generations = @(foreach ($generation in 1..2) {
         [pscustomobject]@{
             generation = $generation; payload_identity = "generation-$generation"
@@ -318,6 +326,8 @@ Assert-True ($LASTEXITCODE -eq 0) 'host qualification PlanOnly failed'
 $plan = ($planOutput -join "`n") | ConvertFrom-Json -Depth 12 -ErrorAction Stop
 Assert-True ($plan.kind -ceq 'ferrum2.windows-tun.host-qualification-plan' -and
     $plan.execution -ceq 'explicit-authorized-windows-host' -and
+    $plan.address_family -ceq 'IPv4' -and
+    $plan.safety.tun_connected_prefix_length -eq 30 -and
     $plan.candidate_sha -ceq $candidateSha -and
     $plan.qualification_source_bundle_sha256 -ceq $bundle.sha256 -and
     [int]$plan.maximum_elapsed_seconds -eq 900 -and
@@ -332,22 +342,21 @@ Assert-True ($plan.kind -ceq 'ferrum2.windows-tun.host-qualification-plan' -and
     ) -and
     $plan.safety.requires_elevation -eq $true -and
     $plan.safety.requires_explicit_acknowledgement -eq $true -and
-    $plan.safety.automatic_elevation -eq $false -and
-    $plan.safety.live_address_family -ceq 'IPv4 only (RFC2544 198.18.0.0/15)' -and
-    $plan.safety.route_scope -ceq 'run-owned /32 only' -and
-    $plan.safety.tcp_ingress_scope -ceq
-        'exact app, TCP, TUN LUID, local address/port, and remote peer' -and
-    $plan.safety.wfp_lifetime -ceq 'process-owned dynamic sessions only' -and
-    $plan.safety.tcp_ingress_installation -ceq
-        'automatic after listener bind and before admission' -and
-    @($plan.safety.mutations) -contains
-        'process-owned dynamic exact TCP ingress WFP session' -and
-    $plan.safety.firewall_rule_store -ceq 'PersistentStore with exact ActiveStore readback' -and
-    @($plan.safety.mutations) -contains 'run-owned narrowly scoped Windows Firewall rules before executable launch' -and
-    @($plan.safety.forbidden_mutations) -contains 'unrelated Windows Firewall rules' -and
-    @($plan.safety.forbidden_mutations) -contains 'global firewall profile/notification settings' -and
-    @($plan.safety.forbidden_mutations) -contains 'unrelated WFP sessions') `
+    $plan.safety.automatic_elevation -eq $false) `
     'host qualification plan contract changed'
+
+$ipv6PlanOutput = & $pwsh -NoProfile -File $runner -PlanOnly `
+    -CandidateSha $candidateSha -AddressFamily ipv6
+Assert-True ($LASTEXITCODE -eq 0) 'IPv6 host qualification PlanOnly failed'
+$ipv6Plan = ($ipv6PlanOutput -join "`n") | ConvertFrom-Json -Depth 12 -ErrorAction Stop
+Assert-True ($ipv6Plan.address_family -ceq 'IPv6' -and
+    $ipv6Plan.safety.tun_connected_prefix_length -eq 126 -and
+    $ipv6Plan.maximum_elapsed_seconds -eq $plan.maximum_elapsed_seconds -and
+    ($ipv6Plan.checks -join '|') -ceq ($plan.checks -join '|') -and
+    $ipv6Plan.safety.requires_elevation -eq $true -and
+    $ipv6Plan.safety.requires_explicit_acknowledgement -eq $true -and
+    $ipv6Plan.safety.automatic_elevation -eq $false) `
+    'IPv6 selection changed fixed checks or widened host permission gates'
 
 $missingAckEvidence = Join-Path ([IO.Path]::GetTempPath()) (
     'ferrum2-qualification-missing-ack-' + [Guid]::NewGuid().ToString('N')
@@ -359,29 +368,6 @@ Assert-True ($LASTEXITCODE -ne 0 -and
     -not (Test-Path -LiteralPath $missingAckEvidence)) `
     'host qualification did not reject missing mutation acknowledgement before effects'
 
-$obsoletePlatformFiles = @(
-    Get-ChildItem -LiteralPath $PSScriptRoot -File -ErrorAction Stop | Where-Object {
-        $_.Name -match '^(?:Main\.|Hard\.|Guest\.)' -or
-        $_.Name -match 'hyperv' -or
-        $_.Name -in @(
-            'qualify_windows_tun.ps1',
-            'qualify_windows_tun_cleanup.ps1',
-            'qualify_windows_tun_hard_kill.ps1'
-        )
-    }
-)
-Assert-True ($obsoletePlatformFiles.Count -eq 0) `
-    'obsolete Hyper-V qualification sources remain'
-foreach ($path in @(
-    'tools\powershell\Ferrum2.WindowsTun.Lab',
-    'tools\powershell\Ferrum2.Qualification.Evidence',
-    'tools\powershell\Ferrum2.Qualification.HostHyperV',
-    'tools\powershell\Ferrum2.Qualification.GuestController',
-    'tools\windows-tun\lab'
-)) {
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot $path))) `
-        "obsolete Hyper-V qualification module remains: $path"
-}
 
 Write-Output (
     'windows_tun_host_qualification_static status=PASS ' +

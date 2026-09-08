@@ -10,6 +10,7 @@ if ($null -ne ("Ferrum2QualificationRouteNotification" -as [type])) {
 Add-Type -Path $processOwnerPath -ErrorAction Stop
 Add-Type -Path $notificationOwnerPath -ErrorAction Stop
 foreach ($owner in @(
+    (Join-Path $PSScriptRoot "AddressFamily.ps1"),
     (Join-Path $PSScriptRoot "HostOwnership.ps1"),
     (Join-Path $PSScriptRoot "HostCleanup.ps1"),
     (Join-Path $PSScriptRoot "HostFirewall.ps1"),

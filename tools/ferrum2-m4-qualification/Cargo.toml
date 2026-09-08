@@ -24,6 +24,9 @@ socket2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+ferrum2-platform-windows = { workspace = true, features = ["live-backend"] }
+
 [dev-dependencies]
 ferrum2-config.workspace = true
 

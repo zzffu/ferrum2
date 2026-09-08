@@ -1,13 +1,13 @@
 use super::contract::parse;
-use super::socket_io::{BLOCK, runtime};
+use super::socket_io::{BLOCK, bind_udp, listen, runtime};
 use std::ffi::OsString;
 use std::io::Write;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 
-async fn echo(mut stream: TcpStream) -> Result<(), String> {
+pub(super) async fn echo(mut stream: TcpStream) -> Result<(), String> {
     stream.set_nodelay(true).map_err(|e| e.to_string())?;
     let socket = socket2::SockRef::from(&stream);
     socket
@@ -36,14 +36,15 @@ async fn echo(mut stream: TcpStream) -> Result<(), String> {
 pub(crate) fn run_support(arguments: &[OsString]) -> Result<String, String> {
     let args = parse(arguments, "support")?;
     runtime()?.block_on(async {
-        let tcp = TcpListener::bind(args.tcp).await.map_err(|e| e.to_string())?;
-        let udp = UdpSocket::bind(args.udp).await.map_err(|e| e.to_string())?;
+        let tcp = listen(args.tcp)?;
+        let udp = bind_udp(args.udp)?;
         let mut connections = JoinSet::new();
-        println!("windows_tun_support status=READY tcp={} udp={}", args.tcp, args.udp);
+        println!("windows_tun_support status=READY tcp={} udp={} address_family={}", args.tcp, args.udp, args.address_family.as_str());
         std::io::stdout().flush().map_err(|e| e.to_string())?;
         let mut buffer = vec![0; 65_507];
         let deadline = tokio::time::sleep(Duration::from_secs(900));
         tokio::pin!(deadline);
+        let result = async {
         loop {
             tokio::select! {
                 () = &mut deadline => return Err("support lifetime deadline".to_owned()),
@@ -68,6 +69,8 @@ pub(crate) fn run_support(arguments: &[OsString]) -> Result<String, String> {
                 }
             }
         }
-        // JoinSet aborts every owned connection when the support future exits.
+        }.await;
+        connections.shutdown().await;
+        result
     })
 }

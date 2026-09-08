@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'HostNetwork.ps1')
 
 function Test-Ferrum2HostAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -206,8 +207,10 @@ function New-Ferrum2HostContext {
         [Parameter(Mandatory = $true)][string]$RepositoryRoot,
         [Parameter(Mandatory = $true)][string]$EvidenceDirectory,
         [Parameter(Mandatory = $true)][string]$CandidateSha,
-        [Parameter(Mandatory = $true)][string]$QualificationSourceBundleSha256
+        [Parameter(Mandatory = $true)][string]$QualificationSourceBundleSha256,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4'
     )
+    $AddressFamily = (Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily).address_family
     $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
     $evidenceCreated = $false
     $runRootCreated = $false
@@ -234,6 +237,7 @@ function New-Ferrum2HostContext {
             schema_version = 2
             kind = "ferrum2.windows-tun.host-performance-recovery"
             run_id = $runId
+            address_family = $AddressFamily
             state = "initializing"
             mode = "Qualification"
             baseline_sha = $CandidateSha
@@ -263,6 +267,7 @@ function New-Ferrum2HostContext {
         }
         $context = [pscustomobject]@{
             run_id = $runId
+            address_family = $AddressFamily
             run_root = $runRoot
             ledger_path = Join-Path $runRoot "recovery.json"
             repository_root = [IO.Path]::GetFullPath($RepositoryRoot)
@@ -346,197 +351,6 @@ function Assert-NoPendingFerrum2HostRecovery {
     if ($pending.Count -ne 0) {
         throw "pending Ferrum2 host recovery ledger exists; run -RecoveryOnly"
     }
-}
-
-function New-Ferrum2HostNetworkIdentity {
-    param([Parameter(Mandatory = $true)][string]$RunId)
-    $value = [Convert]::ToUInt32($RunId.Substring(0, 4), 16)
-    $third = [int](($value -shr 8) -band 0xff)
-    $block = [int](($value -band 0xff) % 63) * 4
-    return [pscustomobject][ordered]@{
-        tun_address = "198.18.$third.$($block + 2)"
-        tun_prefix_length = 30
-        support_address = "198.19.$third.$($block + 1)"
-        support_prefix_length = 32
-        adapter_name_prefix = "Ferrum2Host-$RunId"
-    }
-}
-
-function Get-Ferrum2LoopbackIdentity {
-    $address = @(Get-NetIPAddress -AddressFamily IPv4 -IPAddress "127.0.0.1" -ErrorAction Stop)
-    if ($address.Count -ne 1) {
-        throw "host loopback IPv4 identity is not unique"
-    }
-    $interface = @(Get-NetIPInterface -AddressFamily IPv4 `
-        -InterfaceIndex $address[0].InterfaceIndex -ErrorAction Stop)
-    if ($interface.Count -ne 1 -or [string]$interface[0].InterfaceAlias -cnotlike "Loopback*") {
-        throw "host loopback interface identity is not unique"
-    }
-    return [pscustomobject][ordered]@{
-        interface_index = [uint32]$interface[0].InterfaceIndex
-        interface_alias = [string]$interface[0].InterfaceAlias
-        interface_guid = $null
-        local_address = "127.0.0.1"
-    }
-}
-
-function Assert-Ferrum2HostNetworkIdentityAvailable {
-    param(
-        [Parameter(Mandatory = $true)][object]$Network,
-        [Parameter(Mandatory = $true)][object]$Loopback
-    )
-    foreach ($address in @($Network.tun_address, $Network.support_address)) {
-        if (@(Get-NetIPAddress -AddressFamily IPv4 -IPAddress $address -ErrorAction SilentlyContinue).Count -ne 0) {
-            throw "dedicated benchmark address already exists: $address"
-        }
-    }
-    foreach ($prefix in @("$($Network.support_address)/32")) {
-        if (@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $prefix -ErrorAction SilentlyContinue).Count -ne 0) {
-            throw "dedicated benchmark route already exists: $prefix"
-        }
-    }
-    if ($Loopback.interface_index -eq 0 -or $Loopback.local_address -cne "127.0.0.1") {
-        throw "loopback identity is invalid"
-    }
-    $wide = @(Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop | Where-Object {
-        [string]$_.DestinationPrefix -in @("198.18.0.0/15", "198.18.0.0/16", "198.19.0.0/16")
-    })
-    if ($wide.Count -ne 0) {
-        throw "a broad RFC2544 route conflicts with the dedicated benchmark range"
-    }
-}
-
-function Add-Ferrum2OwnedAddress {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][object]$Loopback,
-        [Parameter(Mandatory = $true)][string]$Address,
-        [Parameter(Mandatory = $true)][int]$PrefixLength
-    )
-    $row = [pscustomobject][ordered]@{
-        address = $Address
-        prefix_length = $PrefixLength
-        interface_index = $Loopback.interface_index
-        interface_guid = $Loopback.interface_guid
-        state = "planned"
-    }
-    $Context.ledger.resources.addresses = @($Context.ledger.resources.addresses) + @($row)
-    Write-Ferrum2HostLedger -Context $Context
-    New-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $Loopback.interface_index `
-        -IPAddress $Address -PrefixLength $PrefixLength -SkipAsSource $true `
-        -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
-    $row.state = "created"
-    Write-Ferrum2HostLedger -Context $Context
-    return $row
-}
-
-function Add-Ferrum2OwnedRoute {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][uint32]$InterfaceIndex,
-        [Parameter(Mandatory = $true)][string]$DestinationPrefix,
-        [Parameter(Mandatory = $true)][uint16]$RouteMetric,
-        [string]$Kind = "runner",
-        [string]$NextHop = "0.0.0.0"
-    )
-    $row = [pscustomobject][ordered]@{
-        destination_prefix = $DestinationPrefix
-        interface_index = $InterfaceIndex
-        next_hop = $NextHop
-        route_metric = $RouteMetric
-        policy_store = "ActiveStore"
-        kind = $Kind
-        state = "planned"
-    }
-    $Context.ledger.resources.routes = @($Context.ledger.resources.routes) + @($row)
-    Write-Ferrum2HostLedger -Context $Context
-    New-NetRoute -AddressFamily IPv4 -InterfaceIndex $InterfaceIndex `
-        -DestinationPrefix $DestinationPrefix -NextHop $NextHop `
-        -RouteMetric $RouteMetric -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
-    $row.state = "created"
-    Write-Ferrum2HostLedger -Context $Context
-    return $row
-}
-
-function Remove-Ferrum2OwnedRoute {
-    param([Parameter(Mandatory = $true)][object]$Row)
-    $routeState = [string]$Row.state
-    if ($routeState -notin @("planned", "created")) {
-        throw "owned route ledger state is invalid"
-    }
-    $routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix ([string]$Row.destination_prefix) `
-        -InterfaceIndex ([uint32]$Row.interface_index) -ErrorAction SilentlyContinue | Where-Object {
-            [string]$_.NextHop -ceq [string]$Row.next_hop
-        })
-    if ($routes.Count -gt 1) { throw "owned route identity is not unique" }
-    if ($routes.Count -eq 1) {
-        if ($routeState -cne "created") {
-            throw "planned route presence is ambiguous; refusing removal"
-        }
-        if ([uint16]$routes[0].RouteMetric -ne [uint16]$Row.route_metric) {
-            throw "owned route metric identity mismatch"
-        }
-        Remove-NetRoute -InputObject $routes[0] -Confirm:$false -ErrorAction Stop
-    }
-}
-
-function Set-Ferrum2OwnedAdapterPlan {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][string]$AdapterName
-    )
-    if (@(Get-NetAdapter -IncludeHidden -Name $AdapterName -ErrorAction SilentlyContinue).Count -ne 0) {
-        throw "owned adapter name baseline is not absent: $AdapterName"
-    }
-    $Context.ledger.resources.adapter = [pscustomobject][ordered]@{
-        name = $AdapterName
-        interface_guid = $null
-        interface_index = $null
-        interface_description = $null
-        expected_interface_description = "Ferrum2 Tunnel"
-        state = "planned"
-    }
-    Write-Ferrum2HostLedger -Context $Context
-}
-
-function Complete-Ferrum2OwnedAdapterIdentity {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][string]$AdapterName
-    )
-    $adapter = @(Get-NetAdapter -IncludeHidden -Name $AdapterName -ErrorAction Stop)
-    if ($adapter.Count -ne 1) {
-        throw "owned Wintun adapter identity is not unique"
-    }
-    if ([string]$adapter[0].InterfaceDescription -cne "Ferrum2 Tunnel") {
-        throw "owned adapter does not identify the Wintun driver"
-    }
-    $Context.ledger.resources.adapter.interface_guid =
-        ([Guid]$adapter[0].InterfaceGuid).ToString("D").ToLowerInvariant()
-    $Context.ledger.resources.adapter.interface_index = [uint32]$adapter[0].ifIndex
-    $Context.ledger.resources.adapter.interface_description = [string]$adapter[0].InterfaceDescription
-    $Context.ledger.resources.adapter.state = "created"
-    Write-Ferrum2HostLedger -Context $Context
-    return $adapter[0]
-}
-
-function Add-Ferrum2OwnedPort {
-    param(
-        [Parameter(Mandatory = $true)][object]$Context,
-        [Parameter(Mandatory = $true)][string]$Protocol,
-        [Parameter(Mandatory = $true)][string]$Address,
-        [Parameter(Mandatory = $true)][uint16]$Port,
-        [Parameter(Mandatory = $true)][string]$Purpose
-    )
-    $Context.ledger.resources.ports = @($Context.ledger.resources.ports) + @(
-        [pscustomobject][ordered]@{
-            protocol = $Protocol
-            address = $Address
-            port = $Port
-            purpose = $Purpose
-        }
-    )
-    Write-Ferrum2HostLedger -Context $Context
 }
 
 function Add-Ferrum2OwnedProcess {
@@ -679,12 +493,38 @@ function Restore-Ferrum2LegacyFirewallInterfaceIdentity {
     }
 }
 
+function Initialize-Ferrum2RecoveryNetworkIdentity {
+    param([object]$Ledger)
+    $family = Get-Ferrum2LedgerAddressFamily -Ledger $Ledger
+    foreach ($kind in @('addresses', 'routes')) {
+        $type = $(if ($kind -ceq 'addresses') { 'address' } else { 'route' })
+        foreach ($row in @($Ledger.resources.$kind) + @($Ledger.expected_resources.$kind)) {
+            Assert-Ferrum2OwnedNetworkRow -Row $row -RunId $Ledger.run_id -AddressFamily $family -Type $type
+            $row | Add-Member -NotePropertyName address_family -NotePropertyValue $family -Force
+            $row | Add-Member -NotePropertyName run_id -NotePropertyValue $Ledger.run_id -Force
+            if ($null -eq $row.PSObject.Properties['interface_guid']) {
+                $ownedAdapters = @($Ledger.expected_resources.adapters | Where-Object {
+                    [string]$_.state -ceq 'created' -and [uint32]$_.interface_index -eq [uint32]$row.interface_index
+                })
+                $identities = @($ownedAdapters | ForEach-Object { [string]$_.interface_guid } | Sort-Object -Unique)
+                # A legacy physical-interface reset route has no durable GUID. Its absence
+                # can be proven, but an occupied index alone never authorizes its deletion.
+                $guid = $null
+                if ($identities.Count -gt 1) { throw 'legacy network interface identity is ambiguous' }
+                if ($identities.Count -eq 1) { $guid = $identities[0] }
+                $row | Add-Member -NotePropertyName interface_guid -NotePropertyValue $guid
+            }
+        }
+    }
+}
+
 function Remove-Ferrum2LedgerResources {
     param(
         [Parameter(Mandatory = $true)][object]$Ledger,
         [Parameter(Mandatory = $true)][string]$LedgerPath
     )
     Update-Ferrum2ExpectedResources -Ledger $Ledger
+    Initialize-Ferrum2RecoveryNetworkIdentity -Ledger $Ledger
     Write-AtomicJsonFile -Path $LedgerPath -Document $Ledger
     Restore-Ferrum2LegacyFirewallInterfaceIdentity -Ledger $Ledger -LedgerPath $LedgerPath
     foreach ($row in @($Ledger.resources.processes)) {
@@ -701,23 +541,9 @@ function Remove-Ferrum2LedgerResources {
     foreach ($row in @($Ledger.resources.routes)) {
         Remove-Ferrum2OwnedRoute -Row $row
     }
+    # Exact address deletion shares the same ownership admission as ordinary cleanup.
     foreach ($row in @($Ledger.resources.addresses)) {
-        $addressState = [string]$row.state
-        if ($addressState -notin @("planned", "created")) {
-            throw "owned address ledger state is invalid"
-        }
-        $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -IPAddress ([string]$row.address) `
-            -InterfaceIndex ([uint32]$row.interface_index) -ErrorAction SilentlyContinue)
-        if ($addresses.Count -gt 1) { throw "owned address identity is not unique" }
-        if ($addresses.Count -eq 1) {
-            if ($addressState -cne "created") {
-                throw "planned address presence is ambiguous; refusing removal"
-            }
-            if ([int]$addresses[0].PrefixLength -ne [int]$row.prefix_length) {
-                throw "owned address prefix identity mismatch"
-            }
-            Remove-NetIPAddress -InputObject $addresses[0] -Confirm:$false -ErrorAction Stop
-        }
+        Remove-Ferrum2OwnedAddress -Row $row
     }
     $adapterRow = $Ledger.resources.adapter
     if ($null -ne $adapterRow) {
@@ -725,8 +551,9 @@ function Remove-Ferrum2LedgerResources {
         if ($adapterState -notin @("planned", "created")) {
             throw "owned adapter ledger state is invalid"
         }
-        $adapters = @(Get-NetAdapter -IncludeHidden -Name ([string]$adapterRow.name) `
-            -ErrorAction SilentlyContinue)
+        $adapterInventory = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop)
+        if ($adapterInventory.Count -gt 4096) { throw 'adapter inventory exceeds its identity bound' }
+        $adapters = @($adapterInventory | Where-Object { [string]$_.Name -ceq [string]$adapterRow.name })
         if ($adapters.Count -gt 1) { throw "owned adapter identity is not unique" }
         if ($adapters.Count -eq 1) {
             if ($adapterState -cne "created") {
@@ -822,6 +649,7 @@ function Complete-Ferrum2HostCleanup {
         schema_version = 1
         kind = "ferrum2.windows-tun.host-qualification-resource-cleanup"
         run_id = $Context.run_id
+        address_family = Get-Ferrum2LedgerAddressFamily -Ledger $Context.ledger
         qualification_source_bundle_sha256 = $Context.qualification_source_bundle_sha256
         status = "PASS"
         qualification_succeeded = $Succeeded

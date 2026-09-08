@@ -155,7 +155,10 @@ function Test-Ferrum2TcpPortAvailable {
     param([string]$Address, [uint16]$Port)
     $listener = $null
     try {
-        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse($Address), $Port)
+        $ip = [Net.IPAddress]::Parse($Address)
+        $listener = [Net.Sockets.TcpListener]::new($ip, $Port)
+        $listener.ExclusiveAddressUse = $true
+        if ($ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) { $listener.Server.DualMode = $false }
         $listener.Start()
         return $true
     } catch { return $false } finally { if ($null -ne $listener) { $listener.Stop() } }
@@ -165,7 +168,11 @@ function Test-Ferrum2UdpPortAvailable {
     param([string]$Address, [uint16]$Port)
     $socket = $null
     try {
-        $socket = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Parse($Address), $Port))
+        $ip = [Net.IPAddress]::Parse($Address)
+        $socket = [Net.Sockets.UdpClient]::new($ip.AddressFamily)
+        $socket.ExclusiveAddressUse = $true
+        if ($ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) { $socket.Client.DualMode = $false }
+        $socket.Client.Bind([Net.IPEndPoint]::new($ip, $Port))
         return $true
     } catch { return $false } finally { if ($null -ne $socket) { $socket.Dispose() } }
 }
@@ -186,10 +193,11 @@ function ConvertFrom-Ferrum2DynamicPortRange {
 
 function Get-Ferrum2DynamicPortRanges {
     param([object]$Context, [int]$Sequence)
+    $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $Context.address_family
     $netsh = Join-Path $env:SystemRoot 'System32/netsh.exe'
     $ranges = @(foreach ($protocol in @('tcp', 'udp')) {
         $process = Invoke-Ferrum2OwnedCommand -Context $Context -Application $netsh `
-            -Arguments "int ipv4 show dynamicport $protocol" -WorkingDirectory $Context.run_root `
+            -Arguments "int $($profile.netsh_family) show dynamicport $protocol" -WorkingDirectory $Context.run_root `
             -LogPrefix "ports-$Sequence-$protocol" -TimeoutSeconds 10
         # The command has joined and its private stdout is now immutable.
         $item = Get-Item -LiteralPath $process.stdout -ErrorAction Stop
@@ -200,15 +208,18 @@ function Get-Ferrum2DynamicPortRanges {
     $root = Join-Path $Context.evidence_directory 'port-ranges'
     New-Item -ItemType Directory -Path $root -Force -ErrorAction Stop | Out-Null
     Write-AtomicJsonFile -Path (Join-Path $root "$Sequence.json") `
-        -Document ([pscustomobject]@{ sequence = $Sequence; ipv4_dynamic_ranges = $ranges })
+        -Document ([pscustomobject]@{ sequence = $Sequence; address_family = $profile.address_family; dynamic_ranges = $ranges })
     return $ranges
 }
 
 function New-Ferrum2PortReservation {
     param(
         [Parameter(Mandatory = $true)][object[]]$DynamicRanges,
-        [Parameter(Mandatory = $true)][ValidateSet('tcp', 'udp')][string[]]$Protocols
+        [Parameter(Mandatory = $true)][ValidateSet('tcp', 'udp')][string[]]$Protocols,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4'
     )
+    $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily
+    $loopback = [Net.IPAddress]::Parse($profile.loopback_address)
     foreach ($attempt in 1..256) {
         [uint16]$port = Get-Random -Minimum 1024 -Maximum 65536
         if (@($DynamicRanges | Where-Object {
@@ -218,19 +229,20 @@ function New-Ferrum2PortReservation {
         try {
             foreach ($protocol in $Protocols) {
                 $socket = if ($protocol -ceq 'tcp') {
-                    [Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::InterNetwork,
+                    [Net.Sockets.Socket]::new($profile.socket_family,
                         [Net.Sockets.SocketType]::Stream, [Net.Sockets.ProtocolType]::Tcp)
                 } else {
-                    [Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::InterNetwork,
+                    [Net.Sockets.Socket]::new($profile.socket_family,
                         [Net.Sockets.SocketType]::Dgram, [Net.Sockets.ProtocolType]::Udp)
                 }
                 $sockets.Add($socket)
                 $socket.ExclusiveAddressUse = $true
-                $socket.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $port))
+                if ($AddressFamily -ceq 'IPv6') { $socket.DualMode = $false }
+                $socket.Bind([Net.IPEndPoint]::new($loopback, $port))
                 # Unix .NET TCP Bind enables address reuse; listening makes the reservation exclusive.
                 if ($protocol -ceq 'tcp') { $socket.Listen(1) }
             }
-            return [pscustomobject]@{ port = $port; sockets = $sockets.ToArray() }
+            return [pscustomobject]@{ address_family = $AddressFamily; port = $port; sockets = $sockets.ToArray() }
         } catch {
             foreach ($socket in $sockets) { $socket.Dispose() }
             if ($_.Exception.InnerException -isnot [Net.Sockets.SocketException] -and
@@ -252,9 +264,9 @@ function New-Ferrum2ProductPorts {
     $ranges = @(Get-Ferrum2DynamicPortRanges -Context $Context -Sequence $Sequence)
     $ports = [pscustomobject]@{ client_metrics = $null; server = $null; server_metrics = $null; dynamic_ranges = $ranges }
     try {
-        $ports.client_metrics = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp
-        $ports.server = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp
-        $ports.server_metrics = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp
+        $ports.client_metrics = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp -AddressFamily $Context.address_family
+        $ports.server = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp -AddressFamily $Context.address_family
+        $ports.server_metrics = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp -AddressFamily $Context.address_family
         return $ports
     } catch {
         foreach ($reservation in @($ports.client_metrics, $ports.server, $ports.server_metrics)) {
@@ -320,8 +332,10 @@ function Wait-Ferrum2Text {
 }
 
 function Get-Ferrum2Metrics {
-    param([uint16]$Port)
-    $text = [string](Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/metrics" `
+    param([uint16]$Port, [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4')
+    $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily
+    $endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Parse($profile.loopback_address), $Port)
+    $text = [string](Invoke-WebRequest -UseBasicParsing -Uri "http://$endpoint/metrics" `
         -TimeoutSec 2 -ErrorAction Stop).Content
     if ([Text.Encoding]::UTF8.GetByteCount($text) -le 0 -or
         [Text.Encoding]::UTF8.GetByteCount($text) -gt 1MB) {
@@ -333,7 +347,8 @@ function Get-Ferrum2Metrics {
 function Wait-Ferrum2Metric {
     param(
         [Parameter(Mandatory = $true)][object]$Process,
-        [uint16]$Port, [string]$Name, [double]$Minimum, [int]$TimeoutSeconds = 30
+        [uint16]$Port, [string]$Name, [double]$Minimum, [int]$TimeoutSeconds = 30,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4'
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
@@ -342,7 +357,7 @@ function Wait-Ferrum2Metric {
             throw "product exited before metric readiness: $Name; exit=$exit"
         }
         try {
-            $metrics = Get-Ferrum2Metrics -Port $Port
+            $metrics = Get-Ferrum2Metrics -Port $Port -AddressFamily $AddressFamily
             $value = Get-Ferrum2MetricValue -Metrics $metrics -Name $Name
             if ($value -ge $Minimum) { return $metrics }
         } catch { }
@@ -377,6 +392,18 @@ function Write-Ferrum2HostConfigs {
         [Parameter(Mandatory = $true)][int]$Sequence,
         [AllowNull()][Net.IPEndPoint]$ResetProbeEndpoint = $null
     )
+    $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $Context.address_family
+    if ($Network.address_family -cne $profile.address_family) { throw 'configuration address family mismatch' }
+    foreach ($address in @($Network.tun_address, $Network.support_address)) {
+        Assert-Ferrum2CanonicalAddress -Address $address -AddressFamily $profile.address_family
+    }
+    if ($null -ne $ResetProbeEndpoint -and $ResetProbeEndpoint.AddressFamily -ne $profile.socket_family) {
+        throw 'reset probe address family mismatch'
+    }
+    $loopbackAddress = [Net.IPAddress]::Parse($profile.loopback_address)
+    $serverEndpoint = [Net.IPEndPoint]::new($loopbackAddress, $ServerPort)
+    $clientMetricsEndpoint = [Net.IPEndPoint]::new($loopbackAddress, $ClientMetricsPort)
+    $serverMetricsEndpoint = [Net.IPEndPoint]::new($loopbackAddress, $ServerMetricsPort)
     foreach ($value in @($AdapterName, $Loopback.interface_alias)) {
         if ($value -match '["\r\n]') { throw "configuration identity contains an unsafe character" }
     }
@@ -388,11 +415,11 @@ function Write-Ferrum2HostConfigs {
 [[outbounds]]
 tag = "proxy"
 type = "shadowsocks"
-server = "127.0.0.1:$ServerPort"
+server = "$serverEndpoint"
 method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
 bind_interface = "$($Loopback.interface_alias)"
-inet4_bind_address = "127.0.0.1"
+$($profile.bind_config_field) = "$($profile.loopback_address)"
 [route]
 auto_detect_interface = false
 default_interface = "$($Loopback.interface_alias)"
@@ -420,11 +447,11 @@ schema_version = 2
 [tun]
 tag = "tun-in"
 adapter_name = "$AdapterName"
-ipv4_address = "$($Network.tun_address)/$($Network.tun_prefix_length)"
+$($profile.tun_config_field) = "$($Network.tun_address)/$($Network.tun_prefix_length)"
 mtu = 1420
 auto_route = true
 strict_route = true
-route_address = ["$($Network.support_address)/32"]
+route_address = ["$($Network.support_address)/$($profile.host_prefix_length)"]
 ring_capacity = 67108864
 ready_timeout_ms = 30000
 max_tcp_flows = 4096
@@ -440,18 +467,18 @@ idle_timeout_ms = 60000
 shutdown_grace_ms = 30000
 idle_timeout_ms = 60000
 [metrics]
-listen = "127.0.0.1:$ClientMetricsPort"
+listen = "$clientMetricsEndpoint"
 "@
     Write-NewUtf8File -Path $clientPath -Text ($client.TrimStart() + "`n")
     $server = @"
 schema_version = 2
 [[inbounds]]
 tag = "server-in"
-listen = "127.0.0.1:$ServerPort"
+listen = "$serverEndpoint"
 [[outbounds]]
 tag = "direct"
 bind_interface = "$($Loopback.interface_alias)"
-inet4_bind_address = "$($Network.support_address)"
+$($profile.bind_config_field) = "$($Network.support_address)"
 [route]
 auto_detect_interface = false
 default_interface = "$($Loopback.interface_alias)"
@@ -464,7 +491,7 @@ idle_timeout_ms = 60000
 [runtime]
 shutdown_grace_ms = 30000
 [metrics]
-listen = "127.0.0.1:$ServerMetricsPort"
+listen = "$serverMetricsEndpoint"
 [shadowsocks]
 method = "2022-blake3-aes-128-gcm"
 psk = "AAECAwQFBgcICQoLDA0ODw=="
@@ -497,6 +524,9 @@ function Get-Ferrum2RouteProof {
         [Parameter(Mandatory = $true)][string]$Purpose,
         [AllowNull()][string]$LocalAddress = $null
     )
+    $addressFamily = if ([Net.IPAddress]::Parse($RemoteAddress).AddressFamily -eq
+        [Net.Sockets.AddressFamily]::InterNetworkV6) { 'IPv6' } else { 'IPv4' }
+    Assert-Ferrum2CanonicalAddress -Address $RemoteAddress -AddressFamily $addressFamily
     $lookup = @{
         RemoteIPAddress = $RemoteAddress
         ErrorAction = "Stop"
@@ -513,7 +543,9 @@ function Get-Ferrum2RouteProof {
         [uint32]$route[0].InterfaceIndex -ne $ExpectedInterfaceIndex) {
         throw "actual route lookup did not select the $Purpose interface"
     }
+    Assert-Ferrum2CanonicalAddress -Address ([string]$source[0].IPAddress) -AddressFamily $addressFamily
     return [pscustomobject][ordered]@{
+        address_family = $addressFamily
         purpose = $Purpose
         remote_address = $RemoteAddress
         local_address = [string]$source[0].IPAddress
@@ -521,6 +553,7 @@ function Get-Ferrum2RouteProof {
         interface_alias = [string]$route[0].InterfaceAlias
         destination_prefix = [string]$route[0].DestinationPrefix
         next_hop = [string]$route[0].NextHop
+        route_metric = [uint16]$route[0].RouteMetric
     }
 }
 
@@ -531,17 +564,18 @@ function Get-Ferrum2HostRouteProofs {
         [Parameter(Mandatory = $true)][uint32]$TunInterfaceIndex
     )
     $proofs = [Collections.Generic.List[object]]::new()
+    $profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $Network.address_family
     [void]$proofs.Add((Get-Ferrum2RouteProof -RemoteAddress $Network.support_address `
         -ExpectedInterfaceIndex $TunInterfaceIndex `
         -Purpose "qualification-application-to-test-tun"))
     [void]$proofs.Add((Get-Ferrum2RouteProof -RemoteAddress $Network.support_address `
         -LocalAddress $Network.support_address `
         -ExpectedInterfaceIndex $Loopback.interface_index -Purpose "server-to-support-without-test-tun"))
-    [void]$proofs.Add((Get-Ferrum2RouteProof -RemoteAddress "127.0.0.1" `
-        -LocalAddress "127.0.0.1" -ExpectedInterfaceIndex $Loopback.interface_index `
+    [void]$proofs.Add((Get-Ferrum2RouteProof -RemoteAddress $profile.loopback_address `
+        -LocalAddress $profile.loopback_address -ExpectedInterfaceIndex $Loopback.interface_index `
         -Purpose "product-underlay-control"))
-    [void]$proofs.Add((Get-Ferrum2RouteProof -RemoteAddress "127.0.0.1" `
-        -LocalAddress "127.0.0.1" -ExpectedInterfaceIndex $Loopback.interface_index `
+    [void]$proofs.Add((Get-Ferrum2RouteProof -RemoteAddress $profile.loopback_address `
+        -LocalAddress $profile.loopback_address -ExpectedInterfaceIndex $Loopback.interface_index `
         -Purpose "sing-box-proxy-excluded"))
     return $proofs.ToArray()
 }
@@ -553,6 +587,8 @@ function Start-Ferrum2Support {
         [Parameter(Mandatory = $true)][object]$Network,
         [Parameter(Mandatory = $true)][object]$Loopback
     )
+    if ($Network.address_family -cne $Context.address_family) { throw 'support address family mismatch' }
+    Assert-Ferrum2CanonicalAddress -Address $Network.support_address -AddressFamily $Context.address_family
     $tcpPort = Get-Ferrum2FreeSupportPorts -Address $Network.support_address
     $udpPort = $tcpPort
     Add-Ferrum2OwnedPort -Context $Context -Protocol "tcp" -Address $Network.support_address `
@@ -565,12 +601,12 @@ function Start-Ferrum2Support {
             -RemoteAddress $Network.support_address -InterfaceAlias $Loopback.interface_alias `
             -Purpose "support-$($protocol.ToLowerInvariant())")
     }
-    $arguments = "windows-tun-support --listen-ip $($Network.support_address) --tcp-port $tcpPort --udp-port $udpPort"
+    $arguments = "windows-tun-support --address-family $($Context.address_family) --listen-ip $($Network.support_address) --tcp-port $tcpPort --udp-port $udpPort"
     $process = Start-Ferrum2OwnedNativeProcess -Context $Context -Application $Harness `
         -Arguments $arguments -WorkingDirectory (Split-Path -Parent $Harness) `
         -LogPrefix "support" -Purpose "support"
     Wait-Ferrum2Text -Path $process.stdout -Pattern '^windows_tun_support status=READY ' -TimeoutSeconds 30
-    return [pscustomobject]@{ process = $process; tcp_port = $tcpPort; udp_port = $udpPort }
+    return [pscustomobject]@{ address_family = $Context.address_family; process = $process; tcp_port = $tcpPort; udp_port = $udpPort }
 }
 
 function Export-Ferrum2OwnedCommandFailureLogs {

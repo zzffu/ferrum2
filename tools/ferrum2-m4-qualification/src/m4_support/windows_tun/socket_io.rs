@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpSocket, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 
 pub(super) const BLOCK: usize = 16 * 1024;
 pub(super) const BULK: usize = 8 * 1024 * 1024;
@@ -34,6 +34,11 @@ pub(super) async fn connect(address: SocketAddr) -> Result<TcpStream, String> {
         TcpSocket::new_v6()
     }
     .map_err(|e| e.to_string())?;
+    if address.is_ipv6() {
+        socket2::SockRef::from(&socket)
+            .set_only_v6(true)
+            .map_err(|e| e.to_string())?;
+    }
     socket
         .set_send_buffer_size(BLOCK as u32)
         .map_err(|e| e.to_string())?;
@@ -48,13 +53,57 @@ pub(super) async fn connect(address: SocketAddr) -> Result<TcpStream, String> {
     Ok(stream)
 }
 
+fn bound_socket(address: SocketAddr, tcp: bool) -> Result<socket2::Socket, String> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(address),
+        if tcp {
+            socket2::Type::STREAM
+        } else {
+            socket2::Type::DGRAM
+        },
+        Some(if tcp {
+            socket2::Protocol::TCP
+        } else {
+            socket2::Protocol::UDP
+        }),
+    )
+    .map_err(|e| e.to_string())?;
+    if address.is_ipv6() {
+        socket.set_only_v6(true).map_err(|e| e.to_string())?;
+    }
+    socket.set_nonblocking(true).map_err(|e| e.to_string())?;
+    socket.bind(&address.into()).map_err(|e| e.to_string())?;
+    Ok(socket)
+}
+
+pub(super) fn listen(address: SocketAddr) -> Result<TcpListener, String> {
+    let socket = bound_socket(address, true)?;
+    socket.listen(32).map_err(|e| e.to_string())?;
+    TcpListener::from_std(socket.into()).map_err(|e| e.to_string())
+}
+
+pub(super) fn bind_udp(address: SocketAddr) -> Result<UdpSocket, String> {
+    let socket: std::net::UdpSocket = bound_socket(address, false)?.into();
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    if address.is_ipv6() {
+        // Windows otherwise may reject the 4096-byte request at the TUN's 1420-byte
+        // MTU. Fragment at the real outgoing interface; never split in userspace.
+        ferrum2_platform_windows::enable_ipv6_udp_fragmentation(&socket)
+            .map_err(|e| e.to_string())?;
+    }
+    UdpSocket::from_std(socket).map_err(|e| e.to_string())
+}
+
 pub(super) async fn udp(address: SocketAddr) -> Result<UdpSocket, String> {
-    let bind = if address.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let socket = UdpSocket::bind(bind).await.map_err(|e| e.to_string())?;
+    let bind = SocketAddr::new(
+        if address.is_ipv4() {
+            std::net::Ipv4Addr::UNSPECIFIED.into()
+        } else {
+            std::net::Ipv6Addr::UNSPECIFIED.into()
+        },
+        0,
+    );
+    let socket = bind_udp(bind)?;
     socket.connect(address).await.map_err(|e| e.to_string())?;
     Ok(socket)
 }

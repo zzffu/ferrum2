@@ -164,6 +164,7 @@ class HostFailureEvidenceTests(unittest.TestCase):
             script.write_text(r"""
 param([string]$Owners, [string]$FixtureRoot)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $Owners 'Ferrum2.Qualification.Host/AddressFamily.ps1')
 . (Join-Path $Owners 'Ferrum2.Qualification.Host/HostExecution.ps1')
 . (Join-Path $Owners 'Ferrum2.Qualification.Host/HostProduct.ps1')
 . (Join-Path $Owners 'Ferrum2.Qualification.Host/HostQualification.ps1')
@@ -184,7 +185,7 @@ function Stop-Ferrum2HostProduct { $script:stops += 1 }
 function Assert-Ferrum2QualificationWfpAbsent { }
 function Get-Ferrum2QualificationLiveWfpWitness { return @{ strict_route = @{}; tcp_ingress = @{} } }
 $script:metricsCalls = 0
-function Get-Ferrum2Metrics($Port) {
+function Get-Ferrum2Metrics($Port, $AddressFamily) {
     $script:metricsCalls += 1
     return "metrics $Port call $script:metricsCalls`n"
 }
@@ -196,12 +197,12 @@ function Get-Ferrum2QualificationMetricLabelValue($Metrics, $Name, $Label, $Valu
 function Start-Ferrum2OwnedNativeProcess { throw 'injected TCP probe failure' }
 $failure = $null
 try {
-    Invoke-Ferrum2HostQualificationChecks -Context @{ evidence_directory = $FixtureRoot; run_root = $FixtureRoot } `
+    Invoke-Ferrum2HostQualificationChecks -Context @{ address_family = 'IPv4'; evidence_directory = $FixtureRoot; run_root = $FixtureRoot } `
         -Candidate @{
             harness = (Join-Path $FixtureRoot 'harness.exe')
             client = (Join-Path $FixtureRoot 'ferrum2-client.exe')
         } `
-        -Network @{ tun_address = '198.18.0.2'; support_address = '198.19.0.1'; support_prefix_length = 32 } -Loopback @{} | Out-Null
+        -Network @{ address_family = 'IPv4'; tun_address = '198.18.0.2'; support_address = '198.19.0.1'; support_prefix_length = 32 } -Loopback @{} | Out-Null
 } catch { $failure = $_.Exception.Message }
 @{ failure = $failure; stops = $script:stops } | ConvertTo-Json -Compress
 """, encoding="utf-8")

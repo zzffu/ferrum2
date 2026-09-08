@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -13,13 +14,25 @@ OWNERS = ROOT / "tools/powershell/Ferrum2.Qualification.Host"
 @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is unavailable")
 class ListenerReservationTests(unittest.TestCase):
     def run_script(self, body: str) -> None:
+        for family in ("IPv4", "IPv6"):
+            with self.subTest(address_family=family):
+                self.run_family_script(body, family)
+
+    def run_family_script(self, body: str, family: str) -> dict:
         with tempfile.TemporaryDirectory(prefix="ferrum2-port-contract-") as temporary:
             root = Path(temporary)
             script = root / "test.ps1"
             script.write_text(r'''
-param([string]$Owners, [string]$Root)
+param([string]$Owners, [string]$Root, [string]$AddressFamily)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $Owners 'AddressFamily.ps1')
+. (Join-Path $Owners 'HostOwnership.ps1')
 . (Join-Path $Owners 'HostExecution.ps1')
+$profile = Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily
+$network = New-Ferrum2HostNetworkIdentity -RunId '0123456789ab' -AddressFamily $AddressFamily
+$context = @{ address_family = $AddressFamily; run_id = '0123456789ab'; run_root = $Root; evidence_directory = $Root;
+    ledger = @{ resources = @{ routes = @() } } }
 $ranges = @(
     @{ protocol = 'tcp'; start_port = 49152; end_port = 65535 },
     @{ protocol = 'udp'; start_port = 49152; end_port = 65535 }
@@ -27,26 +40,31 @@ $ranges = @(
 function Assert-BindState {
     param([uint16]$Port, [string]$Protocol, [bool]$Available)
     $socket = if ($Protocol -eq 'tcp') {
-        [Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::InterNetwork,
+        [Net.Sockets.Socket]::new($profile.socket_family,
             [Net.Sockets.SocketType]::Stream, [Net.Sockets.ProtocolType]::Tcp)
     } else {
-        [Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::InterNetwork,
+        [Net.Sockets.Socket]::new($profile.socket_family,
             [Net.Sockets.SocketType]::Dgram, [Net.Sockets.ProtocolType]::Udp)
     }
     $bound = $false
     try {
         $socket.ExclusiveAddressUse = $true
-        try { $socket.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $Port)); $bound = $true }
+        if ($AddressFamily -ceq 'IPv6') { $socket.DualMode = $false }
+        try { $socket.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Parse($profile.loopback_address), $Port)); $bound = $true }
         catch [Net.Sockets.SocketException] { }
     } finally { $socket.Dispose() }
     if ($bound -ne $Available) { throw "unexpected $Protocol reservation availability" }
 }
 ''' + body, encoding="utf-8")
             result = subprocess.run(
-                ["pwsh", "-NoProfile", "-File", str(script), str(OWNERS), str(root)],
+                ["pwsh", "-NoProfile", "-File", str(script), str(OWNERS), str(root), family],
                 capture_output=True, text=True, encoding="utf-8", timeout=20, check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            return {
+                path.name: tomllib.loads(path.read_text(encoding="utf-8"))
+                for path in root.glob("configs/*/*.toml")
+            }
 
     def test_dynamic_range_readback_is_closed_and_locale_independent(self) -> None:
         self.run_script(r'''
@@ -66,9 +84,14 @@ foreach ($text in @('unknown', "Start : 0`nCount : 10", "Start : 65535`nCount : 
 
     def test_reserved_tcp_and_udp_reject_competitors_until_handoff(self) -> None:
         self.run_script(r'''
-$reservation = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp
+$reservation = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp -AddressFamily $AddressFamily
 try {
     if ($reservation.port -ge 49152 -or $reservation.port -lt 1024) { throw 'selected dynamic port' }
+    if ($AddressFamily -ceq 'IPv6') {
+        foreach ($socket in $reservation.sockets) {
+            if ($socket.DualMode) { throw 'IPv6 reservation accepted IPv4-mapped traffic' }
+        }
+    }
     Assert-BindState -Port $reservation.port -Protocol tcp -Available $false
     Assert-BindState -Port $reservation.port -Protocol udp -Available $false
 } finally { Close-Ferrum2PortReservation -Reservation $reservation }
@@ -79,19 +102,19 @@ Assert-BindState -Port $reservation.port -Protocol udp -Available $true
 
     def test_partial_dual_bind_releases_tcp_before_another_candidate(self) -> None:
         self.run_script(r'''
-$first = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp
-$second = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp
+$first = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp -AddressFamily $AddressFamily
+$second = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp -AddressFamily $AddressFamily
 $blocked = $first.port
 $next = $second.port
 Close-Ferrum2PortReservation -Reservation $first
 Close-Ferrum2PortReservation -Reservation $second
-$udp = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $blocked))
+$udp = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Parse($profile.loopback_address), $blocked))
 $script:candidates = [Collections.Generic.Queue[int]]::new()
 $script:candidates.Enqueue($blocked); $script:candidates.Enqueue($next)
 function Get-Random { param($Minimum, $Maximum) return $script:candidates.Dequeue() }
 $result = $null
 try {
-    $result = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp
+    $result = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp -AddressFamily $AddressFamily
     if ($result.port -ne $next) { throw 'did not move past occupied UDP port' }
     Assert-BindState -Port $blocked -Protocol tcp -Available $true
     Assert-BindState -Port $next -Protocol tcp -Available $false
@@ -103,7 +126,7 @@ try {
 
     def test_cohort_allocation_failure_releases_earlier_reservation(self) -> None:
         self.run_script(r'''
-$script:first = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp
+$script:first = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp -AddressFamily $AddressFamily
 $script:calls = 0
 function Get-Ferrum2DynamicPortRanges { return $ranges }
 function New-Ferrum2PortReservation {
@@ -112,7 +135,7 @@ function New-Ferrum2PortReservation {
     return $script:first
 }
 $failure = $null
-try { New-Ferrum2ProductPorts -Context @{} -Sequence 1 | Out-Null }
+try { New-Ferrum2ProductPorts -Context $context -Sequence 1 | Out-Null }
 catch { $failure = $_.Exception.Message }
 if ($failure -cne 'injected second reservation failure') { throw 'wrong allocation failure' }
 Assert-BindState -Port $script:first.port -Protocol tcp -Available $true
@@ -149,17 +172,16 @@ function Wait-Ferrum2Metric {
     Assert-BindState -Port $script:chosen.server -Protocol udp -Available $false
     Assert-BindState -Port $script:chosen.metrics -Protocol tcp -Available $false
 }
-function Complete-Ferrum2OwnedAdapterIdentity { return @{ ifIndex = 7 } }
-function Get-NetRoute { return @{ NextHop = '0.0.0.0'; RouteMetric = 1 } }
+function Complete-Ferrum2OwnedAdapterIdentity { return @{ ifIndex = 7; InterfaceGuid = '01234567-89ab-cdef-0123-456789abcdef' } }
+function Get-NetRoute { return @{ NextHop = $profile.unspecified_address; RouteMetric = 1 } }
 function Get-NetIPInterface { return @{ NlMtu = 1420 } }
 function Write-Ferrum2HostLedger { }
 function Export-Ferrum2ProductFailureLogs { }
-$context = @{ ledger = @{ resources = @{ routes = @() } } }
 $failure = $null
 try {
     Start-Ferrum2HostProduct -Context $context -Sequence 1 -Loopback @{ interface_alias = 'fixture-loopback' } `
         -Member @{ client = "$Root/client.exe"; server = "$Root/server.exe" } `
-        -Network @{ adapter_name_prefix = 'fixture'; tun_address = '198.18.0.2'; support_address = '198.18.0.1' } | Out-Null
+        -Network $network | Out-Null
 } catch { $failure = $_.Exception.Message }
 if ($failure -cne 'injected server startup failure') { throw "wrong startup failure: $failure" }
 foreach ($port in $script:chosen.Values) { Assert-BindState -Port $port -Protocol tcp -Available $true }
@@ -180,12 +202,12 @@ function Remove-Ferrum2OwnedProcessRecord { param($Context, $ProcessId)
 function Write-AtomicJsonFile { param($Path, $Document)
     $Document | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Path -Encoding utf8
 }
-$context = @{ run_root = $Root; evidence_directory = $Root }
 $actual = @(Get-Ferrum2DynamicPortRanges -Context $context -Sequence 1)
 if ($actual.Count -ne 2 -or $script:owned.Count -ne 0) { throw 'native range readers did not join' }
 $record = Get-Content (Join-Path $Root 'port-ranges/1.json') -Raw | ConvertFrom-Json
-if ($record.sequence -ne 1 -or $record.ipv4_dynamic_ranges.Count -ne 2) { throw 'missing range evidence' }
-$reservation = New-Ferrum2PortReservation -DynamicRanges $actual -Protocols tcp,udp
+if ($record.sequence -ne 1 -or $record.address_family -cne $AddressFamily -or
+    $record.dynamic_ranges.Count -ne 2) { throw 'missing range evidence' }
+$reservation = New-Ferrum2PortReservation -DynamicRanges $actual -Protocols tcp,udp -AddressFamily $AddressFamily
 try {
     foreach ($range in $actual) {
         if ($reservation.port -ge $range.start_port -and $reservation.port -le $range.end_port) {
@@ -205,7 +227,65 @@ Add-Type -TypeDefinition 'public static class Ferrum2HostProcessGroup {
 $script:metricsPolled = $false
 function Get-Ferrum2Metrics { $script:metricsPolled = $true; throw 'metrics must not be polled after process exit' }
 $failure = $null
-try { Wait-Ferrum2Metric -Process @{ pid = 42 } -Port 1234 -Name ferrum2_network_generation -Minimum 1 }
+try { Wait-Ferrum2Metric -Process @{ pid = 42 } -Port 1234 -Name ferrum2_network_generation -Minimum 1 -AddressFamily $AddressFamily }
 catch { $failure = $_.Exception.Message }
 if ($null -eq $failure -or $script:metricsPolled) { throw 'exited process was accepted or metrics were polled' }
+''')
+
+    def test_configs_use_only_selected_family_and_bracket_ipv6_endpoints(self) -> None:
+        for family, loopback, tun_field, bind_field, host_prefix, tun_prefix in (
+            ("IPv4", "127.0.0.1", "ipv4_address", "inet4_bind_address", 32, 30),
+            ("IPv6", "::1", "ipv6_address", "inet6_bind_address", 128, 126),
+        ):
+            with self.subTest(address_family=family):
+                configs = self.run_family_script(r'''
+$reset = [Net.IPEndPoint]::new([Net.IPAddress]::Parse($network.reset_address), 443)
+Write-Ferrum2HostConfigs -Context $context -Network $network `
+    -Loopback @{ interface_alias = 'fixture-loopback' } -AdapterName 'fixture' `
+    -ServerPort 41001 -ClientMetricsPort 41002 -ServerMetricsPort 41003 `
+    -Sequence 1 -ResetProbeEndpoint $reset | Out-Null
+''', family)
+                client, server = configs["client.toml"], configs["server.toml"]
+                endpoint_host = f"[{loopback}]" if family == "IPv6" else loopback
+                self.assertEqual(client["outbounds"][0]["server"], f"{endpoint_host}:41001")
+                self.assertEqual(server["inbounds"][0]["listen"], f"{endpoint_host}:41001")
+                self.assertEqual(client["metrics"]["listen"], f"{endpoint_host}:41002")
+                self.assertEqual(server["metrics"]["listen"], f"{endpoint_host}:41003")
+                self.assertEqual(client["outbounds"][0][bind_field], loopback)
+                self.assertTrue(client["tun"][tun_field].endswith(f"/{tun_prefix}"))
+                support = server["outbounds"][0][bind_field]
+                self.assertEqual(client["tun"]["route_address"], [f"{support}/{host_prefix}"])
+                reset_endpoint = client["outbounds"][1]["server"]
+                if family == "IPv6":
+                    self.assertTrue(reset_endpoint.startswith("[fd00:"))
+                    self.assertTrue(reset_endpoint.endswith("]:443"))
+                    self.assertNotIn("ipv4_address", client["tun"])
+                    for outbound in client["outbounds"] + server["outbounds"]:
+                        self.assertNotIn("inet4_bind_address", outbound)
+                    self.assertNotIn("127.0.0.1", str(configs))
+                else:
+                    self.assertNotIn("ipv6_address", client["tun"])
+                    self.assertNotIn("inet6_bind_address", client["outbounds"][0])
+                    self.assertNotIn("[", reset_endpoint)
+
+    def test_tcp_udp_dynamic_exclusions_are_applied_before_binding(self) -> None:
+        self.run_script(r'''
+$candidate = New-Ferrum2PortReservation -DynamicRanges $ranges -Protocols tcp,udp -AddressFamily $AddressFamily
+$port = $candidate.port
+Close-Ferrum2PortReservation -Reservation $candidate
+$script:candidates = [Collections.Generic.Queue[int]]::new()
+$script:candidates.Enqueue(50000)
+$script:candidates.Enqueue(60000)
+$script:candidates.Enqueue($port)
+$separateRanges = @(
+    @{ protocol = 'tcp'; start_port = 49152; end_port = 55000 },
+    @{ protocol = 'udp'; start_port = 55001; end_port = 65535 }
+)
+function Get-Random { param($Minimum, $Maximum) return $script:candidates.Dequeue() }
+$reservation = New-Ferrum2PortReservation -DynamicRanges $separateRanges -Protocols tcp,udp -AddressFamily $AddressFamily
+try {
+    if ($reservation.port -ne $port) { throw 'selected TCP or UDP dynamic allocation port' }
+    Assert-BindState -Port $port -Protocol tcp -Available $false
+    Assert-BindState -Port $port -Protocol udp -Available $false
+} finally { Close-Ferrum2PortReservation -Reservation $reservation }
 ''')

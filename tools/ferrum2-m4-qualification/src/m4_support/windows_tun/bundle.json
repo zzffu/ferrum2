@@ -5,8 +5,8 @@
   "files": [
     {
       "path": "Cargo.toml",
-      "bytes": 648,
-      "sha256": "7a2104185eadfd3c04bbf9c30587557ed367ca45ee224933f2cc8e7b3427d260"
+      "bytes": 792,
+      "sha256": "9a607cb0bae2ac2c51a41ef920467dbf4df636ba70c35842bf9637c1fed6cb7f"
     },
     {
       "path": "src/m4_support/dns_resource.rs",
@@ -150,8 +150,8 @@
     },
     {
       "path": "src/m4_support/windows_tun/contract.rs",
-      "bytes": 3962,
-      "sha256": "cee90e411afc6ba3f65d8f5ad3f8024e40a955834c79071cf0e2ab431cc6b349"
+      "bytes": 5383,
+      "sha256": "cdac6f7fe7f0cd7942e6488268962f09a10d65b09d7eafe42097047b9bc3a886"
     },
     {
       "path": "src/m4_support/windows_tun/mod.rs",
@@ -160,23 +160,23 @@
     },
     {
       "path": "src/m4_support/windows_tun/self_check.rs",
-      "bytes": 1810,
-      "sha256": "9cb2d96b45f9e92a27b73f9cab93548f0e2034cab1d36c059d9e6cc1524b2131"
+      "bytes": 9403,
+      "sha256": "96c59fb90ac45fd38dcdc13311aceb18bee6610bf4b434c25126abab620196d6"
     },
     {
       "path": "src/m4_support/windows_tun/socket_io.rs",
-      "bytes": 7038,
-      "sha256": "ee269380da217a845a2c9f6580c101670c260edb0edaeb69044621a7028f9d01"
+      "bytes": 8776,
+      "sha256": "aff24f08cb5911d6ddd0d603a916bfcea44f59a8bd98b1945fc146463c93bfca"
     },
     {
       "path": "src/m4_support/windows_tun/support.rs",
-      "bytes": 3337,
-      "sha256": "d40ad8858de3c37a8b71ed6cd5d78a01079983df0caf664f4dfe0b9f93c2142c"
+      "bytes": 3323,
+      "sha256": "54f8168f64100ac6c8cb2d32ea19b94d3f28867cecd2e477ade2ccfedde06b50"
     },
     {
       "path": "src/m4_support/windows_tun/workload.rs",
-      "bytes": 10515,
-      "sha256": "920a7de09e6847c3d4582f64db228157e8b6130798e1cbee5753a5a4180675d0"
+      "bytes": 10832,
+      "sha256": "91818c646a1d298718520b54188094f7a7fd252c68a8a63d6c15ea039f956186"
     },
     {
       "path": "src/main.rs",

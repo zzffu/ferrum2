@@ -99,9 +99,14 @@ unsupported-target stubs, or injected Windows operations and run in ordinary Lin
 CI. Ordinary tests must never create a real adapter or mutate route, DNS, WFP, or interface state.
 Privileged Windows TUN correctness qualification runs only through
 `tests/platform/run_windows_tun_qualification_host.ps1`; it requires an already elevated shell,
-the explicit `-AcknowledgeHostNetworkMutation` switch, run-owned RFC 2544 addresses and `/32` routes,
-and a verified zero-residue transaction within 900 seconds. It verifies sustained concurrent TCP,
-observed backpressure, UDP/fragments and active-work reset, not just a short echo. TUN performance
+the explicit `-AcknowledgeHostNetworkMutation` switch, and one selected family (`-AddressFamily
+IPv4|IPv6`, default IPv4). IPv4 uses run-owned RFC 2544 addresses and `/32` explicit routes;
+IPv6 uses run-owned ULA addresses and `/128` explicit routes. Only the owned TUN may have its
+connected `/30` or `/126` prefix. Every run must verify zero residue within 900 seconds and prove
+sustained concurrent TCP, observed backpressure, UDP/fragments and active-work reset, not just a
+short echo. The owner's standing development-host authorization is recorded in
+`docs/windows-tun-qualification.md`; retain elevation and the literal acknowledgement on every run.
+TUN performance
 uses the crate-owned `tun-benchmark` with bounded mock I/O and the Python candidate controller,
 without real sockets or host mutation. It does not qualify reactor or driver behavior. The host
 qualification runner may create only ledger-owned firewall rules for the exact current test EXEs

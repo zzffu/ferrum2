@@ -20,8 +20,9 @@ use windows_sys::Win32::NetworkManagement::Ndis::{
     IfOperStatusUp, MediaConnectStateConnected, NET_IF_ADMIN_STATUS_UP, NET_LUID_LH,
 };
 use windows_sys::Win32::Networking::WinSock::{
-    AF_INET, AF_INET6, AF_UNSPEC, IpDadStateDeprecated, IpDadStatePreferred, SOCKADDR, SOCKADDR_IN,
-    SOCKADDR_IN6, SOCKADDR_INET, bind as winsock_bind, setsockopt,
+    AF_INET, AF_INET6, AF_UNSPEC, IP_PMTUDISC_DONT, IPPROTO_IPV6, IPV6_MTU_DISCOVER,
+    IpDadStateDeprecated, IpDadStatePreferred, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
+    bind as winsock_bind, setsockopt,
 };
 
 use super::super::core::network::contract::CatalogDefaultRoute;
@@ -161,6 +162,31 @@ impl<T: AsRawSocket> ResolvedSocketBindingOperations for PlatformResolvedSocketB
     fn bind_source(&mut self, source: std::net::SocketAddr) -> Result<(), Error> {
         bind_source_socket(self.0, source)
     }
+}
+
+/// Enables source fragmentation of IPv6 UDP datagrams at the outgoing interface MTU.
+///
+/// The socket must already be bound to IPv6. Only this borrowed socket is changed;
+/// no interface, route, or machine-wide PMTU state is modified. Callers must discard
+/// the socket on failure rather than send traffic under an unknown fragmentation policy.
+pub fn enable_ipv6_udp_fragmentation(socket: &std::net::UdpSocket) -> Result<(), Error> {
+    if !socket.local_addr().map_err(|_| Error)?.is_ipv6() {
+        return Err(Error);
+    }
+    let value = IP_PMTUDISC_DONT;
+    // SAFETY: the borrowed UDP socket remains owned and open for the synchronous
+    // call. Winsock reads exactly one live DWORD-sized PMTUD_STATE value; no pointer
+    // or socket ownership is transferred or retained.
+    let status = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            IPPROTO_IPV6,
+            IPV6_MTU_DISCOVER,
+            (&raw const value).cast(),
+            i32::try_from(std::mem::size_of_val(&value)).map_err(|_| Error)?,
+        )
+    };
+    if status == 0 { Ok(()) } else { Err(Error) }
 }
 
 pub(super) fn bind_socket<T: AsRawSocket>(

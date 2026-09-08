@@ -22,6 +22,10 @@ param(
     [string]$CandidateSha,
     [Parameter(Mandatory = $true, ParameterSetName = "Run")]
     [string]$EvidenceDirectory,
+    [Parameter(ParameterSetName = "Plan")]
+    [Parameter(ParameterSetName = "Run")]
+    [ValidateSet('IPv4', 'IPv6')]
+    [string]$AddressFamily = 'IPv4',
     [Parameter(ParameterSetName = "Run")]
     [switch]$AcknowledgeHostNetworkMutation
 )
@@ -36,6 +40,7 @@ $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') `
     -ErrorAction Stop).Path
 $moduleRoot = Join-Path $repositoryRoot 'tools\powershell\Ferrum2.Qualification.Host'
 . (Join-Path $moduleRoot 'SourceBundle.ps1')
+. (Join-Path $moduleRoot 'AddressFamily.ps1')
 $sourceBundle = Read-Ferrum2HostQualificationSourceBundle `
     -RepositoryRoot $repositoryRoot `
     -ManifestPath (Join-Path $moduleRoot 'bundle.json')
@@ -54,6 +59,7 @@ if ($PlanOnly -or $RecoveryOnly) {
     if ($PlanOnly) {
         $arguments.PlanOnly = [Management.Automation.SwitchParameter]$true
         $arguments.CandidateSha = $CandidateSha
+        $arguments.AddressFamily = $AddressFamily
     } else {
         $arguments.RecoveryOnly = [Management.Automation.SwitchParameter]$true
     }
@@ -64,6 +70,8 @@ if ($PlanOnly -or $RecoveryOnly) {
 if (-not $AcknowledgeHostNetworkMutation) {
     throw 'host qualification requires -AcknowledgeHostNetworkMutation'
 }
+$family = Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily
+$AddressFamily = $family.address_family
 if ($EvidenceDirectory -match '["\r\n]' -or
     [string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
     throw 'host qualification evidence path is invalid'
@@ -88,6 +96,7 @@ $workerArguments = @(
     '-NoProfile'
     '-File', ('"' + $worker + '"')
     '-CandidateSha', $CandidateSha
+    '-AddressFamily', $AddressFamily
     '-EvidenceDirectory', ('"' + $resolvedEvidence + '"')
     '-QualificationSourceBundleSha256', $sourceBundle.sha256
     '-AcknowledgeHostNetworkMutation'
@@ -177,11 +186,11 @@ try {
     )
     $expectedConditionShape = @(
         'FWPM_CONDITION_ALE_APP_ID:FWP_BYTE_BLOB_TYPE:FWP_MATCH_EQUAL',
-        'FWPM_CONDITION_IP_LOCAL_ADDRESS:FWP_UINT32:FWP_MATCH_EQUAL',
+        "FWPM_CONDITION_IP_LOCAL_ADDRESS:$($family.wfp_address_type):FWP_MATCH_EQUAL",
         'FWPM_CONDITION_IP_LOCAL_INTERFACE:FWP_UINT64:FWP_MATCH_EQUAL',
         'FWPM_CONDITION_IP_LOCAL_PORT:FWP_UINT16:FWP_MATCH_EQUAL',
         'FWPM_CONDITION_IP_PROTOCOL:FWP_UINT8:FWP_MATCH_EQUAL',
-        'FWPM_CONDITION_IP_REMOTE_ADDRESS:FWP_UINT32:FWP_MATCH_EQUAL'
+        "FWPM_CONDITION_IP_REMOTE_ADDRESS:$($family.wfp_address_type):FWP_MATCH_EQUAL"
     ) -join '|'
     $ingressEvidenceValid = (
         @($ingressSnapshots | Where-Object {
@@ -190,10 +199,10 @@ try {
             $_.sublayer_key -cne '5e741969-f578-43bd-a1e2-a420c49a7f01' -or
             [string]$_.sublayer_weight -cnotmatch '^[1-9][0-9]{0,4}$' -or
             $_.process_id -ne $_.listener.process_id -or
-            $_.filter.name -cne 'Ferrum2 TCP ingress IPv4' -or
+            $_.filter.name -cne "Ferrum2 TCP ingress $AddressFamily" -or
             [string]$_.filter.key -cnotmatch '^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$' -or
             [string]$_.filter.id -cnotmatch '^[1-9][0-9]*$' -or
-            $_.filter.layer -cne 'FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4' -or
+            $_.filter.layer -cne $family.wfp_layer -or
             $_.filter.action -cne 'FWP_ACTION_PERMIT' -or
             $_.filter.flags -cnotcontains 'FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT' -or
             @($_.filter.flags | Where-Object {
@@ -213,7 +222,7 @@ try {
             (@($_.filter.conditions | ForEach-Object {
                 "$($_.field_key):$($_.type):$($_.match_type)"
             } | Sort-Object) -join '|') -cne $expectedConditionShape -or
-            $_.listener.address_family -cne 'IPv4' -or
+            $_.listener.address_family -cne $AddressFamily -or
             $_.listener.local_address -in @('0.0.0.0', '::') -or
             $_.listener.local_port -eq 0 -or
             $_.listener.wildcard_listener_count -ne 0
@@ -228,8 +237,8 @@ try {
         }).Count -eq 0
     )
     $strictRoute = $workerResult.strict_route_wfp
-    Assert-Ferrum2QualificationWorkloadWitness -Witness $workerResult.data_path
-    Assert-Ferrum2QualificationResetReady -Witness $strictRoute.notification.active_work_ready
+    Assert-Ferrum2QualificationWorkloadWitness -Witness $workerResult.data_path -AddressFamily $AddressFamily
+    Assert-Ferrum2QualificationResetReady -Witness $strictRoute.notification.active_work_ready -AddressFamily $AddressFamily
     if (@($workerResult.firewall_rules).Count -ne 18) {
         throw 'qualification fixed firewall rule set evidence is incomplete'
     }
@@ -237,6 +246,10 @@ try {
         -EvidenceDirectory $resolvedEvidence
     $resetEvidenceValid = (
         $strictRoute.notification.observed -eq $true -and
+        $strictRoute.notification.address_family -ceq $AddressFamily -and
+        $strictRoute.notification.destination_prefix.EndsWith("/$($family.host_prefix_length)") -and
+        $strictRoute.notification.route_before.route_metric -eq 4094 -and
+        $strictRoute.notification.route_after.route_metric -eq 4093 -and
         $strictRoute.notification.tun_mtu_bytes -eq 1420 -and
         $strictRoute.notification.workload_generation_before -eq 1 -and
         $strictRoute.notification.workload_generation_after -eq 2 -and
@@ -254,6 +267,8 @@ try {
             (@($strictRoute.after_network_reset.filters.id) -join '|')
     )
     if ($workerResult.status -cne 'PASS' -or $workerResult.qualification -ne $true -or
+        $workerResult.address_family -cne $AddressFamily -or
+        $cleanup.address_family -cne $AddressFamily -or
         $workerResult.candidate_sha -cne $CandidateSha -or
         $workerResult.qualification_source_bundle_sha256 -cne $sourceBundle.sha256 -or
         ($actualCheckNames -join '|') -cne ($expectedChecks -join '|') -or
@@ -271,6 +286,7 @@ try {
     $result = [pscustomobject][ordered]@{
         schema_version = 1
         kind = 'ferrum2.windows-tun.host-qualification'
+        address_family = $AddressFamily
         status = 'QUALIFIED'
         qualification = $true
         candidate_sha = $CandidateSha

@@ -311,6 +311,10 @@ fn workspace_boundaries_are_expressed_by_cargo_metadata() {
         platform_windows_edges,
         vec![
             ("ferrum2-client", None),
+            (
+                "ferrum2-m4-qualification",
+                Some("cfg(all(windows, target_arch = \"x86_64\"))"),
+            ),
             ("ferrum2-server", None),
             ("ferrum2-tun", None),
         ]

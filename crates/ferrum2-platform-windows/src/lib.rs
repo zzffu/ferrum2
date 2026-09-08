@@ -538,7 +538,7 @@ pub use backend::{
 };
 
 #[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
-pub use backend::bind_resolved_socket;
+pub use backend::{bind_resolved_socket, enable_ipv6_udp_fragmentation};
 
 #[cfg(all(windows, target_arch = "x86_64", feature = "live-backend", not(test)))]
 pub use backend::{create_config_temporary, replace_config_file, validate_private_file};

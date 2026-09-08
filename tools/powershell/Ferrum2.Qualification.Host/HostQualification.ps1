@@ -7,11 +7,15 @@ $script:QualificationBuildTimeoutSeconds = 600
 function Get-Ferrum2HostQualificationPlan {
     param(
         [Parameter(Mandatory = $true)][string]$CandidateSha,
-        [Parameter(Mandatory = $true)][string]$QualificationSourceBundleSha256
+        [Parameter(Mandatory = $true)][string]$QualificationSourceBundleSha256,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4'
     )
+    $family = Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily
+    $AddressFamily = $family.address_family
     return [pscustomobject][ordered]@{
         schema_version = 1
         kind = 'ferrum2.windows-tun.host-qualification-plan'
+        address_family = $AddressFamily
         execution = 'explicit-authorized-windows-host'
         candidate_sha = $CandidateSha
         qualification_source_bundle_sha256 = $QualificationSourceBundleSha256
@@ -44,18 +48,19 @@ function Get-Ferrum2HostQualificationPlan {
             requires_elevation = $true
             requires_explicit_acknowledgement = $true
             automatic_elevation = $false
-            live_address_family = 'IPv4 only (RFC2544 198.18.0.0/15)'
-            route_scope = 'run-owned /32 only'
+            live_address_family = if ($AddressFamily -ceq 'IPv4') { 'IPv4 only (RFC2544 198.18.0.0/15)' } else { 'IPv6 only (run-owned ULA)' }
+            route_scope = if ($AddressFamily -ceq 'IPv4') { 'run-owned /32 only' } else { 'run-owned /128 routes; /126 connected route on owned TUN only' }
+            tun_connected_prefix_length = $family.tun_prefix_length
             tcp_ingress_scope = 'exact app, TCP, TUN LUID, local address/port, and remote peer'
             wfp_lifetime = 'process-owned dynamic sessions only'
             tcp_ingress_installation = 'automatic after listener bind and before admission'
             firewall_rule_store = 'PersistentStore with exact ActiveStore readback'
             firewall_rule_lifetime = 'removed by finally/recovery; catastrophic interruption may retain rules until recovery'
-            firewall_rule_scope = 'current executable path/hash; exact IPv4 endpoints; fixed service ports or observed dynamic-port range; all profiles'
+            firewall_rule_scope = "current executable path/hash; exact $AddressFamily endpoints; fixed service ports or observed dynamic-port range; all profiles"
             firewall_interface_transition = 'client ingress only: prelaunch deferred interface, then same rule narrowed to owned TUN alias after identity/MTU readback and before traffic; all other rules exact interface throughout'
             mutations = @(
                 'one run-owned Wintun adapter at a time',
-                'run-owned RFC2544 loopback support address',
+                "run-owned $AddressFamily loopback support address",
                 'run-owned narrow routes',
                 'process-owned dynamic strict-route WFP session',
                 'process-owned dynamic exact TCP ingress WFP session',
@@ -124,6 +129,7 @@ function Initialize-Ferrum2QualificationCandidate {
     $manifest = [pscustomobject][ordered]@{
         schema_version = 1
         kind = 'ferrum2.windows-tun.host-qualification-build'
+        address_family = $Context.address_family
         run_id = $Context.run_id
         qualification_source_bundle_sha256 = $Context.qualification_source_bundle_sha256
         candidate = $candidate
@@ -165,47 +171,55 @@ function Initialize-Ferrum2QualificationResetRoute {
         [Parameter(Mandatory = $true)][object]$Context,
         [Parameter(Mandatory = $true)][object]$Network
     )
-    $octets = [Net.IPAddress]::Parse($Network.support_address).GetAddressBytes()
-    if ($octets.Length -ne 4 -or $octets[0] -ne 198 -or
-        $octets[1] -notin @(18, 19) -or $octets[3] -ge 254) {
-        throw 'qualification reset probe is outside its run-owned RFC2544 range'
+    $family = Get-Ferrum2AddressFamilyProfile -AddressFamily $Network.address_family
+    $address = [string]$Network.reset_address
+    $prefix = "$address/$($family.host_prefix_length)"
+    $parsed = [Net.IPAddress]::Parse($address)
+    if ($parsed.AddressFamily -ne $family.socket_family -or
+        $parsed.IsIPv6Multicast -or [Net.IPAddress]::IsLoopback($parsed)) {
+        throw 'qualification reset probe family or unicast identity is invalid'
     }
-    $address = "$($octets[0]).$($octets[1]).$($octets[2]).$($octets[3] + 1)"
-    $prefix = "$address/32"
-    if (@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix $prefix `
-            -ErrorAction SilentlyContinue).Count -ne 0 -or
-        @(Get-NetIPAddress -AddressFamily IPv4 -IPAddress $address `
-            -ErrorAction SilentlyContinue).Count -ne 0) {
+    $inventory = Get-Ferrum2NetworkInventory -AddressFamily $family.address_family
+    if (@($inventory.routes | Where-Object DestinationPrefix -CEQ $prefix).Count -ne 0 -or
+        @($inventory.addresses | Where-Object IPAddress -CEQ $address).Count -ne 0) {
         throw 'qualification reset probe route/address baseline must be absent'
     }
-    $adapters = @(Get-NetAdapter -Physical -ErrorAction Stop |
-        Where-Object { [string]$_.Status -ceq 'Up' } | Sort-Object ifIndex)
-    if ($adapters.Count -gt 4096) {
-        throw 'qualification physical interface inventory exceeds its bound'
-    }
     $selected = $null
-    foreach ($adapter in $adapters) {
-        try {
-            $rows = @(Find-NetRoute -RemoteIPAddress $address `
-                -InterfaceIndex ([uint32]$adapter.ifIndex) -ErrorAction Stop)
-        } catch {
-            continue
+    if ($family.address_family -ceq 'IPv6') {
+        # The unused fixed egress probe tracks this exact route fingerprint. Changing
+        # its metric exercises semantic reset without a public IPv6 gateway or traffic.
+        $loopback = Get-Ferrum2LoopbackIdentity -AddressFamily IPv6
+        $selected = [pscustomobject]@{
+            InterfaceIndex = $loopback.interface_index
+            NextHop = $family.unspecified_address
         }
-        $routes = @($rows | Where-Object {
-            $_.CimClass.CimClassName -ceq 'MSFT_NetRoute'
-        })
-        if ($routes.Count -eq 1 -and
-            [uint32]$routes[0].InterfaceIndex -eq [uint32]$adapter.ifIndex -and
-            [string]$routes[0].NextHop -cne '0.0.0.0') {
-            $selected = $routes[0]
-            break
+    } else {
+        $adapters = @(Get-NetAdapter -Physical -ErrorAction Stop |
+            Where-Object { [string]$_.Status -ceq 'Up' } | Sort-Object ifIndex)
+        if ($adapters.Count -gt 4096) {
+            throw 'qualification physical interface inventory exceeds its bound'
+        }
+        foreach ($adapter in $adapters) {
+            try {
+                $rows = @(Find-NetRoute -RemoteIPAddress $address `
+                    -InterfaceIndex ([uint32]$adapter.ifIndex) -ErrorAction Stop)
+            } catch {
+                continue
+            }
+            $routes = @($rows | Where-Object { $_.CimClass.CimClassName -ceq 'MSFT_NetRoute' })
+            if ($routes.Count -eq 1 -and
+                [uint32]$routes[0].InterfaceIndex -eq [uint32]$adapter.ifIndex -and
+                [string]$routes[0].NextHop -cne $family.unspecified_address) {
+                $selected = $routes[0]
+                break
+            }
+        }
+        if ($null -eq $selected) {
+            throw 'qualification reset needs a readable active hardware IPv4 gateway route'
         }
     }
-    if ($null -eq $selected) {
-        throw 'qualification reset needs a readable active hardware IPv4 gateway route'
-    }
-    # These two exact /32 entries affect only the unused probe address. Adapter settings,
-    # existing routes, DNS and WLAN state are never changed; no probe socket is opened.
+    # Only two successive exact host routes are owned. No existing route, physical
+    # interface setting, DNS or WLAN state is changed; no probe socket is opened.
     $ownedRoute = Add-Ferrum2OwnedRoute -Context $Context `
         -InterfaceIndex ([uint32]$selected.InterfaceIndex) -DestinationPrefix $prefix `
         -NextHop ([string]$selected.NextHop) -RouteMetric 4094 `
@@ -214,13 +228,13 @@ function Initialize-Ferrum2QualificationResetRoute {
         -ExpectedInterfaceIndex ([uint32]$selected.InterfaceIndex) `
         -Purpose 'qualification-reset-baseline'
     if ($proof.destination_prefix -cne $prefix -or
-        $proof.next_hop -cne [string]$selected.NextHop) {
+        $proof.next_hop -cne [string]$selected.NextHop -or $proof.route_metric -ne 4094) {
         throw 'qualification reset baseline did not select its exact owned route'
     }
     return [pscustomobject]@{
         address = $address
         prefix = $prefix
-        endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Parse($address), 9)
+        endpoint = [Net.IPEndPoint]::new($parsed, 9)
         interface_index = [uint32]$selected.InterfaceIndex
         before = $proof
         owned_route = $ownedRoute
@@ -234,6 +248,7 @@ function Invoke-Ferrum2HostQualificationChecks {
         [Parameter(Mandatory = $true)][object]$Network,
         [Parameter(Mandatory = $true)][object]$Loopback
     )
+    $family = Get-Ferrum2AddressFamilyProfile -AddressFamily $Network.address_family
     [void](Add-Ferrum2OwnedAddress -Context $Context -Loopback $Loopback `
         -Address $Network.support_address -PrefixLength $Network.support_prefix_length)
     $support = Start-Ferrum2Support -Context $Context -Harness $Candidate.harness `
@@ -273,12 +288,12 @@ function Invoke-Ferrum2HostQualificationChecks {
         -Network $Network -Loopback $Loopback -Sequence 2 `
         -ResetProbeEndpoint $resetRoute.endpoint
     try {
-        $metricsBefore = Get-Ferrum2Metrics -Port $smokeRuntime.client_metrics_port
+        $metricsBefore = Get-Ferrum2Metrics -Port $smokeRuntime.client_metrics_port -AddressFamily $family.address_family
         Write-NewUtf8File -Path (Join-Path $Context.evidence_directory `
             'qualification-client-metrics-before.txt') -Text $metricsBefore
         Write-NewUtf8File -Path (Join-Path $Context.evidence_directory `
             'qualification-server-metrics-before.txt') `
-            -Text (Get-Ferrum2Metrics -Port $smokeRuntime.server_metrics_port)
+            -Text (Get-Ferrum2Metrics -Port $smokeRuntime.server_metrics_port -AddressFamily $family.address_family)
         $generationBefore = Get-Ferrum2MetricValue $metricsBefore `
             'ferrum2_tun_session_generation'
         if ((Get-Ferrum2MetricValue $metricsBefore 'ferrum2_tun_strict_route_requested') -ne 1 -or
@@ -303,7 +318,7 @@ function Invoke-Ferrum2HostQualificationChecks {
             -LocalPort "$($udpRanges[0].start_port)-$($udpRanges[0].end_port)" `
             -RemoteAddress $Network.support_address -RemotePort ([string]$support.udp_port) `
             -InterfaceAlias $smokeRuntime.adapter_name -Purpose 'workload-udp-replies')
-        $workloadArguments = "windows-tun-qualification --target-ip $($Network.support_address) " +
+        $workloadArguments = "windows-tun-qualification --address-family $($family.address_family) --target-ip $($Network.support_address) " +
             "--tcp-port $($support.tcp_port) --udp-port $($support.udp_port) " +
             "--reset-ready-file `"$workloadReady`" --reset-release-file `"$workloadRelease`" " +
             "--output `"$workloadOutput`""
@@ -326,16 +341,23 @@ function Invoke-Ferrum2HostQualificationChecks {
             Start-Sleep -Milliseconds 50
         }
         $ready = Read-Ferrum2QualificationWorkloadJson -Path $workloadReady
-        Assert-Ferrum2QualificationResetReady -Witness $ready
+        Assert-Ferrum2QualificationResetReady -Witness $ready -AddressFamily $family.address_family
         $routeProofs = @($smokeRuntime.route_proofs)
         $notificationAddress = $resetRoute.address
-        $routeNotification = [Ferrum2QualificationRouteNotification]::new()
+        $routeNotification = [Ferrum2QualificationRouteNotification]::new($family.address_family)
         try {
             Remove-Ferrum2OwnedRoute -Row $resetRoute.owned_route
+            $Context.ledger.resources.routes = @($Context.ledger.resources.routes | Where-Object {
+                -not ([string]$_.destination_prefix -ceq [string]$resetRoute.owned_route.destination_prefix -and
+                    [uint32]$_.interface_index -eq [uint32]$resetRoute.owned_route.interface_index -and
+                    [string]$_.next_hop -ceq [string]$resetRoute.owned_route.next_hop -and
+                    [uint16]$_.route_metric -eq [uint16]$resetRoute.owned_route.route_metric)
+            })
+            Write-Ferrum2HostLedger -Context $Context
             [void](Add-Ferrum2OwnedRoute -Context $Context `
                 -InterfaceIndex $resetRoute.interface_index `
                 -DestinationPrefix $resetRoute.prefix -RouteMetric 4093 `
-                -Kind 'qualification-reset-change')
+                -Kind 'qualification-reset-change' -NextHop $family.unspecified_address)
             if (-not $routeNotification.Wait(10000)) {
                 throw 'host qualification did not observe the run-owned route notification'
             }
@@ -344,12 +366,13 @@ function Invoke-Ferrum2HostQualificationChecks {
         }
         $metricsAfter = Wait-Ferrum2Metric -Process $smokeRuntime.client `
             -Port $smokeRuntime.client_metrics_port -Name 'ferrum2_tun_session_generation' `
-            -Minimum ($generationBefore + 1) -TimeoutSeconds 30
+            -Minimum ($generationBefore + 1) -TimeoutSeconds 30 -AddressFamily $family.address_family
         $resetRouteAfter = Get-Ferrum2RouteProof -RemoteAddress $notificationAddress `
             -ExpectedInterfaceIndex $resetRoute.interface_index `
             -Purpose 'qualification-reset-change'
         if ($resetRouteAfter.destination_prefix -cne $resetRoute.prefix -or
-            $resetRouteAfter.next_hop -cne '0.0.0.0') {
+            $resetRouteAfter.next_hop -cne $family.unspecified_address -or
+            $resetRouteAfter.route_metric -ne 4093) {
             throw 'qualification reset did not select its second exact owned route'
         }
         $generationAfter = Get-Ferrum2MetricValue $metricsAfter `
@@ -372,7 +395,8 @@ function Invoke-Ferrum2HostQualificationChecks {
         $notificationWitness = [pscustomobject][ordered]@{
             source = 'NotifyRouteChange2'
             observed = $true
-            destination_prefix = "$notificationAddress/32"
+            address_family = $family.address_family
+            destination_prefix = $resetRoute.prefix
             route_before = $resetRoute.before
             route_after = $resetRouteAfter
             session_generation_before = [uint64]$generationBefore
@@ -385,6 +409,7 @@ function Invoke-Ferrum2HostQualificationChecks {
         Write-AtomicJsonFile -Path $workloadRelease -Document ([pscustomobject]@{
             schema_version = 1
             kind = 'ferrum2.windows-tun-reset-release'
+            address_family = $family.address_family
             generation = 2
         })
         $remainingSeconds = [int][Math]::Floor(60 - $workloadTimer.Elapsed.TotalSeconds)
@@ -392,7 +417,7 @@ function Invoke-Ferrum2HostQualificationChecks {
         [void](Complete-Ferrum2OwnedCommand -Context $Context -Process $workload `
             -LogPrefix 'qualification-workload' -TimeoutSeconds $remainingSeconds)
         $workloadWitness = Read-Ferrum2QualificationWorkloadJson -Path $workloadOutput
-        Assert-Ferrum2QualificationWorkloadWitness -Witness $workloadWitness
+        Assert-Ferrum2QualificationWorkloadWitness -Witness $workloadWitness -AddressFamily $family.address_family
         $workloadTimer.Stop()
     } catch {
         $failure = $_
@@ -405,7 +430,7 @@ function Invoke-Ferrum2HostQualificationChecks {
             try {
                 Write-NewUtf8File -Path (Join-Path $Context.evidence_directory `
                     "qualification-$($endpoint.name)-metrics-failure.txt") `
-                    -Text (Get-Ferrum2Metrics -Port $endpoint.port)
+                    -Text (Get-Ferrum2Metrics -Port $endpoint.port -AddressFamily $family.address_family)
             } catch { Write-Warning 'qualification failure metrics unavailable' }
         }
         throw $failure
@@ -477,6 +502,7 @@ function Invoke-Ferrum2HostQualificationChecks {
     return [pscustomobject][ordered]@{
         schema_version = 1
         kind = 'ferrum2.windows-tun.host-qualification-checks'
+        address_family = $family.address_family
         run_id = $Context.run_id
         candidate_sha = $Candidate.commit_sha
         checks = $checks.ToArray()
@@ -513,6 +539,10 @@ function Invoke-Ferrum2HostQualification {
         [string]$CandidateSha,
         [Parameter(Mandatory = $true, ParameterSetName = 'Run')]
         [string]$EvidenceDirectory,
+        [Parameter(ParameterSetName = 'Plan')]
+        [Parameter(ParameterSetName = 'Run')]
+        [ValidateSet('IPv4', 'IPv6')]
+        [string]$AddressFamily = 'IPv4',
         [Parameter(ParameterSetName = 'Run')]
         [switch]$AcknowledgeHostNetworkMutation,
         [Parameter(Mandatory = $true)]
@@ -531,7 +561,7 @@ function Invoke-Ferrum2HostQualification {
     if ($PlanOnly) {
         [void](Resolve-Ferrum2CommitSha -RepositoryRoot $RepositoryRoot -Sha $CandidateSha)
         return Get-Ferrum2HostQualificationPlan -CandidateSha $CandidateSha `
-            -QualificationSourceBundleSha256 $QualificationSourceBundleSha256
+            -QualificationSourceBundleSha256 $QualificationSourceBundleSha256 -AddressFamily $AddressFamily
     }
     $mutex = $null
     if ($RecoveryOnly) {
@@ -542,6 +572,7 @@ function Invoke-Ferrum2HostQualification {
             Exit-Ferrum2HostMutex -Mutex $mutex
         }
     }
+    $AddressFamily = (Get-Ferrum2AddressFamilyProfile -AddressFamily $AddressFamily).address_family
     if (-not (Test-Ferrum2HostAdministrator)) {
         throw 'host qualification requires an already elevated PowerShell process'
     }
@@ -563,9 +594,9 @@ function Invoke-Ferrum2HostQualification {
         $context = New-Ferrum2HostContext -RepositoryRoot $RepositoryRoot `
             -EvidenceDirectory $EvidenceDirectory `
             -CandidateSha $CandidateSha `
-            -QualificationSourceBundleSha256 $QualificationSourceBundleSha256
+            -QualificationSourceBundleSha256 $QualificationSourceBundleSha256 -AddressFamily $AddressFamily
         $plan = Get-Ferrum2HostQualificationPlan -CandidateSha $CandidateSha `
-            -QualificationSourceBundleSha256 $QualificationSourceBundleSha256
+            -QualificationSourceBundleSha256 $QualificationSourceBundleSha256 -AddressFamily $AddressFamily
         Write-AtomicJsonFile -Path (Join-Path $context.evidence_directory 'plan.json') `
             -Document $plan
         $firewallProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
@@ -581,8 +612,8 @@ function Invoke-Ferrum2HostQualification {
         Write-AtomicJsonFile -Path (Join-Path $context.evidence_directory 'firewall-profiles.json') `
             -Document @($firewallProfiles | Select-Object Name, Enabled, AllowLocalFirewallRules,
                 AllowInboundRules, NotifyOnListen)
-        $network = New-Ferrum2HostNetworkIdentity -RunId $context.run_id
-        $loopback = Get-Ferrum2LoopbackIdentity
+        $network = New-Ferrum2HostNetworkIdentity -RunId $context.run_id -AddressFamily $AddressFamily
+        $loopback = Get-Ferrum2LoopbackIdentity -AddressFamily $AddressFamily
         Assert-Ferrum2HostNetworkIdentityAvailable -Network $network -Loopback $loopback
         Set-Ferrum2HostState -Context $context -State 'building'
         $buildTimer = [Diagnostics.Stopwatch]::StartNew()
@@ -613,6 +644,7 @@ function Invoke-Ferrum2HostQualification {
                 New-Item -ItemType Directory -Path $inspectionRoot `
                     -ErrorAction Stop | Out-Null
                 $inspectionContext = [pscustomobject]@{
+                    address_family = $context.address_family
                     run_id = $context.run_id
                     run_root = $inspectionRoot
                     ledger_path = Join-Path $inspectionRoot 'recovery.json'
@@ -632,6 +664,7 @@ function Invoke-Ferrum2HostQualification {
                 $qualificationCleanup = [pscustomobject][ordered]@{
                     schema_version = 1
                     kind = 'ferrum2.windows-tun.host-qualification-cleanup'
+                    address_family = $AddressFamily
                     run_id = $context.run_id
                     qualification_source_bundle_sha256 = $QualificationSourceBundleSha256
                     status = [string]$cleanup.status
@@ -656,6 +689,7 @@ function Invoke-Ferrum2HostQualification {
             $runtime = [pscustomobject][ordered]@{
                 schema_version = 1
                 kind = 'ferrum2.windows-tun.host-qualification-runtime'
+                address_family = $AddressFamily
                 run_id = $context.run_id
                 candidate_sha = $CandidateSha
                 qualification_source_bundle_sha256 = $QualificationSourceBundleSha256
@@ -679,6 +713,7 @@ function Invoke-Ferrum2HostQualification {
     $workerResult = [pscustomobject][ordered]@{
         schema_version = 1
         kind = 'ferrum2.windows-tun.host-qualification-worker'
+        address_family = $AddressFamily
         status = 'PASS'
         qualification = $true
         run_id = $context.run_id

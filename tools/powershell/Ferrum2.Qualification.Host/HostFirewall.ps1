@@ -53,11 +53,24 @@ function Assert-Ferrum2FirewallRow {
         [string]$Row.state -cnotin @('planned', 'created') -or
         [string]$Row.protocol -cnotin @('TCP', 'UDP') -or
         [string]$Row.profile -cne 'Domain,Private,Public') { throw 'Firewall ownership row is malformed.' }
+    $family = $null
     foreach ($address in @([string]$Row.local_address, [string]$Row.remote_address)) {
         $parsed = $null
         if (-not [Net.IPAddress]::TryParse($address, [ref]$parsed) -or $parsed.ToString() -cne $address -or
-            $parsed.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
-            $parsed.Equals([Net.IPAddress]::Any)) { throw 'Firewall address must be one canonical, non-wildcard IPv4 address.' }
+            $parsed.IsIPv4MappedToIPv6 -or
+            $parsed.Equals([Net.IPAddress]::Any) -or $parsed.Equals([Net.IPAddress]::IPv6Any) -or
+            ($parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6 -and
+                ($parsed.ScopeId -ne 0 -or $parsed.IsIPv6Multicast)) -or
+            ($null -ne $family -and $parsed.AddressFamily -ne $family)) {
+            throw 'Firewall addresses must be canonical, non-wildcard addresses of one family.'
+        }
+        $family = $parsed.AddressFamily
+    }
+    $addressFamily = if ($family -eq [Net.Sockets.AddressFamily]::InterNetworkV6) { 'IPv6' } else { 'IPv4' }
+    $declaredFamily = $Row.PSObject.Properties['address_family']
+    if (($null -ne $declaredFamily -and $declaredFamily.Value -cne $addressFamily) -or
+        ($addressFamily -ceq 'IPv6' -and $null -eq $declaredFamily)) {
+        throw 'Firewall declared address family differs from its exact scope.'
     }
     Assert-Ferrum2FirewallPort -Port ([string]$Row.local_port)
     Assert-Ferrum2FirewallPort -Port ([string]$Row.remote_port) -AllowAny
@@ -69,9 +82,8 @@ function Assert-Ferrum2FirewallRow {
             throw 'Firewall interface transition is malformed.'
         }
         $runId = ([string]$Row.name).Split('-')[2]
-        $network = New-Ferrum2HostNetworkIdentity -RunId $runId
-        $octets = $network.tun_address.Split('.')
-        $peer = "$($octets[0]).$($octets[1]).$($octets[2]).$([int]$octets[3] - 1)"
+        $network = New-Ferrum2HostNetworkIdentity -RunId $runId -AddressFamily $addressFamily
+        $peer = $network.peer_address
         if ([string]$Row.purpose -cnotmatch '^client-ingress-([1-3])$') {
             throw 'Deferred firewall scope is not client ingress.'
         }
@@ -319,6 +331,7 @@ function Complete-Ferrum2FirewallInterface {
     }
     Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "firewall-rules/$($Row.name).json") -Document ([pscustomobject][ordered]@{
         schema_version = 1; kind = 'ferrum2.windows-tun.firewall-rule-readback'
+        address_family = [string]$Context.address_family
         observed_utc = [DateTime]::UtcNow.ToString('O'); phase = 'narrowed'
         identity = $final; observations = $observations
     })
@@ -344,6 +357,7 @@ function Add-Ferrum2OwnedFirewallRule {
         @($Context.ledger.resources.firewall_rules).Count -ge 256 -or
         @($Context.ledger.expected_resources.firewall_rules).Count -ge 256) { throw 'Firewall run identity or ledger bound is invalid.' }
     $row = [pscustomobject][ordered]@{
+        address_family = [string]$Context.address_family
         name = "Ferrum2-Qualification-$($Context.run_id)-$([Guid]::NewGuid().ToString('N'))"
         program = $Executable; sha256 = Assert-Ferrum2FirewallExecutable -Path $Executable
         protocol = $Protocol; local_address = $LocalAddress; local_port = $LocalPort
@@ -393,6 +407,7 @@ function Add-Ferrum2OwnedFirewallRule {
     $suffix = if ($DeferInterface) { '.prelaunch' } else { '' }
     Write-AtomicJsonFile -Path (Join-Path $Context.evidence_directory "firewall-rules/$($row.name)$suffix.json") -Document ([pscustomobject][ordered]@{
         schema_version = 1
+        address_family = [string]$Context.address_family
         kind = 'ferrum2.windows-tun.firewall-rule-readback'
         observed_utc = [DateTime]::UtcNow.ToString('O')
         phase = if ($DeferInterface) { 'prelaunch' } else { 'fixed' }
@@ -469,8 +484,9 @@ function Assert-Ferrum2FirewallEvidence {
         $document = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         if ([int]$document.schema_version -ne 1 -or
             [string]$document.kind -cne 'ferrum2.windows-tun.firewall-rule-readback') { throw 'Firewall evidence schema differs.' }
+        if ($document.address_family -cne $row.address_family) { throw 'Firewall evidence address family differs.' }
         Assert-Ferrum2FirewallRow -Row $document.identity
-        $properties = @('name', 'program', 'sha256', 'protocol', 'local_address', 'local_port', 'remote_address', 'remote_port', 'interface_alias', 'profile', 'purpose')
+        $properties = @('address_family', 'name', 'program', 'sha256', 'protocol', 'local_address', 'local_port', 'remote_address', 'remote_port', 'interface_alias', 'profile', 'purpose')
         if ($deferred) {
             if ([string]$document.phase -cne $phase) { throw 'Firewall evidence phase differs.' }
             $properties += @('intended_interface_alias', 'interface_phase')

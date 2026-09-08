@@ -8,6 +8,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$EvidenceDirectory,
     [Parameter(Mandatory = $true)]
+    [ValidateSet('IPv4', 'IPv6')]
+    [string]$AddressFamily,
+    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9a-f]{64}$')]
     [string]$QualificationSourceBundleSha256,
     [Parameter(Mandatory = $true)]
@@ -25,6 +28,7 @@ $result = Invoke-Ferrum2HostQualification `
     -RepositoryRoot $repositoryRoot `
     -QualificationSourceBundleSha256 $QualificationSourceBundleSha256 `
     -CandidateSha $CandidateSha `
+    -AddressFamily $AddressFamily `
     -EvidenceDirectory $EvidenceDirectory `
     -AcknowledgeHostNetworkMutation:$AcknowledgeHostNetworkMutation
 $result | ConvertTo-Json -Depth 20

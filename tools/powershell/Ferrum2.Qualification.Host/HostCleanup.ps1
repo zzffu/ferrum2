@@ -66,9 +66,17 @@ function Get-Ferrum2CleanupProcessBirthTicks {
 function Get-Ferrum2HostCleanupSnapshot {
     param([Parameter(Mandatory = $true)][object]$Expected)
     $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop)
-    $routes = @(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop)
-    $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop)
+    $routes = @(foreach ($family in @('IPv4', 'IPv6')) {
+        Get-NetRoute -AddressFamily $family -PolicyStore ActiveStore -ErrorAction Stop
+    })
+    $addresses = @(foreach ($family in @('IPv4', 'IPv6')) {
+        Get-NetIPAddress -AddressFamily $family -PolicyStore ActiveStore -ErrorAction Stop
+    })
+    if ($adapters.Count -gt 4096 -or $routes.Count -gt 65536 -or $addresses.Count -gt 16384) {
+        throw 'cleanup network inventory exceeds its identity bound'
+    }
     $allProcesses = @(Get-Process -ErrorAction Stop)
+    if ($allProcesses.Count -gt 65536) { throw 'cleanup process inventory exceeds its identity bound' }
     $processes = @($allProcesses | Where-Object {
         [int]$_.Id -in @($Expected.processes | ForEach-Object { [int]$_.pid })
     } | ForEach-Object {
@@ -107,6 +115,7 @@ function Get-Ferrum2HostCleanupSnapshot {
             [pscustomobject]@{ protocol = 'udp'; address = [string]$_.LocalAddress; port = [int]$_.LocalPort }
         }
     )
+    if ($ports.Count -gt 131072) { throw 'cleanup endpoint inventory exceeds its identity bound' }
     return [pscustomobject]@{
         adapters = $adapters; routes = $routes; addresses = $addresses
         processes = $processes; ports = $ports
@@ -123,6 +132,14 @@ function Measure-Ferrum2HostCleanupResidue {
     foreach ($kind in @('adapters', 'routes', 'addresses', 'processes', 'ports')) {
         if ($null -eq $Snapshot.$kind -or $null -eq $Expected.$kind) {
             throw "cleanup $kind readback is unavailable"
+        }
+    }
+    foreach ($kind in @('addresses', 'routes')) {
+        foreach ($row in $Expected.$kind) {
+            if ($null -ne $row.PSObject.Properties['run_id']) {
+                $type = $(if ($kind -ceq 'addresses') { 'address' } else { 'route' })
+                Assert-Ferrum2OwnedNetworkRow -Row $row -RunId $row.run_id -AddressFamily $row.address_family -Type $type
+            }
         }
     }
     foreach ($port in $Expected.ports) {
@@ -184,8 +201,7 @@ function Measure-Ferrum2HostCleanupResidue {
     foreach ($actual in $Snapshot.routes) {
         if (@($Expected.routes | Where-Object {
             [string]$_.destination_prefix -ceq [string]$actual.DestinationPrefix -and
-            [uint32]$_.interface_index -eq [uint32]$actual.InterfaceIndex -and
-            [string]$_.next_hop -ceq [string]$actual.NextHop
+            [uint32]$_.interface_index -eq [uint32]$actual.InterfaceIndex
         }).Count -ne 0) { $routeCount += 1 }
     }
     $addressCount = 0

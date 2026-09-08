@@ -1,4 +1,4 @@
-use super::contract::{Args, parse};
+use super::contract::{Args, parse, validate_reset_release};
 use super::socket_io::{
     BULK, FRAGMENT, IO_LIMIT, connect, datagram, duplex, exchange, pause_reader, payload, publish,
     runtime, udp,
@@ -93,6 +93,7 @@ async fn reset(args: &Args) -> Result<Value, String> {
     publish(
         ready,
         &json!({"schema_version":1,"kind":"ferrum2.windows-tun-reset-ready",
+        "address_family":args.address_family,
         "generation":1,"tcp_pending":true,"udp_pending":true,
         "tcp_paused_bytes_sent":sent,"tcp_unwritable_milliseconds":100,
         "udp_pending_datagrams":1,
@@ -102,21 +103,27 @@ async fn reset(args: &Args) -> Result<Value, String> {
         loop {
             match tokio::fs::symlink_metadata(release).await {
                 Ok(metadata) => {
-                    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 {
+                    if !metadata.is_file()
+                        || metadata.file_type().is_symlink()
+                        || metadata.len() > 1024
+                    {
                         return Err("invalid reset release marker file".to_owned());
                     }
                     let content = tokio::fs::read(release).await.map_err(|e| e.to_string())?;
-                    let value: Value = serde_json::from_slice(&content).map_err(|e| e.to_string())?;
-                    if value != json!({"schema_version":1,"kind":"ferrum2.windows-tun-reset-release","generation":2}) {
-                        return Err("reset release marker identity mismatch".into());
-                    }
+                    let value: Value =
+                        serde_json::from_slice(&content).map_err(|e| e.to_string())?;
+                    validate_reset_release(&value, args.address_family)?;
                     return Ok(());
                 }
-                Err(error) if error.kind() == ErrorKind::NotFound => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
                 Err(error) => return Err(error.to_string()),
             }
         }
-    }).await.map_err(|_| "reset release deadline")??;
+    })
+    .await
+    .map_err(|_| "reset release deadline")??;
     // Buffered old-generation replies may precede retirement. Account and check
     // them, but never accept timeout or a successful new request as retirement.
     let mut drained = 0;
@@ -199,7 +206,7 @@ pub(crate) fn run_qualification(arguments: &[OsString]) -> Result<String, String
             };
             Ok::<_, String>(
                 json!({"schema_version":1,"kind":"ferrum2.windows-tun-qualification",
-                "status":"PASS","generations":generations,"reset":reset}),
+                "address_family":args.address_family,"status":"PASS","generations":generations,"reset":reset}),
             )
         })
         .await
@@ -209,12 +216,16 @@ pub(crate) fn run_qualification(arguments: &[OsString]) -> Result<String, String
     match result {
         Ok(witness) => {
             publish(output, &witness)?;
-            Ok("windows_tun_qualification status=PASS".into())
+            Ok(format!(
+                "windows_tun_qualification status=PASS address_family={}",
+                args.address_family.as_str()
+            ))
         }
         Err(error) => {
             publish(
                 output,
-                &json!({"schema_version":1,"kind":"ferrum2.windows-tun-qualification","status":"FAIL","error":error}),
+                &json!({"schema_version":1,"kind":"ferrum2.windows-tun-qualification",
+                "address_family":args.address_family,"status":"FAIL","error":error}),
             )?;
             Err(error)
         }
@@ -234,5 +245,8 @@ pub(crate) fn run_probe(arguments: &[OsString]) -> Result<String, String> {
         .await
         .map_err(|_| "probe deadline")?
     })?;
-    Ok("windows_tun_probe status=PASS protocols=tcp,udp".into())
+    Ok(format!(
+        "windows_tun_probe status=PASS protocols=tcp,udp address_family={}",
+        args.address_family.as_str()
+    ))
 }

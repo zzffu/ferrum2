@@ -1,4 +1,4 @@
-"""Pure PowerShell readback and run-owned file export; no host runner is loaded."""
+"""Offline family admission, readback, and owned file export; no host runner is loaded."""
 
 from pathlib import Path
 import shutil
@@ -10,7 +10,7 @@ import uuid
 
 @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is required for offline readback")
 class WindowsTunCleanupReadbackTests(unittest.TestCase):
-    def test_retired_identities_and_recovery_diagnostics_remain_verifiable(self) -> None:
+    def test_family_ownership_residue_and_recovery_diagnostics(self) -> None:
         root = Path(__file__).resolve().parents[2]
         supervisor = Path(tempfile.gettempdir()) / (
             "ferrum2-host-qualification-supervisor-" + uuid.uuid4().hex

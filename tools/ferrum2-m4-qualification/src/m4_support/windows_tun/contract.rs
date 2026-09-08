@@ -3,7 +3,31 @@ use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub(super) enum AddressFamily {
+    IPv4,
+    IPv6,
+}
+
+impl AddressFamily {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::IPv4 => "IPv4",
+            Self::IPv6 => "IPv6",
+        }
+    }
+
+    fn accepts(self, ip: IpAddr) -> bool {
+        match (self, ip) {
+            (Self::IPv4, IpAddr::V4(_)) => true,
+            (Self::IPv6, IpAddr::V6(ip)) => ip.to_ipv4_mapped().is_none(),
+            _ => false,
+        }
+    }
+}
+
 pub(super) struct Args {
+    pub address_family: AddressFamily,
     pub tcp: SocketAddr,
     pub udp: SocketAddr,
     pub output: Option<PathBuf>,
@@ -45,7 +69,7 @@ pub(super) fn parse(arguments: &[OsString], mode: &str) -> Result<Args, String> 
     for pair in arguments.chunks_exact(2) {
         let flag = pair[0].to_str().ok_or("option is not UTF-8")?;
         let value = pair[1].to_str().ok_or("value is not UTF-8")?;
-        let allowed = matches!(flag, "--tcp-port" | "--udp-port")
+        let allowed = matches!(flag, "--tcp-port" | "--udp-port" | "--address-family")
             || (mode == "support" && flag == "--listen-ip")
             || (mode != "support" && flag == "--target-ip")
             || (mode == "qualification"
@@ -59,6 +83,11 @@ pub(super) fn parse(arguments: &[OsString], mode: &str) -> Result<Args, String> 
             ));
         }
     }
+    let address_family = match values.remove("--address-family").unwrap_or("IPv4") {
+        "IPv4" => AddressFamily::IPv4,
+        "IPv6" => AddressFamily::IPv6,
+        _ => return Err("address family must be IPv4 or IPv6".into()),
+    };
     let ip_flag = if mode == "support" {
         "--listen-ip"
     } else {
@@ -69,6 +98,9 @@ pub(super) fn parse(arguments: &[OsString], mode: &str) -> Result<Args, String> 
         .ok_or("missing IP address")?
         .parse()
         .map_err(|_| "IP must be literal")?;
+    if !address_family.accepts(ip) {
+        return Err("literal endpoint does not match address family".into());
+    }
     if ip.is_multicast() || (mode != "support" && (ip.is_unspecified() || ip.is_loopback())) {
         return Err("qualification requires a non-loopback unicast target".into());
     }
@@ -102,9 +134,27 @@ pub(super) fn parse(arguments: &[OsString], mode: &str) -> Result<Args, String> 
         return Err("evidence paths must be distinct".into());
     }
     Ok(Args {
+        address_family,
         tcp,
         udp,
         output,
         reset,
     })
+}
+
+pub(super) fn validate_reset_release(
+    value: &serde_json::Value,
+    address_family: AddressFamily,
+) -> Result<(), String> {
+    if *value
+        != serde_json::json!({
+            "schema_version": 1,
+            "kind": "ferrum2.windows-tun-reset-release",
+            "address_family": address_family,
+            "generation": 2
+        })
+    {
+        return Err("reset release marker identity mismatch".into());
+    }
+    Ok(())
 }

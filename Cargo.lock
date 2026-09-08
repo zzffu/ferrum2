@@ -612,6 +612,7 @@ dependencies = [
  "ferrum2-config",
  "ferrum2-core",
  "ferrum2-crypto",
+ "ferrum2-platform-windows",
  "ferrum2-shadowsocks",
  "ferrum2-socks5",
  "hickory-proto",

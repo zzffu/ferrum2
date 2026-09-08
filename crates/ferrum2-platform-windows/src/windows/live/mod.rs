@@ -11,7 +11,9 @@ mod tcp_ingress;
 mod wintun;
 
 pub use config_file::{create_config_temporary, replace_config_file, validate_private_file};
-pub use network::{WindowsResolvedSocketBinder, bind_resolved_socket};
+pub use network::{
+    WindowsResolvedSocketBinder, bind_resolved_socket, enable_ipv6_udp_fragmentation,
+};
 pub use notification::WindowsNetworkChangeMonitor;
 pub use wintun::{Adapter, ReceivedPacket, StopSignal, WorkSignal};
 

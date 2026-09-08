@@ -6,7 +6,6 @@ using System.Threading;
 
 public sealed class Ferrum2QualificationRouteNotification : IDisposable
 {
-    private const ushort AddressFamilyInet = 2;
     private IntPtr notificationHandle;
     private readonly EventWaitHandle signal;
     private readonly RouteChangeCallback callback;
@@ -124,12 +123,18 @@ public sealed class Ferrum2QualificationRouteNotification : IDisposable
         return guid;
     }
 
-    public Ferrum2QualificationRouteNotification()
+    public Ferrum2QualificationRouteNotification(string addressFamily)
     {
+        ushort family = addressFamily switch
+        {
+            "IPv4" => 2,
+            "IPv6" => 23,
+            _ => throw new ArgumentException("Expected IPv4 or IPv6", nameof(addressFamily))
+        };
         signal = new EventWaitHandle(false, EventResetMode.ManualReset);
         callback = OnRouteChanged;
         uint status = NotifyRouteChange2(
-            AddressFamilyInet,
+            family,
             callback,
             IntPtr.Zero,
             false,

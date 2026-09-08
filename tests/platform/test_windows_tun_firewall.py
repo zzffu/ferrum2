@@ -34,6 +34,7 @@ public static class Ferrum2QualificationRouteNotification {
 }
 '@
 $script:InterfaceRepresentation = ''
+. (Join-Path $Owners 'AddressFamily.ps1')
 . (Join-Path $Owners 'HostFirewall.ps1')
 . (Join-Path $Owners 'HostOwnership.ps1')
 $script:Executable = Join-Path $Root 'qualification.exe'
@@ -50,6 +51,7 @@ if (-not $IsWindows) {
 }
 $script:Context = [pscustomobject]@{
     run_id = '012345abcdef'
+    address_family = 'IPv4'
     ledger_path = (Join-Path $Root 'ledger.json')
     evidence_directory = (Join-Path $Root 'evidence')
     ledger = [pscustomobject]@{
@@ -304,6 +306,44 @@ class WindowsTunFirewallTests(unittest.TestCase):
                 capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_ipv6_exact_scope_and_readback_reject_widening(self) -> None:
+        self.run_script(r'''
+$script:Context.address_family = 'IPv6'
+$row = Add-Ferrum2OwnedFirewallRule -Context $script:Context -Executable $script:Executable `
+    -Protocol TCP -LocalAddress '::1' -LocalPort '49152-65535' -RemoteAddress '::1' `
+    -InterfaceAlias 'Loopback Pseudo-Interface 1' -Purpose 'support'
+Assert-Ferrum2FirewallEvidence -Expected @($row) -EvidenceDirectory $script:Context.evidence_directory
+foreach ($address in @('::', '::1/128', '::1-::2', '127.0.0.1', '::ffff:127.0.0.1', '0:0:0:0:0:0:0:1')) {
+    $changed = Copy-Rule $row
+    $changed.remote_address = $address
+    Assert-Rejected { Assert-Ferrum2FirewallRow -Row $changed }
+}
+$rule = @($script:Stores.ActiveStore | Where-Object Name -EQ $row.name)[0]
+$rule.Address.RemoteAddress = @('::/0')
+Assert-Rejected { Remove-Ferrum2OwnedFirewallRule -Row $row }
+Assert-True ($script:Removed.Count -eq 0) 'widened IPv6 rule allowed deletion'
+$rule.Address.RemoteAddress = @('::1')
+Remove-Ferrum2OwnedFirewallRule -Row $row
+Assert-UnrelatedSurvives
+''')
+
+    def test_ipv6_deferred_scope_uses_exact_run_peer(self) -> None:
+        self.run_script(r'''
+$script:Context.address_family = 'IPv6'
+$network = New-Ferrum2HostNetworkIdentity -RunId $script:Context.run_id -AddressFamily IPv6
+$row = Add-Ferrum2OwnedFirewallRule -Context $script:Context -Executable $script:Executable `
+    -Protocol TCP -LocalAddress $network.tun_address -LocalPort '49152-65535' `
+    -RemoteAddress $network.peer_address -InterfaceAlias 'Ferrum2Host-012345abcdef-001' `
+    -Purpose 'client-ingress-1' -DeferInterface
+$changed = Copy-Rule $row
+$changed.remote_address = 'fd00:123:45ab:cdef::3'
+Assert-Rejected { Assert-Ferrum2FirewallRow -Row $changed }
+Complete-Ferrum2FirewallInterface -Context $script:Context -Row $row
+Assert-Ferrum2FirewallEvidence -Expected @($row) -EvidenceDirectory $script:Context.evidence_directory
+Remove-Ferrum2OwnedFirewallRule -Row $row
+Assert-UnrelatedSurvives
+''')
 
     def test_creation_persists_identity_and_owned_cleanup_is_idempotent(self) -> None:
         self.run_script(r'''
