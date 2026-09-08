@@ -9,10 +9,9 @@ use ferrum2_core::ConnectError;
 use ferrum2_core::ConnectErrorKind;
 #[cfg(any(windows, test))]
 use ferrum2_net::{InterfaceResolutionErrorKind, InterfaceSelectionSource};
-use ferrum2_observability::Metrics;
 #[cfg(any(windows, test))]
 use ferrum2_observability::{
-    InterfaceResolutionCache, InterfaceResolutionResult, InterfaceResolutionSource,
+    InterfaceResolutionCache, InterfaceResolutionResult, InterfaceResolutionSource, Metrics,
 };
 #[cfg(all(windows, not(test)))]
 use ferrum2_observability::{NetworkLifecycleResult, NetworkResetReason};

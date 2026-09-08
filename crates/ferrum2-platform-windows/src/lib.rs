@@ -497,7 +497,10 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+#[cfg(any(
+    all(windows, target_arch = "x86_64", feature = "live-backend"),
+    all(test, windows, target_arch = "x86_64")
+))]
 mod tcp_ingress;
 
 #[cfg(any(

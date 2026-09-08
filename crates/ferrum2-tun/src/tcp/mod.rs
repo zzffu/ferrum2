@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use ferrum2_runtime::{OwnerRegistry, TunTcpFlowOwner};
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+use ferrum2_runtime::OwnerRegistry;
+use ferrum2_runtime::TunTcpFlowOwner;
 use socket2::SockRef;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
@@ -138,11 +140,13 @@ impl Drop for TcpFlow {
     }
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
 /// Owner-side lease for fencing and closing the real system socket.
 pub(crate) struct TcpSocketLease {
     shared: Arc<FlowShared>,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
 impl TcpSocketLease {
     pub(crate) fn fence(&self) {
         self.shared.invalidate();
@@ -158,6 +162,7 @@ impl TcpSocketLease {
 
 struct FlowShared {
     stream: Mutex<Option<TcpStream>>,
+    #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
     generation: u64,
     valid: AtomicBool,
     write_shutdown: AtomicBool,
@@ -208,6 +213,7 @@ impl FlowShared {
             .expect("TUN TCP flow registry owner")
             .take();
     }
+    #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
     fn invalidate(&self) {
         self.valid.store(false, Ordering::Release);
         self.close_socket();
@@ -254,6 +260,7 @@ struct FlowWakers {
     write: Option<Waker>,
 }
 
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
 pub(crate) fn tcp_flow_from_stream(
     stream: TcpStream,
     target: SocketAddr,

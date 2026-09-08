@@ -1,4 +1,6 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+#[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
+use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
 mod control;
@@ -286,6 +288,7 @@ impl PacketParser {
     /// Validates endpoints of locally constructed, fixed-header UDP responses.
     /// The constructor owns wire lengths and checksums; untrusted packets still
     /// pass through the complete parser.
+    #[cfg(any(all(windows, target_arch = "x86_64", feature = "live-backend"), test))]
     pub(crate) fn validate_udp_response(
         self,
         source: SocketAddr,
