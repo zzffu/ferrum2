@@ -290,3 +290,65 @@ fn budget_exhausted_after_reservation_releases_permit_and_closed_channel_finishe
         );
     });
 }
+
+#[test]
+fn owner_drop_rejects_all_concurrently_reserved_sink_clones() {
+    bounded(|| {
+        const SENDERS: usize = 4;
+        let (table, _candidates, association, budget) = fixture();
+        let sink = association.response_sink();
+        std::thread::scope(|scope| {
+            let (reserved_tx, reserved_rx) = sync_mpsc::channel();
+            let (result_tx, result_rx) = sync_mpsc::channel();
+            let mut releases = Vec::new();
+            for ordinal in 0..SENDERS {
+                let cloned_sink = sink.clone();
+                let reserved_tx = reserved_tx.clone();
+                let result_tx = result_tx.clone();
+                let (release_tx, release_rx) = sync_mpsc::channel();
+                releases.push(release_tx);
+                scope.spawn(move || {
+                    let _reset = HookReset;
+                    RESPONSE_RESERVED_HOOK.with(|hook| {
+                        assert!(hook.borrow().is_none());
+                        *hook.borrow_mut() = Some(Box::new(move || {
+                            reserved_tx.send(()).unwrap();
+                            release_rx
+                                .recv_timeout(RENDEZVOUS_TIMEOUT)
+                                .expect("owner releases every reserved sender");
+                        }));
+                    });
+                    let payload = [u8::try_from(ordinal).unwrap(); 8];
+                    result_tx
+                        .send(cloned_sink.send(v4(REMOTE), &payload))
+                        .unwrap();
+                });
+            }
+            drop(reserved_tx);
+            drop(result_tx);
+            for _ in 0..SENDERS {
+                reserved_rx
+                    .recv_timeout(RENDEZVOUS_TIMEOUT)
+                    .expect("every clone reserves before owner destruction");
+            }
+            drop(table);
+            for release in releases {
+                release.send(()).unwrap();
+            }
+            for _ in 0..SENDERS {
+                assert_eq!(
+                    result_rx
+                        .recv_timeout(RENDEZVOUS_TIMEOUT)
+                        .expect("every clone finishes after owner destruction"),
+                    UdpResponseSendOutcome::Closed
+                );
+            }
+        });
+        assert_eq!(budget.reserved_bytes(), 0);
+        assert_eq!(
+            sink.send(v4(REMOTE), b"late"),
+            UdpResponseSendOutcome::StaleGeneration
+        );
+        assert_eq!(budget.reserved_bytes(), 0);
+    });
+}

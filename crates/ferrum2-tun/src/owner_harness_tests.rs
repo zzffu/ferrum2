@@ -56,6 +56,8 @@ struct FakeAdapter {
     receive_calls: usize,
     semantic_checks: usize,
     output_paused: bool,
+    work_signal: Option<Arc<AtomicUsize>>,
+    work_waits: usize,
 }
 
 impl FakeAdapter {
@@ -79,7 +81,21 @@ impl FakeAdapter {
 
     fn wait(&mut self, timeout: Duration) -> FakeWaitOutcome {
         self.wait_durations.push(timeout);
-        self.waits.pop_front().unwrap_or(FakeWaitOutcome::Timeout)
+        let outcome = self.waits.pop_front().unwrap_or_else(|| {
+            if self
+                .work_signal
+                .as_ref()
+                .is_some_and(|signal| signal.swap(0, Ordering::AcqRel) != 0)
+            {
+                FakeWaitOutcome::Work
+            } else {
+                FakeWaitOutcome::Timeout
+            }
+        });
+        if outcome == FakeWaitOutcome::Work {
+            self.work_waits += 1;
+        }
+        outcome
     }
 
     fn semantic_network_changed(&mut self) -> bool {
@@ -130,6 +146,10 @@ impl OwnerSessionHarness {
     }
 
     fn with_udp_capacity(max_udp_associations: usize) -> Self {
+        Self::with_udp_capacity_and_wake(max_udp_associations, OwnerWake::default())
+    }
+
+    fn with_udp_capacity_and_wake(max_udp_associations: usize, wake: OwnerWake) -> Self {
         let flow_count = Arc::new(AtomicUsize::new(0));
         let (mut stack, _flows, candidates) = Stack::new_with_udp(
             (
@@ -145,7 +165,7 @@ impl OwnerSessionHarness {
             Duration::from_secs(60),
             UdpFiltering::EndpointIndependent,
             1,
-            OwnerWake::default(),
+            wake,
             Arc::new(Mutex::new(Default::default())),
         )
         .expect("deterministic owner stack");
@@ -267,18 +287,26 @@ impl OwnerSessionHarness {
     }
 
     fn run_cycle(&mut self) {
+        self.run_cycle_at_boundary(TEST_WORK_BUDGET, |_| {});
+    }
+
+    fn run_cycle_at_boundary(
+        &mut self,
+        work_budget: usize,
+        before_wait: impl FnOnce(&mut Self),
+    ) -> BudgetOutcome {
         if self.exit.is_some() {
-            return;
+            return BudgetOutcome::default();
         }
         let now_millis = self.clock.now_millis;
         if self.debounce.take_ready(now_millis).is_some() && self.adapter.semantic_network_changed()
         {
             self.terminate(HarnessExit::NetworkChanged);
-            return;
+            return BudgetOutcome::default();
         }
-        let budget = self.run_work_budget(TEST_WORK_BUDGET);
+        let budget = self.run_work_budget(work_budget);
         if budget.fatal || self.exit.is_some() {
-            return;
+            return budget;
         }
         let debounce_deadline = self.debounce.deadline_millis();
         let audit_deadline = self.audit_deadline.filter(|_| debounce_deadline.is_none());
@@ -292,6 +320,7 @@ impl OwnerSessionHarness {
             ),
         );
         self.last_wait = Some(wait);
+        before_wait(self);
         match self.adapter.wait(wait) {
             FakeWaitOutcome::Stop => self.terminate(HarnessExit::Stop),
             FakeWaitOutcome::NetworkChanged => {
@@ -301,6 +330,7 @@ impl OwnerSessionHarness {
             }
             FakeWaitOutcome::Work | FakeWaitOutcome::Readable | FakeWaitOutcome::Timeout => {}
         }
+        budget
     }
 
     fn run_single_stage(&mut self, stage: WorkStage) -> BudgetOutcome {
