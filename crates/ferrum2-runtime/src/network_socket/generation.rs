@@ -285,8 +285,6 @@ impl<T: AbortiveClose> AbortiveClose for GenerationBoundTcpStream<T> {
     }
 }
 
-mod connected_udp;
-
 /// UDP socket retained with its exact interface decision and reset acknowledgement owner.
 #[must_use = "dropping the wrapper closes the socket and acknowledges reset cancellation"]
 pub struct GenerationBoundUdpSocket<T> {

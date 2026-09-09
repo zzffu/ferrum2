@@ -112,26 +112,8 @@ pub(crate) fn validate_server_prepared(
         rule_count: dns.route.as_ref().map_or(0, |route| route.rules.len()),
         policy_blueprint: None,
     });
-    let needs_shadowsocks = inbounds.iter().any(|inbound| {
-        matches!(
-            inbound.protocol,
-            crate::model::ServerInboundProtocol::Shadowsocks
-        )
-    });
-    let psk = match raw.shadowsocks {
-        Some(shadowsocks) => {
-            let method = parse_method(&shadowsocks.method, ConfigField::ShadowsocksMethod)?;
-            Some(parse_psk(
-                method,
-                &shadowsocks.psk,
-                ConfigField::ShadowsocksPsk,
-            )?)
-        }
-        None if needs_shadowsocks => {
-            return Err(ConfigError::semantic(ConfigField::ShadowsocksMethod));
-        }
-        None => None,
-    };
+    let method = parse_method(&raw.shadowsocks.method, ConfigField::ShadowsocksMethod)?;
+    let psk = parse_psk(method, &raw.shadowsocks.psk, ConfigField::ShadowsocksPsk)?;
     let runtime = validate_runtime(raw.runtime)?;
     let replay = validate_replay(raw.replay)?;
     let udp = validate_udp(raw.udp)?;
@@ -266,41 +248,8 @@ pub(super) fn validate_server_graph(
     )?;
     let validated_inbounds = listens
         .into_iter()
-        .zip(inbounds)
-        .map(|(listen, inbound)| {
-            let protocol = match inbound.inbound_type.as_deref().unwrap_or("shadowsocks") {
-                "shadowsocks" => {
-                    if inbound.auth.is_some() {
-                        return Err(ConfigError::semantic(ConfigField::InboundsAuth));
-                    }
-                    if inbound.tls.is_some() {
-                        return Err(ConfigError::semantic(ConfigField::InboundsTls));
-                    }
-                    crate::model::ServerInboundProtocol::Shadowsocks
-                }
-                "f2p" => {
-                    let auth = inbound
-                        .auth
-                        .filter(|auth| !auth.token_file.as_os_str().is_empty())
-                        .ok_or_else(|| ConfigError::semantic(ConfigField::InboundsAuth))?;
-                    let tls = inbound
-                        .tls
-                        .filter(|tls| {
-                            !tls.certificate_file.as_os_str().is_empty()
-                                && !tls.private_key_file.as_os_str().is_empty()
-                        })
-                        .ok_or_else(|| ConfigError::semantic(ConfigField::InboundsTls))?;
-                    crate::model::ServerInboundProtocol::F2p(crate::model::F2pServerConfig {
-                        token_file: auth.token_file,
-                        certificate_file: tls.certificate_file,
-                        private_key_file: tls.private_key_file,
-                    })
-                }
-                _ => return Err(ConfigError::semantic(ConfigField::InboundsType)),
-            };
-            Ok(ServerInboundConfig { listen, protocol })
-        })
-        .collect::<Result<Vec<_>, ConfigError>>()?;
+        .map(|listen| ServerInboundConfig { listen })
+        .collect::<Vec<_>>();
     let validated_outbounds = outbounds
         .iter()
         .map(|outbound| {

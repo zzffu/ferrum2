@@ -60,7 +60,7 @@ pub(super) struct RawServerRoot {
     pub(super) dns: Option<RawDns>,
     pub(super) rule_set_loader: Option<RawRuleSetLoader>,
     pub(super) tun: Option<RawTun>,
-    pub(super) shadowsocks: Option<RawShadowsocks>,
+    pub(super) shadowsocks: RawShadowsocks,
     #[serde(default)]
     pub(super) runtime: RawRuntime,
     #[serde(default)]
@@ -147,9 +147,6 @@ pub(super) struct RawClientOutbound {
     pub(super) server: Option<String>,
     pub(super) method: Option<String>,
     pub(super) psk: Option<SecretString>,
-    pub(super) profile: Option<String>,
-    pub(super) auth: Option<RawF2pAuth>,
-    pub(super) tls: Option<RawF2pClientTls>,
     pub(super) domain_resolver: Option<String>,
     pub(super) domain_strategy: Option<String>,
     pub(super) bind_interface: Option<String>,
@@ -170,30 +167,6 @@ pub(super) struct RawServerInbound {
     pub(super) tag: String,
     pub(super) listen: String,
     pub(super) outbound: Option<String>,
-    #[serde(rename = "type")]
-    pub(super) inbound_type: Option<String>,
-    pub(super) auth: Option<RawF2pAuth>,
-    pub(super) tls: Option<RawF2pServerTls>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RawF2pAuth {
-    pub(super) token_file: PathBuf,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RawF2pClientTls {
-    pub(super) server_name: String,
-    pub(super) ca_file: Option<PathBuf>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RawF2pServerTls {
-    pub(super) certificate_file: PathBuf,
-    pub(super) private_key_file: PathBuf,
 }
 
 #[derive(Deserialize)]

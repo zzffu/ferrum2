@@ -2,7 +2,7 @@
 
 ## Decision and scope
 
-Ferrum2 remains one proxy executable/process. `ferrum2-rocom` is an internal session observation module, not a network outbound. Existing Direct/Shadowsocks/F2P routing, TCP relay, half-close, cancellation, DNS and TUN ownership remain authoritative. A separate `ferrum2-rocom-decode` executable operates offline. Recording introduces no sidecar, local SOCKS hop, automation, packet modification, injected heartbeat or retained game session. The separately owned [client dashboard](dashboard-design.md) exposes only configured recording state/budget and closed failure reports, never captures or keys.
+Ferrum2 remains one proxy executable/process. `ferrum2-rocom` is an internal session observation module, not a network outbound. Existing Direct/Shadowsocks routing, TCP relay, half-close, cancellation, DNS and TUN ownership remain authoritative. A separate `ferrum2-rocom-decode` executable operates offline. Recording introduces no sidecar, local SOCKS hop, automation, packet modification, injected heartbeat or retained game session. The separately owned [client dashboard](dashboard-design.md) exposes only configured recording state/budget and closed failure reports, never captures or keys.
 
 Recording is explicitly enabled by a client-only `[rocom]` configuration containing `record_path`, a **directory**, and optional `max_bytes` (default 268435456, range 65536–1099511627776 inclusive). Every recognized TSF4G connection is saved automatically to its own independently decodable JSONL file in that directory. Ordinary HTTP/plain TCP, UDP and DNS-hijacked streams produce no capture files. Identification uses the existing GCP header parser on the first complete bounded header from either direction, buffering split prefixes in memory. Before identification, a magic mismatch or invalid initial header rejects the candidate connection without queueing evidence or creating a file; an incomplete/unidentified connection produces no file. There is no magic scanning or guessed resynchronization. Once identified, all subsequent observed raw bytes remain evidence even after framing, key extraction or decryption failures. This remains sensitive research capture: use a private directory and controlled application traffic. With `[rocom]` absent there is no recorder, worker, capture file or payload copying.
 
@@ -190,10 +190,7 @@ limits, restart naming or early-finalization contract. New evidence must be supp
 
 ### Merge review and bounded performance evidence
 
-The merge with F2P preserves both configuration exports and architecture allowlists.
-The lockfile was reconciled offline without upgrading registry packages. F2P pool cleanup
-remains inside process-resource cleanup; recording shutdown follows connection and
-materialization cleanup.
+Recording shutdown follows connection and materialization cleanup.
 
 Review reproduced a decoder error with a 40-byte ACK header split after byte 39 and an
 opposite-direction SYN between its fragments. The old code emitted `unsupported_handshake`,
@@ -202,11 +199,6 @@ its own key snapshot: DATA at header observation, SYN/ACK after their key-state 
 Completing an older handshake does not overwrite the current connection epoch. The regression
 failed before the fix and passed afterward, including a subsequent DATA packet that must
 still observe the later SYN's missing-key state.
-
-Windows verification passed 300 affected-package tests and 27 real-process/policy tests,
-including a new SOCKS/F2P/recording composition test that checks exact application bytes
-in both directions and TCP half-close. Client all-feature tests were compile-checked only.
-Native WSL verification passed 130 F2P/configuration/recording/decoder tests.
 
 A separate Windows optimized-build probe supplied synthetic data directly to the recording
 module, not through a proxy throughput benchmark. With 32 KiB observations and 16 MiB of

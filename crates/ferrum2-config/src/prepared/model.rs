@@ -215,7 +215,6 @@ impl std::fmt::Debug for PreparedDnsServerDescriptor<'_> {
 pub enum PreparedClientOutboundKind {
     Direct,
     Shadowsocks,
-    F2p,
 }
 
 /// Redacted, borrowed bootstrap description of one client outbound.
@@ -225,7 +224,6 @@ pub struct PreparedClientOutboundDescriptor<'a> {
     pub(super) kind: PreparedClientOutboundKind,
     pub(super) method: Option<MethodProfile>,
     pub(super) psk: Option<&'a Arc<MethodPsk>>,
-    pub(super) f2p: Option<&'a crate::model::F2pClientConfig>,
     pub(super) endpoint: Option<&'a DialEndpoint>,
     pub(super) domain_resolver: Option<DirectDomainResolver>,
     pub(super) dial_options: &'a OutboundDialOptions,
@@ -247,11 +245,6 @@ impl<'a> PreparedClientOutboundDescriptor<'a> {
     /// Borrows the shared, zeroizing PSK owner for a staged Shadowsocks egress.
     pub const fn psk(self) -> Option<&'a Arc<MethodPsk>> {
         self.psk
-    }
-
-    /// Borrows the F2P credential paths and protocol policy without loading files.
-    pub const fn f2p(self) -> Option<&'a crate::model::F2pClientConfig> {
-        self.f2p
     }
 
     pub const fn endpoint(self) -> Option<&'a DialEndpoint> {

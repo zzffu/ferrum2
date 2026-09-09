@@ -114,7 +114,7 @@ fn schema_v2_fixture_cohort_normalizes_defaults_boundaries_and_choices() {
                 );
                 let expected = (
                     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8_388)),
-                    Some(case.method),
+                    case.method,
                     case.replay_capacity,
                     expected_udp.0,
                     expected_udp.1,

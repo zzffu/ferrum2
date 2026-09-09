@@ -42,7 +42,6 @@ pub(in crate::run) struct ClientUdpAssociation {
 pub(super) enum UdpPath {
     Direct(DirectAssociation),
     Proxy(ProxyAssociation),
-    F2p(super::f2p::F2pAssociation),
 }
 pub(in crate::run::egress) const MAX_UDP_PLAN_HOPS: usize = 8;
 
@@ -52,7 +51,7 @@ impl ClientUdpAssociation {
         egress: &ClientEgressEngine<C, T, R>,
     ) -> Result<(), ()> {
         match &mut self.path {
-            UdpPath::Direct(_) | UdpPath::F2p(_) => Ok(()),
+            UdpPath::Direct(_) => Ok(()),
             UdpPath::Proxy(proxy) => proxy.activate(egress),
         }
     }
@@ -76,7 +75,6 @@ impl ClientUdpAssociation {
     ) -> Result<usize, UdpPacketError> {
         match &mut self.path {
             UdpPath::Direct(direct) => direct.encode(target, payload),
-            UdpPath::F2p(f2p) => f2p.encode(target, payload),
             UdpPath::Proxy(proxy) => proxy.encode_request(engine, outbounds, target, payload),
         }
     }
@@ -88,7 +86,6 @@ impl ClientUdpAssociation {
     ) -> Result<AccountedDatagram, UdpPlanResponseError> {
         match &mut self.path {
             UdpPath::Direct(direct) => direct.response(wire_len, &self.lease),
-            UdpPath::F2p(f2p) => f2p.response(wire_len, &self.lease),
             UdpPath::Proxy(proxy) => {
                 proxy.accept_response(engine, outbounds, wire_len, &self.lease)
             }
@@ -98,7 +95,6 @@ impl ClientUdpAssociation {
         match &self.path {
             UdpPath::Direct(direct) => direct.plan.as_ref(),
             UdpPath::Proxy(proxy) => Some(&proxy.resources.plan),
-            UdpPath::F2p(f2p) => Some(&f2p.plan),
         }
     }
     pub(in crate::run) fn payload_limit(
@@ -109,7 +105,6 @@ impl ClientUdpAssociation {
     ) -> usize {
         match &self.path {
             UdpPath::Direct(_) => MAX_UDP_WIRE_DATAGRAM_BYTES,
-            UdpPath::F2p(_) => 65_507,
             UdpPath::Proxy(proxy) => composed_udp_plan_limit(
                 outbounds,
                 proxy.resources.plan.hops(),
@@ -200,7 +195,7 @@ impl ClientUdpAssociation {
         #[cfg(test)]
         self.check_io_fault(UdpIoOperation::UpstreamSend)?;
         match &self.path {
-            UdpPath::Direct(_) | UdpPath::F2p(_) => Err(io::ErrorKind::WouldBlock.into()),
+            UdpPath::Direct(_) => Err(io::ErrorKind::WouldBlock.into()),
             UdpPath::Proxy(proxy) => proxy
                 .resources
                 .socket
@@ -215,7 +210,6 @@ impl ClientUdpAssociation {
         self.check_io_fault(UdpIoOperation::UpstreamSend)?;
         match &mut self.path {
             UdpPath::Direct(direct) => direct.send(wire_len).await,
-            UdpPath::F2p(f2p) => f2p.send(wire_len).await,
             UdpPath::Proxy(proxy) => {
                 proxy
                     .resources
@@ -230,7 +224,6 @@ impl ClientUdpAssociation {
         self.check_io_fault(UdpIoOperation::UpstreamRecv)?;
         match &mut self.path {
             UdpPath::Direct(direct) => direct.receive().await,
-            UdpPath::F2p(f2p) => f2p.receive().await,
             UdpPath::Proxy(proxy) => {
                 proxy
                     .resources
@@ -264,14 +257,14 @@ impl ClientUdpAssociation {
     pub(in crate::run) fn upstream_local_addr(&self) -> io::Result<std::net::SocketAddr> {
         match &self.path {
             UdpPath::Proxy(proxy) => proxy.resources.socket.local_addr(),
-            UdpPath::Direct(_) | UdpPath::F2p(_) => Err(io::Error::other("UDP socket is opaque")),
+            UdpPath::Direct(_) => Err(io::Error::other("UDP socket is opaque")),
         }
     }
     #[cfg(test)]
     pub(super) fn outstanding_requests(&self) -> usize {
         match &self.path {
             UdpPath::Direct(direct) => direct.outstanding(),
-            UdpPath::Proxy(_) | UdpPath::F2p(_) => 0,
+            UdpPath::Proxy(_) => 0,
         }
     }
     pub(in crate::run) async fn relay<C, T, R>(
@@ -312,7 +305,7 @@ impl ClientUdpAssociation {
                 "short DNS UDP send",
             ));
         }
-        let mut reusable = matches!(self.path, UdpPath::Proxy(_) | UdpPath::F2p(_));
+        let mut reusable = matches!(self.path, UdpPath::Proxy(_));
         loop {
             let length = self.receive_response_wire().await?;
             let response =

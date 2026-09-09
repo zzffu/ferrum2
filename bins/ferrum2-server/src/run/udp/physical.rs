@@ -19,20 +19,20 @@ use crate::run::network::{
 };
 #[derive(Clone)]
 pub(in crate::run) struct ServerUdpNetworkPolicy {
-    pub(in crate::run) outbound: DialOptions,
-    pub(in crate::run) route: Arc<RouteNetworkOptions>,
+    pub(super) outbound: DialOptions,
+    pub(super) route: Arc<RouteNetworkOptions>,
 }
 
 #[derive(Clone)]
 pub(in crate::run) struct ServerNetworkUdpSocketFactory {
-    pub(in crate::run) sockets: Arc<ServerNetworkSocketService>,
-    pub(in crate::run) metrics: Arc<Metrics>,
+    pub(super) sockets: Arc<ServerNetworkSocketService>,
+    pub(super) metrics: Arc<Metrics>,
 }
 
 #[cfg(any(windows, test))]
-pub(in crate::run) type ServerPhysicalUdpSocket = GenerationBoundUdpSocket<UdpSocket>;
+pub(super) type ServerPhysicalUdpSocket = GenerationBoundUdpSocket<UdpSocket>;
 #[cfg(all(not(windows), not(test)))]
-pub(in crate::run) type ServerPhysicalUdpSocket = SystemDirectUdpSocket;
+pub(super) type ServerPhysicalUdpSocket = SystemDirectUdpSocket;
 
 impl DirectUdpSocketFactory for ServerNetworkUdpSocketFactory {
     type Socket = ServerPhysicalUdpSocket;

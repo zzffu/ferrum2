@@ -1,6 +1,5 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroU16;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,7 +96,6 @@ pub struct ClientInboundConfig {
 
 /// One validated client egress identity.
 pub enum ClientOutboundConfig {
-    F2p(F2pClientConfig),
     Shadowsocks {
         server: SocketAddr,
         psk: Arc<MethodPsk>,
@@ -113,7 +111,6 @@ impl ClientOutboundConfig {
     pub const fn server(&self) -> Option<SocketAddr> {
         match self {
             Self::Shadowsocks { server, .. } => Some(*server),
-            Self::F2p(config) => Some(config.server),
             Self::Direct { .. } => None,
         }
     }
@@ -121,7 +118,7 @@ impl ClientOutboundConfig {
     pub fn method(&self) -> Option<MethodProfile> {
         match self {
             Self::Shadowsocks { psk, .. } => Some(psk.profile()),
-            Self::Direct { .. } | Self::F2p(_) => None,
+            Self::Direct { .. } => None,
         }
     }
 
@@ -131,14 +128,13 @@ impl ClientOutboundConfig {
             Self::Direct {
                 domain_resolver, ..
             } => Some(*domain_resolver),
-            Self::Shadowsocks { .. } | Self::F2p(_) => None,
+            Self::Shadowsocks { .. } => None,
         }
     }
 
     /// Returns the interface and source-address constraints for this socket owner.
     pub const fn dial_options(&self) -> &OutboundDialOptions {
         match self {
-            Self::F2p(config) => &config.dial_options,
             Self::Shadowsocks { dial_options, .. } | Self::Direct { dial_options, .. } => {
                 dial_options
             }
@@ -150,47 +146,9 @@ impl std::fmt::Debug for ClientOutboundConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Shadowsocks { .. } => "ClientOutboundConfig::Shadowsocks([redacted])",
-            Self::F2p(_) => "ClientOutboundConfig::F2p([redacted])",
             Self::Direct { .. } => "ClientOutboundConfig::Direct([redacted])",
         })
     }
-}
-
-/// Validated F2P settings. Credential files are loaded only by the runtime.
-#[derive(Clone, Eq, PartialEq)]
-pub struct F2pClientConfig {
-    pub server: SocketAddr,
-    pub profile: ferrum2_f2p::Profile,
-    pub token_file: PathBuf,
-    pub server_name: Box<str>,
-    pub ca_file: Option<PathBuf>,
-    pub dial_options: OutboundDialOptions,
-}
-
-impl std::fmt::Debug for F2pClientConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("F2pClientConfig([redacted])")
-    }
-}
-
-/// Validated paths, interpreted relative to the process working directory.
-#[derive(Clone, Eq, PartialEq)]
-pub struct F2pServerConfig {
-    pub token_file: PathBuf,
-    pub certificate_file: PathBuf,
-    pub private_key_file: PathBuf,
-}
-
-impl std::fmt::Debug for F2pServerConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("F2pServerConfig([redacted])")
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ServerInboundProtocol {
-    Shadowsocks,
-    F2p(F2pServerConfig),
 }
 
 impl ValidatedClientConfig {
@@ -267,7 +225,7 @@ pub struct ValidatedServerConfig {
     pub route_network: RouteNetworkConfig,
     pub dns: Option<DnsConfig>,
     pub dns_route: Option<ServerDnsRoute>,
-    pub psk: Option<MethodPsk>,
+    pub psk: MethodPsk,
     pub runtime: RuntimeConfig,
     pub replay: ReplayConfig,
     pub udp: UdpConfig,
@@ -275,11 +233,10 @@ pub struct ValidatedServerConfig {
     pub metrics: Option<MetricsConfig>,
 }
 
-/// One validated protocol-specific listener.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// One validated Shadowsocks listener.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServerInboundConfig {
     pub listen: SocketAddr,
-    pub protocol: ServerInboundProtocol,
 }
 
 /// One validated direct server outbound.
@@ -732,8 +689,8 @@ pub struct UdpConfig {
 
 impl ValidatedServerConfig {
     /// Returns the immutable TCP method bound to the validated PSK.
-    pub fn method(&self) -> Option<MethodProfile> {
-        self.psk.as_ref().map(MethodPsk::profile)
+    pub const fn method(&self) -> MethodProfile {
+        self.psk.profile()
     }
 
     /// Returns a control handle sharing the route table's selector state.

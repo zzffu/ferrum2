@@ -21,7 +21,6 @@ closed_dimension! {
     pub enum Inbound {
         Socks5 => "socks5",
         Shadowsocks => "shadowsocks",
-        F2p => "f2p",
     }
 }
 

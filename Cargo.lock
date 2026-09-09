@@ -478,7 +478,6 @@ dependencies = [
  "ferrum2-crypto",
  "ferrum2-dashboard",
  "ferrum2-dns",
- "ferrum2-f2p",
  "ferrum2-net",
  "ferrum2-observability",
  "ferrum2-platform-windows",
@@ -514,7 +513,6 @@ dependencies = [
  "base64 0.23.0",
  "ferrum2-core",
  "ferrum2-crypto",
- "ferrum2-f2p",
  "ferrum2-rule",
  "ipnet",
  "serde",
@@ -572,21 +570,6 @@ dependencies = [
  "stats_alloc",
  "tokio",
  "tokio-rustls",
-]
-
-[[package]]
-name = "ferrum2-f2p"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.0",
- "constant_time_eq",
- "ferrum2-core",
- "rustls",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "webpki-roots",
- "zeroize",
 ]
 
 [[package]]
@@ -749,7 +732,6 @@ dependencies = [
  "ferrum2-core",
  "ferrum2-crypto",
  "ferrum2-dns",
- "ferrum2-f2p",
  "ferrum2-net",
  "ferrum2-observability",
  "ferrum2-platform-windows",

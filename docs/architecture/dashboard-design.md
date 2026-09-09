@@ -106,7 +106,7 @@ A TCP flow is one connection; UDP is a source-keyed association and the displaye
 
 ### Outbounds
 
-Represent concrete Direct/Shadowsocks/F2P outbounds, selector immediate members/current choice and chain order. Existing TCP flows retain their frozen route; existing TUN UDP generation fencing may retire associations after selector changes. The UI warns about that interruption rather than claiming seamless migration. Probes report real configured-egress transport-connect time, not ICMP ping or an application round trip. No automatic failover or automatic test on page load.
+Represent concrete Direct/Shadowsocks outbounds, selector immediate members/current choice and chain order. Existing TCP flows retain their frozen route; existing TUN UDP generation fencing may retire associations after selector changes. The UI warns about that interruption rather than claiming seamless migration. Probes report real configured-egress transport-connect time, not ICMP ping or an application round trip. No automatic failover or automatic test on page load.
 
 ### Routing and RuleSets
 

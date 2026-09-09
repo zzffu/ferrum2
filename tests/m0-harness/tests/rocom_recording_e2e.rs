@@ -263,3 +263,64 @@ fn directory_capture_selects_game_flows_and_finalizes_each_without_proxy_exit() 
     assert_eq!(active_child_count(), 0);
     drop(bind_loopback_listener(address).expect("proxy listener reclaimed"));
 }
+
+#[test]
+fn rocom_records_application_bytes_across_shadowsocks_without_changing_half_close() {
+    let directory = tempfile::tempdir().expect("recording workspace");
+    let server_address = unused_loopback();
+    let client_address = unused_loopback();
+    let server_config = write_tcp_only_server_config(directory.path(), server_address, None)
+        .expect("server config");
+    let client_config = write_client_config(directory.path(), client_address, server_address, None)
+        .expect("client config");
+    let captures = directory.path().join("captures");
+    let capture_literal = captures.to_string_lossy().replace('\\', "/");
+    let source = std::fs::read_to_string(&client_config).unwrap();
+    std::fs::write(
+        &client_config,
+        format!("{source}\n[rocom]\nrecord_path = '{capture_literal}'\n"),
+    )
+    .unwrap();
+    let mut server =
+        ChildGuard::spawn_signallable("ferrum2-server", &server_config, "Shadowsocks recording");
+    wait_for_listener(&mut server, server_address);
+    let mut client =
+        ChildGuard::spawn_signallable("ferrum2-client", &client_config, "Shadowsocks recording");
+    wait_for_listener(&mut client, client_address);
+    let (mut stream, echo) = connect_echo(client_address);
+    let mut wire = handshake(0x1001, &[2, 3]);
+    wire.extend_from_slice(b"opaque tail must remain exact\0\xff");
+    stream.write_all(&wire[..7]).unwrap();
+    stream.write_all(&wire[7..]).unwrap();
+    finish_echo(stream, echo, &wire);
+
+    let finalized = wait_for_finalized(&captures, 1);
+    let records: Vec<Value> = finalized[0]
+        .1
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("complete JSONL record"))
+        .collect();
+    assert_eq!(records.last().unwrap()["complete"], true);
+    for direction in ["upload", "download"] {
+        let captured: Vec<u8> = records
+            .iter()
+            .filter(|record| record["kind"] == "data" && record["direction"] == direction)
+            .flat_map(|record| {
+                STANDARD
+                    .decode(record["bytes"].as_str().unwrap())
+                    .expect("raw bytes")
+            })
+            .collect();
+        assert_eq!(captured, wire, "{direction}");
+    }
+    for mut child in [client, server] {
+        child.request_graceful_shutdown();
+        let exit = child.wait_for_exit(Duration::from_secs(8));
+        assert!(
+            exit.status.success(),
+            "{exit}: {}",
+            exit.shutdown_report_diagnostic()
+        );
+        exit.assert_stderr_excludes(&[SYNTHETIC_PSK, "opaque tail must remain exact"]);
+    }
+}

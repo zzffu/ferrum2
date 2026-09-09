@@ -7,8 +7,8 @@ use std::time::Duration;
 use super::UNRESOLVED_ENDPOINT;
 use crate::run::dns_egress::ClientDnsEgress;
 use crate::run::egress::{
-    ClientEgressEngine, ClientF2pContext, ClientOutboundContext, ClientShadowsocksContext,
-    ClientUdpContext, runtime_dial_options, runtime_route_network,
+    ClientEgressEngine, ClientOutboundContext, ClientShadowsocksContext, ClientUdpContext,
+    runtime_dial_options, runtime_route_network,
 };
 use crate::run::{RunError, dns_strategy};
 use ferrum2_config::{
@@ -41,12 +41,6 @@ pub(super) enum BootstrapOutbound {
     },
     Shadowsocks {
         psk: Arc<MethodPsk>,
-        endpoint: DialEndpoint,
-        dial_options: DialOptions,
-    },
-    F2p {
-        config: Arc<ferrum2_f2p::ClientConfig>,
-        profile: ferrum2_f2p::Profile,
         endpoint: DialEndpoint,
         dial_options: DialOptions,
     },
@@ -106,25 +100,6 @@ impl BootstrapBlueprint {
                         .clone(),
                     dial_options,
                 },
-                PreparedClientOutboundKind::F2p => {
-                    let config = descriptor.f2p().ok_or(RunError::StartupProtocol)?;
-                    BootstrapOutbound::F2p {
-                        config: Arc::new(
-                            ferrum2_f2p::ClientConfig::load(
-                                &config.token_file,
-                                &config.server_name,
-                                config.ca_file.as_deref(),
-                            )
-                            .map_err(|_| RunError::StartupProtocol)?,
-                        ),
-                        profile: config.profile,
-                        endpoint: descriptor
-                            .endpoint()
-                            .ok_or(RunError::StartupProtocol)?
-                            .clone(),
-                        dial_options,
-                    }
-                }
             });
         }
         let mut dns_servers = Vec::new();
@@ -195,22 +170,6 @@ impl BootstrapBlueprint {
                         dial_options: dial_options.clone(),
                     })
                 }
-                BootstrapOutbound::F2p {
-                    config,
-                    profile,
-                    endpoint,
-                    dial_options,
-                } => {
-                    let address = addresses.outbounds[index]
-                        .or_else(|| endpoint_address(endpoint))
-                        .unwrap_or(UNRESOLVED_ENDPOINT);
-                    ClientOutboundContext::F2p(ClientF2pContext::new(
-                        address,
-                        Arc::clone(config),
-                        *profile,
-                        dial_options.clone(),
-                    )?)
-                }
             });
         }
         Ok(outbounds.into())
@@ -258,7 +217,7 @@ impl BootstrapBlueprint {
                         strategy,
                     ))
                 }
-                BootstrapOutbound::Shadowsocks { .. } | BootstrapOutbound::F2p { .. } => None,
+                BootstrapOutbound::Shadowsocks { .. } => None,
             })
             .collect::<Vec<_>>()
             .into();
@@ -376,8 +335,7 @@ impl BootstrapBlueprint {
                 .iter()
                 .map(|outbound| match outbound {
                     BootstrapOutbound::Direct { .. } => None,
-                    BootstrapOutbound::Shadowsocks { endpoint, .. }
-                    | BootstrapOutbound::F2p { endpoint, .. } => endpoint_address(endpoint),
+                    BootstrapOutbound::Shadowsocks { endpoint, .. } => endpoint_address(endpoint),
                 })
                 .collect(),
         }
@@ -649,15 +607,7 @@ pub(super) fn fixed_endpoint_plan(
             PreparedFixedEndpointTarget::DnsServer(index) => {
                 FixedEndpointKind::DnsServer(DnsServerId::new(index))
             }
-            PreparedFixedEndpointTarget::Outbound(index) => match prepared
-                .outbound(index)
-                .ok_or(RunError::StartupProtocol)?
-                .kind()
-            {
-                PreparedClientOutboundKind::Shadowsocks => FixedEndpointKind::Shadowsocks,
-                PreparedClientOutboundKind::F2p => FixedEndpointKind::F2p,
-                PreparedClientOutboundKind::Direct => return Err(RunError::StartupProtocol),
-            },
+            PreparedFixedEndpointTarget::Outbound(_) => FixedEndpointKind::Shadowsocks,
         };
         plan.push(FixedEndpointPlanEntry::new(
             kind,

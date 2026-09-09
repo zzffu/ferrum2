@@ -1,7 +1,7 @@
 # Ferrum2
 
 Ferrum2 是一个使用 Rust 2024 编写的代理工作区，包含 SOCKS5 客户端和代理服务端，
-支持 Shadowsocks 2022 TCP/UDP、F2P TCP 与 UDP over TCP、路由规则、DNS 策略、
+支持 Shadowsocks 2022 TCP/UDP、路由规则、DNS 策略、
 远程二进制 RuleSet，以及 Windows x86_64 上的托管 Wintun。
 
 当前仅接受 `schema_version = 2`，不提供旧配置兼容层或自动迁移。许可证为
@@ -80,7 +80,6 @@ cargo run -p ferrum2-client --locked -- --config client.toml --dashboard-listen 
 
 - [文档索引](docs/README.md)：配置、架构、验证流程和性能证据。
 - [DNS 与 RuleSet 配置](docs/config-v2-dns-rulesets.md)。
-- [F2P 设计、配置与验证](docs/architecture/f2p-design.md)：TLS 1.3/TCP 承载，`balanced`／`realtime` 调度；[客户端](docs/examples/client-v2-f2p.toml)与[服务端](docs/examples/server-v2-f2p.toml)配置示例。UDP over TCP 不消除队头阻塞，尚无 WAN 性能优势结论。
 - [Windows TUN 配置](docs/config-v2-tun.md)：当前 schema-v2 字段、系统 TCP、原生 UDP 和网络生命周期。
 - [内嵌 rocom 录制与离线解码](docs/architecture/rocom-recording-design.md)：自动识别 TSF4G 连接，每条连接独立保存原始数据/key JSONL，普通 TCP 不录制；敏感录制须显式开启。
 - [Windows TUN 正确性验证](docs/windows-tun-qualification.md)：真实网卡验证的专用流程。

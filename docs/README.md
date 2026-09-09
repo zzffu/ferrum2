@@ -9,7 +9,6 @@ Commands assume the repository root unless a guide says otherwise. Use `python` 
 | Guide or example | Scope |
 |---|---|
 | [Local SOCKS5 client](examples/client-v2-socks5.toml) and [Shadowsocks server](examples/server-v2.toml) | Matching loopback-only schema-v2 examples with a synthetic test key |
-| [F2P client](examples/client-v2-f2p.toml) and [F2P server](examples/server-v2-f2p.toml) | TLS/TCP proxy with UDP over TCP and balanced/realtime profiles; provision token/certificate files before running |
 | [DNS and RuleSets](config-v2-dns-rulesets.md) | Offline validation, materialization, resolution/detours, SRS loading, cache, refresh, and diagnostics |
 | [DNS/RuleSet example](examples/client-v2-dns-rulesets.toml) | Annotated client configuration; replace documentation endpoints and key before deployment |
 | [Managed TUN](config-v2-tun.md) and [TUN example](examples/client-v2-tun.toml) | Windows x86_64, IPv4/IPv6, route/dial policy, UDP associations, lifecycle, and metrics |
@@ -33,7 +32,6 @@ Commands assume the repository root unless a guide says otherwise. Use `python` 
 | [Repository guidelines](../AGENTS.md) | Build/test commands, compatibility policy, and contribution rules; scoped guides refine ownership |
 | [Invariant ledger](architecture/invariants.md) | Owner boundaries, behavioral contracts, evidence, and remaining gaps |
 | [TUN system TCP design](architecture/tun-system-tcp-design.md) | Windows TCP conversion with native UDP unchanged; selected minimal temporary ingress allowance and authorized host qualification |
-| [F2P protocol design and evidence](architecture/f2p-design.md) | Protocol ownership, TLS/auth, two-stage TCP admission, bounded UDP profiles, configuration and loopback evidence |
 | [Gate ledger](architecture/gates.md) | Current workflows, triggers, commands, privilege boundaries, and required contexts |
 | [Fixture and evidence ledger](architecture/fixtures-and-evidence.md) | Reviewed inputs, vendor patches, hashes, and retention requirements |
 | [Refactor consumer ledger](architecture/refactor-consumers.md) | Identities and consumers that must change atomically during moves or renames |

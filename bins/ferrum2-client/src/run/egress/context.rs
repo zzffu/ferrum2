@@ -10,7 +10,6 @@ use crate::run::RunError;
 
 pub(in crate::run) enum ClientOutboundContext {
     Shadowsocks(ClientShadowsocksContext),
-    F2p(super::f2p::ClientF2pContext),
     Direct { dial_options: DialOptions },
 }
 
@@ -26,9 +25,6 @@ pub(in crate::run) enum ClientRequestOrigin {
 pub(super) enum SelectedEgress {
     Direct {
         outbound: Option<usize>,
-    },
-    F2p {
-        outbound: usize,
     },
     Shadowsocks {
         first_outbound: usize,
@@ -51,14 +47,13 @@ impl ClientOutboundContext {
     pub(in crate::run) fn shadowsocks(&self) -> Option<&ClientShadowsocksContext> {
         match self {
             Self::Shadowsocks(outbound) => Some(outbound),
-            Self::Direct { .. } | Self::F2p(_) => None,
+            Self::Direct { .. } => None,
         }
     }
 
     pub(in crate::run) fn dial_options(&self) -> &DialOptions {
         match self {
             Self::Shadowsocks(outbound) => &outbound.dial_options,
-            Self::F2p(outbound) => &outbound.dial_options,
             Self::Direct { dial_options } => dial_options,
         }
     }
@@ -107,20 +102,6 @@ pub(in crate::run) fn prepare_client_outbounds(
                     keys: MethodKeyAdapter::new(MethodSinglePskProvider::from_shared(psk)),
                     dial_options: runtime_dial_options(&dial_options),
                 }),
-                ferrum2_config::ClientOutboundConfig::F2p(config) => {
-                    let tls = ferrum2_f2p::ClientConfig::load(
-                        &config.token_file,
-                        &config.server_name,
-                        config.ca_file.as_deref(),
-                    )
-                    .map_err(|_| RunError::StartupProtocol)?;
-                    ClientOutboundContext::F2p(super::f2p::ClientF2pContext::new(
-                        config.server,
-                        Arc::new(tls),
-                        config.profile,
-                        runtime_dial_options(&config.dial_options),
-                    )?)
-                }
                 ferrum2_config::ClientOutboundConfig::Direct { dial_options, .. } => {
                     ClientOutboundContext::direct(runtime_dial_options(&dial_options))
                 }

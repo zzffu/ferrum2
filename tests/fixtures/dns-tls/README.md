@@ -1,9 +1,8 @@
 # Shared TLS test fixtures
 
 These files are shared by `ferrum2-dns` encrypted-transport tests, `ferrum2-ruleset` HTTPS
-transport tests, `ferrum2-f2p` TLS tests, and the m0 harness's external DNS and F2P
-loopback qualification. F2P tests convert these immutable bytes into temporary PEM files;
-they do not embed this CA in production trust. The DNS crate's private `__interop-test-root`
+transport tests, and the m0 harness's external DNS loopback qualification.
+The DNS crate's private `__interop-test-root`
 feature embeds the CA only for test builds. Exact source consumers and file digests are
 recorded in `tests/m0-harness/tests/workspace_policy/architecture.toml`.
 They are synthetic test-only artifacts generated locally with

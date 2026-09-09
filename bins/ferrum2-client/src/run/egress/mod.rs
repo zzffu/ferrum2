@@ -1,6 +1,5 @@
 mod context;
 mod engine;
-mod f2p;
 mod network;
 mod tcp;
 mod udp;
@@ -10,7 +9,6 @@ pub(in crate::run) use context::{
     runtime_dial_options, runtime_route_network,
 };
 pub(in crate::run) use engine::{ClientEgressEngine, ClientOpenFailure, ClientPlanFailure};
-pub(in crate::run) use f2p::ClientF2pContext;
 #[cfg(any(windows, test))]
 pub(in crate::run) use network::io_error_from_network_service;
 #[cfg(test)]

@@ -246,7 +246,7 @@ pub fn catalog(source: &str) -> Result<Value, ConfigStoreError> {
     });
     let result = json!({
         "inbounds": rows(root.get("inbounds"), &["tag", "outbound"]),
-        "outbounds": rows(root.get("outbounds"), &["tag", "type", "method", "profile", "domain_strategy"]),
+        "outbounds": rows(root.get("outbounds"), &["tag", "type", "method", "domain_strategy"]),
         "selectors": rows(root.get("selectors"), &["tag", "outbounds", "default"]),
         "chains": rows(root.get("chains"), &["tag", "hops"]),
         "route": route,
@@ -412,28 +412,37 @@ mod tests {
     }
 
     #[test]
-    fn catalog_excludes_nested_auth_tls_and_remote_resource_locations() {
-        let source = VALID.replace("type = 'direct'", "type = 'f2p'\nserver = '192.0.2.10:8443'\n[outbounds.auth]\ntoken_file = 'missing-secrets/client.token'\n[outbounds.tls]\nserver_name = 'private-endpoint.example'\nca_file = 'missing-secrets/ca.pem'");
+    fn catalog_excludes_credentials_tls_endpoints_and_remote_resource_locations() {
+        let source = VALID.replace("type = 'direct'", "type = 'shadowsocks'\nserver = '192.0.2.10:8443'\nmethod = '2022-blake3-aes-128-gcm'\npsk = 'AAECAwQFBgcICQoLDA0ODw=='");
         let source = format!(
-            "{source}\n[[route.rule_set]]\ntag = 'rules'\ntype = 'remote'\nformat = 'binary'\nurl = 'https://private-rules.example/rules.srs'\ndownload_resolver = 'local'\n"
+            "{source}\n[[route.rule_set]]\ntag = 'rules'\ntype = 'remote'\nformat = 'binary'\nurl = 'https://private-rules.example/rules.srs'\ndownload_resolver = 'secure'\n[dns]\n[[dns.inbounds]]\ntag = 'dns-in'\nlisten = '127.0.0.1:1053'\n[[dns.servers]]\ntag = 'secure'\ntransport = 'doh'\naddress = '192.0.2.53:443'\nserver_name = 'private-endpoint.example'\npath = '/private-dns-query'\n[dns.route]\nfinal = 'secure'\n[rocom]\nrecord_path = 'private-recordings/session.tsf4g'\n"
         );
         let value = catalog(&source).unwrap();
         assert_eq!(
             value["outbounds"][0],
-            json!({"tag": "direct", "type": "f2p"})
+            json!({"tag": "direct", "type": "shadowsocks", "method": "2022-blake3-aes-128-gcm"})
         );
         assert_eq!(
             value["route"]["rule_set"][0],
             json!({"tag": "rules", "type": "remote", "format": "binary"})
         );
+        assert_eq!(
+            value["dns"]["servers"][0],
+            json!({"tag": "secure", "transport": "doh"})
+        );
+        assert_eq!(value["rocom"], json!({}));
         let rendered = value.to_string();
         for secret in [
-            "missing-secrets",
+            "AAECAwQFBgcICQoLDA0ODw==",
             "private-endpoint",
             "private-rules",
             "192.0.2.10",
-            "token_file",
-            "ca_file",
+            "192.0.2.53",
+            "private-dns-query",
+            "private-recordings",
+            "psk",
+            "server_name",
+            "record_path",
             "url",
         ] {
             assert!(!rendered.contains(secret));

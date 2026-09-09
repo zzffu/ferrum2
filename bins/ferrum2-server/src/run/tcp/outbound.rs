@@ -59,19 +59,11 @@ where
     Ok((stream, bytes))
 }
 
-pub(in crate::run) enum ServerProtocol {
-    Shadowsocks {
-        keys: Arc<MethodKeyAdapter<MethodSinglePskProvider>>,
-        replay: Arc<TcpReplayStore>,
-    },
-    F2p(ferrum2_f2p::ServerConfig),
-}
-
 pub(in crate::run) struct ServerContext {
     pub(in crate::run) inbound: usize,
     pub(in crate::run) routing: Arc<ServerRouting>,
-    pub(in crate::run) protocol: ServerProtocol,
-    pub(in crate::run) f2p_udp: Arc<super::f2p::UdpBudget>,
+    pub(in crate::run) keys: Arc<MethodKeyAdapter<MethodSinglePskProvider>>,
+    pub(in crate::run) replay: Arc<TcpReplayStore>,
     pub(in crate::run) clock: Arc<SystemClock>,
     pub(in crate::run) random: SystemRandom,
     pub(in crate::run) runtime: RuntimeConfig,

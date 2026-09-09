@@ -33,8 +33,6 @@ pub enum FixedEndpointKind {
     DnsServer(DnsServerId),
     /// A fixed Shadowsocks server endpoint.
     Shadowsocks,
-    /// A fixed F2P server endpoint.
-    F2p,
     /// The HTTPS origin endpoint of a remote RuleSet URL.
     RuleSet,
 }

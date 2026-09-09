@@ -74,11 +74,6 @@ impl UdpSessionManager {
         }
     }
 
-    /// Returns the validated ceilings shared by protocol adapters and this manager.
-    pub fn limits(&self) -> UdpRuntimeLimits {
-        self.inner.limits
-    }
-
     /// Returns the global allocated-capacity reservation owner.
     pub fn buffer_budget(&self) -> UdpBufferBudget {
         self.inner.budget.clone()

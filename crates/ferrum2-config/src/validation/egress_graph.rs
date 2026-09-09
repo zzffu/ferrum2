@@ -10,7 +10,6 @@ use super::common::{validate_count, validate_tag};
 struct OutboundInput<'a> {
     tag: &'a str,
     is_direct: bool,
-    is_f2p: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -53,7 +52,6 @@ impl AdmittedEgressGraph {
             outbounds.iter().map(|outbound| OutboundInput {
                 tag: outbound.tag.as_str(),
                 is_direct: outbound.outbound_type.as_deref() == Some("direct"),
-                is_f2p: outbound.outbound_type.as_deref() == Some("f2p"),
             }),
             raw.selectors.as_deref().unwrap_or(&[]),
             raw.chains.as_deref().unwrap_or(&[]),
@@ -78,7 +76,6 @@ impl AdmittedEgressGraph {
             outbounds.iter().map(|outbound| OutboundInput {
                 tag: outbound.tag.as_str(),
                 is_direct: true,
-                is_f2p: false,
             }),
             raw.selectors.as_deref().unwrap_or(&[]),
             &[],
@@ -100,25 +97,13 @@ impl AdmittedEgressGraph {
         }
         let mut tags = HashMap::new();
         let mut direct = Vec::new();
-        let mut f2p = 0_u64;
-        for (
-            index,
-            OutboundInput {
-                tag,
-                is_direct,
-                is_f2p,
-            },
-        ) in outbounds.enumerate()
-        {
+        for (index, OutboundInput { tag, is_direct }) in outbounds.enumerate() {
             validate_tag(tag, ConfigField::OutboundsTag)?;
             if !identities.insert(tag) {
                 return Err(ConfigError::semantic(ConfigField::OutboundsTag));
             }
             tags.insert(tag.to_owned(), PreparedEgressRef::Outbound(index));
             direct.push(is_direct);
-            if is_f2p {
-                f2p |= 1_u64 << index;
-            }
         }
         for (index, chain) in chains.iter().enumerate() {
             let tag = chain
@@ -161,7 +146,7 @@ impl AdmittedEgressGraph {
                     return Err(ConfigError::semantic(ConfigField::ChainsHops));
                 };
                 let bit = 1_u64 << outbound;
-                if direct[outbound] || f2p & bit != 0 || seen & bit != 0 {
+                if direct[outbound] || seen & bit != 0 {
                     return Err(ConfigError::semantic(ConfigField::ChainsHops));
                 }
                 seen |= bit;

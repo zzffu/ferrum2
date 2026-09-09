@@ -7,7 +7,6 @@ members = [
     "crates/ferrum2-ruleset",
     "crates/ferrum2-crypto",
     "crates/ferrum2-shadowsocks",
-    "crates/ferrum2-f2p",
     "crates/ferrum2-socks5",
     "crates/ferrum2-net",
     "crates/ferrum2-runtime",
@@ -39,7 +38,6 @@ ferrum2-rule = { path = "crates/ferrum2-rule", version = "=0.1.0" }
 ferrum2-ruleset = { path = "crates/ferrum2-ruleset", version = "=0.1.0" }
 ferrum2-crypto = { path = "crates/ferrum2-crypto", version = "=0.1.0" }
 ferrum2-shadowsocks = { path = "crates/ferrum2-shadowsocks", version = "=0.1.0" }
-ferrum2-f2p = { path = "crates/ferrum2-f2p", version = "=0.1.0" }
 ferrum2-socks5 = { path = "crates/ferrum2-socks5", version = "=0.1.0" }
 ferrum2-net = { path = "crates/ferrum2-net", version = "=0.1.0" }
 ferrum2-runtime = { path = "crates/ferrum2-runtime", version = "=0.1.0" }

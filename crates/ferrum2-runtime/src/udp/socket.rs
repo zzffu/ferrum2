@@ -60,27 +60,6 @@ pub struct SystemDirectUdpSocket {
     socket: UdpSocket,
 }
 
-impl SystemDirectUdpSocket {
-    /// Filters replies to one fixed peer, preserving dual-stack IPv4 mapping.
-    pub async fn connect_peer(&self, peer: SocketAddr) -> io::Result<()> {
-        let peer = match peer {
-            SocketAddr::V4(peer) => SocketAddr::V6(SocketAddrV6::new(
-                peer.ip().to_ipv6_mapped(),
-                peer.port(),
-                0,
-                0,
-            )),
-            SocketAddr::V6(peer) => SocketAddr::V6(peer),
-        };
-        self.socket.connect(peer).await
-    }
-
-    /// Attempts one connected receive, clearing stale readiness on WouldBlock.
-    pub fn try_receive_connected(&self, destination: &mut [u8]) -> io::Result<usize> {
-        self.socket.try_recv(destination)
-    }
-}
-
 impl DirectUdpSocket for SystemDirectUdpSocket {
     async fn send_to(&self, payload: &[u8], target: SocketAddr) -> io::Result<usize> {
         let target = match target {

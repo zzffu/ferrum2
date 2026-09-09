@@ -642,20 +642,7 @@ where
         let owner_baseline = process_resources.baseline;
         let supervisor = ProcessSupervisor::new(roots, shutdown_grace, registry.clone())
             .map_err(|_| RunError::StartupProtocol)?;
-        let cleanup_outbounds = Arc::clone(&egress.outbounds);
-        let supervisor = supervisor.with_process_resources(ferrum2_runtime::ProcessResources {
-            baseline: owner_baseline,
-            cleanup: Box::pin(async move {
-                let mut protocol_result = Ok(());
-                for outbound in cleanup_outbounds.iter() {
-                    if let egress::ClientOutboundContext::F2p(outbound) = outbound {
-                        protocol_result = protocol_result.and(outbound.shutdown().await);
-                    }
-                }
-                let native_result = process_resources.cleanup.await;
-                protocol_result.and(native_result)
-            }),
-        });
+        let supervisor = supervisor.with_process_resources(process_resources);
         let report = supervisor.run_until(shutdown).await;
         let owner_stopped = registry.snapshot();
         let diagnostic = ShutdownDiagnostic::classify(

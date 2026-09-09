@@ -13,8 +13,8 @@ use ferrum2_runtime::{
 #[test]
 fn shared_network_reset_hub_resets_all_live_engines_and_drops_registration_exactly() {
     let hub = ClientNetworkResetHub::default();
-    let first = Arc::new(ClientEgressNetworkResetState::new(None, Arc::from([])));
-    let second = Arc::new(ClientEgressNetworkResetState::new(None, Arc::from([])));
+    let first = Arc::new(ClientEgressNetworkResetState::new(None));
+    let second = Arc::new(ClientEgressNetworkResetState::new(None));
     let first_calls = Arc::new(AtomicUsize::new(0));
     let second_calls = Arc::new(AtomicUsize::new(0));
     let first_action: Arc<ClientDnsResetAction> = {

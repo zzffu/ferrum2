@@ -17,7 +17,6 @@ use super::engine::ClientOpenFailure;
 pub(in crate::run) enum ClientTcpFlow<'a, S> {
     Direct(S),
     Proxy(BoxedClientFlow<'a>),
-    F2p(Box<ferrum2_f2p::ClientStream<super::f2p::SuppliedIo<S>>>),
 }
 
 impl<S> LocalEndpoint for ClientTcpFlow<'_, S>
@@ -28,7 +27,6 @@ where
         match self {
             Self::Direct(stream) => stream.local_socket_addr(),
             Self::Proxy(flow) => flow.local_socket_addr(),
-            Self::F2p(stream) => stream.local_socket_addr(),
         }
     }
 }
@@ -47,16 +45,6 @@ where
                 .poll_read(context, destination)
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Read)),
             Self::Proxy(flow) => Pin::new(flow).poll_read_plain(context, destination),
-            Self::F2p(stream) => {
-                let mut buffer = tokio::io::ReadBuf::new(destination);
-                match tokio::io::AsyncRead::poll_read(Pin::new(stream), context, &mut buffer) {
-                    Poll::Ready(Ok(())) => Poll::Ready(Ok(buffer.filled().len())),
-                    Poll::Ready(Err(_)) => {
-                        Poll::Ready(Err(ShadowsocksError::Transport(TransportPhase::Read)))
-                    }
-                    Poll::Pending => Poll::Pending,
-                }
-            }
         }
     }
 
@@ -70,10 +58,6 @@ where
                 .poll_write(context, source)
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Write)),
             Self::Proxy(flow) => Pin::new(flow).poll_write_plain(context, source),
-            Self::F2p(stream) => {
-                tokio::io::AsyncWrite::poll_write(Pin::new(stream), context, source)
-                    .map_err(|_| ShadowsocksError::Transport(TransportPhase::Write))
-            }
         }
     }
 
@@ -86,8 +70,6 @@ where
                 .poll_flush(context)
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Flush)),
             Self::Proxy(flow) => Pin::new(flow).poll_flush_plain(context),
-            Self::F2p(stream) => tokio::io::AsyncWrite::poll_flush(Pin::new(stream), context)
-                .map_err(|_| ShadowsocksError::Transport(TransportPhase::Flush)),
         }
     }
 
@@ -100,8 +82,6 @@ where
                 .poll_shutdown(context)
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Shutdown)),
             Self::Proxy(flow) => Pin::new(flow).poll_shutdown_plain(context),
-            Self::F2p(stream) => tokio::io::AsyncWrite::poll_shutdown(Pin::new(stream), context)
-                .map_err(|_| ShadowsocksError::Transport(TransportPhase::Shutdown)),
         }
     }
 
@@ -111,14 +91,12 @@ where
                 .mark_abortive()
                 .map_err(|_| ShadowsocksError::Transport(TransportPhase::Shutdown)),
             Self::Proxy(flow) => flow.mark_abortive_plain(),
-            Self::F2p(stream) => ferrum2_core::AbortiveClose::mark_abortive(stream.as_mut())
-                .map_err(|_| ShadowsocksError::Transport(TransportPhase::Shutdown)),
         }
     }
 
     fn terminal(&self) -> Option<FlowTerminal> {
         match self {
-            Self::Direct(_) | Self::F2p(_) => None,
+            Self::Direct(_) => None,
             Self::Proxy(flow) => flow.terminal(),
         }
     }

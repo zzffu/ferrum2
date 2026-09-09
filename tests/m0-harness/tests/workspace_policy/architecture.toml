@@ -8,7 +8,6 @@ workspace_members = [
     "ferrum2-crypto",
     "ferrum2-dashboard",
     "ferrum2-dns",
-    "ferrum2-f2p",
     "ferrum2-m0-harness",
     "ferrum2-m4-qualification",
     "ferrum2-net",
@@ -40,10 +39,6 @@ allowed = ["ferrum2-core", "ferrum2-dns", "ferrum2-rule"]
 [[internal_dependency_allowlists]]
 package = "ferrum2-observability"
 allowed = []
-
-[[internal_dependency_allowlists]]
-package = "ferrum2-f2p"
-allowed = ["ferrum2-core"]
 
 [[internal_dependency_allowlists]]
 package = "ferrum2-rocom"

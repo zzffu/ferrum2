@@ -292,13 +292,11 @@ pub(super) fn apply_outbound_resources(
         match (validated, expected) {
             (ClientOutboundConfig::Direct { .. }, None) => {}
             (
-                ClientOutboundConfig::Shadowsocks { server, .. }
-                | ClientOutboundConfig::F2p(crate::model::F2pClientConfig { server, .. }),
+                ClientOutboundConfig::Shadowsocks { server, .. },
                 Some(DialEndpoint::Ip(expected)),
             ) if server == expected => {}
             (
-                ClientOutboundConfig::Shadowsocks { server, .. }
-                | ClientOutboundConfig::F2p(crate::model::F2pClientConfig { server, .. }),
+                ClientOutboundConfig::Shadowsocks { server, .. },
                 Some(endpoint @ DialEndpoint::Domain { .. }),
             ) => {
                 let resource = resources

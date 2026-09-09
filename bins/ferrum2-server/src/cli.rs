@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(name = "ferrum2-server", version, about = "ferrum2 proxy server")]
+#[command(name = "ferrum2-server", version, about = "ferrum2 Shadowsocks server")]
 pub(crate) struct Cli {
     /// Path to the TOML configuration.
     #[arg(long, value_name = "PATH")]
