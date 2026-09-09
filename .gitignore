@@ -12,3 +12,13 @@ __pycache__/
 # Dashboard development outputs; embedded shipping assets and bun.lock are tracked.
 /ui/dashboard/node_modules/
 /ui/dashboard/dist/
+
+# Local autoresearch session artifacts, not product source.
+/autoresearch.md
+/autoresearch.sh
+/autoresearch.checks.sh
+/autoresearch.program.md
+/autoresearch.ideas.md
+/autoresearch.jsonl
+/autoresearch.config.json
+/.autoresearch

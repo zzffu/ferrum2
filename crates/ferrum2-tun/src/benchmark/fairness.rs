@@ -281,3 +281,33 @@ fn run(bytes: usize) -> ResultWindow {
         observation,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn both_protocols_progress_and_udp_takes_the_first_recovered_slot() {
+        for payload_bytes in [64, 1460] {
+            let observed = super::run(payload_bytes).observation;
+            assert!(
+                observed
+                    .max_gap
+                    .into_iter()
+                    .all(|gap| (1..=3).contains(&gap)),
+                "both protocols must progress throughout each writable segment"
+            );
+            assert!(
+                (1..=3).contains(&observed.resume[0]),
+                "TCP must resume after the sink becomes writable"
+            );
+            assert_eq!(
+                observed.resume[1], 1,
+                "deferred UDP must use the first recovered output opportunity"
+            );
+            assert_eq!(
+                observed.outputs.into_iter().sum::<usize>(),
+                239,
+                "the fixed window must not lose writable output opportunities"
+            );
+        }
+    }
+}

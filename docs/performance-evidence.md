@@ -109,7 +109,7 @@ cargo build -p ferrum2-tun --example tun-benchmark --no-default-features --featu
 target/profiling/examples/tun-benchmark.exe --scenario tcp-rewrite --mode Quick
 ```
 
-On Unix, omit `.exe`. The six closed scenarios are:
+On Unix, omit `.exe`. The existing paired controller covers these six closed scenarios:
 
 | Scenario | Measured TUN work |
 |---|---|
@@ -193,6 +193,46 @@ to this benchmark. A TUN-only improvement does not prove real driver or full cli
 performance improvement. Real socket and Wintun/WFP correctness are checked separately by the
 [Windows qualification contract](windows-tun-qualification.md).
 
+### Additional diagnostic recipes
+
+The crate-owned `tun-benchmark` also exposes the following standalone recipes.
+They use the same unprivileged example binary and `--scenario` / `--mode Quick|Confirm`
+arguments. They are not added to the six-scenario controller score or calibration.
+
+| Scenario | Diagnostic scope |
+|---|---|
+| `udp-deadline-same`, `udp-deadline-advance` | Live association admission with unchanged or advancing logical deadlines |
+| `udp-ingress-full`, `udp-response-full` | Admission into full queues, including rejection work |
+| `udp-consumer-lag` | Deferred responses and subsequent bounded consumer progress |
+| `tcp-socket-ready`, `tcp-flow-ready` | Identical memory-stream driver, directly or through TcpFlow |
+| `tcp-socket-pending`, `tcp-flow-pending` | Pending, wake registration and subsequent memory-stream progress |
+| `tcp-maintenance-idle`, `tcp-maintenance-changed` | Sparse published TCP state with idle or retired-owner maintenance |
+| `mixed-sustained` | Continuously replenished TCP/UDP backlogs and paused-output recovery |
+| `tcp-established-v4`, `tcp-established-v6` | Published mapping rewrite and deadline updates for each IP family |
+
+Each result identifies its recipe, checked units, elapsed time and observations.
+Validate these fields and actual work before comparing timings. A successful
+`mixed-sustained` invocation can intentionally report starvation, allowing the
+same recipe to diagnose a broken implementation. Its consumer must require
+`bounded_progress=true`, `starved=false`, both maximum gaps within 1–3 rotations,
+TCP recovery within 1–3 rotations, and UDP recovery in the first rotation.
+The fixed window must use all 239 writable output opportunities. These progress,
+recovery and output-opportunity requirements are also guarded by the benchmark's
+Rust regression test. Keep the `fuzzing,benchmark` library-test gate: it additionally
+enables the bounded memory-stream cancellation/fence tests.
+
+The established recipes create and publish 32 mappings in 64 slots through real
+`SystemTcp` SYN/accept/publication transitions. Quick payloads are 64 bytes; Confirm
+fills MTU1500 with 1460-byte IPv4 or 1440-byte IPv6 payloads. Setup, parsing and
+complete expected-byte/checksum validation are outside timing. Timed work is the
+rewrite core and its actual deadline updates, not parser, scheduler, reactor or
+driver work. Packets encode their ordinals and each mapping's expiration is checked.
+The fixed logical inter-window gap is 4032ms with a 4096ms timeout, deliberately
+crossing prior deadlines while mappings remain live. This is not a measured
+arrival distribution; `deadline_refreshes` does not count physical heap operations.
+Other detail recipes document their fixed populations, pauses and timing boundaries
+in their owning `src/benchmark/` modules.
+
 ### Windows CPU profiling interpretation
 
 Collect CPU traces separately from uninstrumented performance comparisons. Preserve the exact
@@ -204,6 +244,22 @@ Kernel, driver, DPC and interrupt samples attributed to a product process are no
 product user-space or syscall costs. Unresolved kernel symbols support only module-level
 attribution; symbol-prefix and leaf-sample summaries are not inclusive call-tree costs.
 Keep raw traces, symbols and workload evidence private and outside tracked source.
+
+When exporting ETW stacks with xperf's dumper, `-stacktimeshifting` joins delayed
+user-stack fragments with their kernel stacks. Preserve timestamp/PC identities
+and separately classify ISR/DPC samples; missing application frames in an unjoined
+export do not prove that the trace lacks them. Validate image/PDB identities and
+function extents: optimized private code may be labelled with a nearby public
+symbol that does not actually contain the sampled address.
+
+Context-switch recording and stack unwinding can themselves consume substantial
+CPU on a product thread. An inclusive `Adapter::wait` stack can therefore include
+ETW recording, stack walking and APC work, not merely business wait logic. Zero
+lost events does not imply low overhead. Do not subtract an observed sample share
+from scheduled CPU to infer uninstrumented performance: tracing can change the
+scheduling and wake behavior being measured. Keep heavy diagnostic traces separate
+from low-overhead performance comparisons, and retain historical reports externally
+with their original identities rather than relabelling them after history cleanup.
 
 ## Rule qualification evidence
 
