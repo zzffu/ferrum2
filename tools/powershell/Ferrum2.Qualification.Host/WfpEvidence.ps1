@@ -596,19 +596,6 @@ function Get-Ferrum2QualificationLiveWfpWitness {
     $tcpIngress = Get-Ferrum2QualificationTcpIngressWfpWitness `
         -Document $document -Runtime $Runtime -Network $Network `
         -StrictRoute $strictRoute -Listener $listener -ExecutablePath $ExecutablePath
-    if ($Network.address_family -ceq 'IPv6') {
-        $ipv4Addresses = @(Get-NetIPAddress -AddressFamily IPv4 -PolicyStore ActiveStore -ErrorAction Stop)
-        if ($ipv4Addresses.Count -gt 16384) {
-            throw 'qualification IPv4 address inventory exceeds its identity bound'
-        }
-        $ipv4Count = @($ipv4Addresses | Where-Object {
-            [uint32]$_.InterfaceIndex -eq [uint32]$Runtime.adapter.ifIndex
-        }).Count
-        if ($ipv4Count -ne 0) {
-            throw 'IPv6-only qualification TUN acquired an unconfigured IPv4 address'
-        }
-        $tcpIngress | Add-Member -NotePropertyName ipv4_address_count -NotePropertyValue $ipv4Count
-    }
     return [pscustomobject][ordered]@{
         address_family = [string]$Network.address_family
         strict_route = $strictRoute

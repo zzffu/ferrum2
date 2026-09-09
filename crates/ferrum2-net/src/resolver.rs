@@ -183,6 +183,7 @@ pub const NETWORK_INTERFACE_RESOLUTION_CACHE_CAPACITY: usize = 256;
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct NetworkInterfaceResolutionCacheKey {
     snapshot_generation: u64,
+    snapshot_observation: u64,
     destination: SocketAddr,
     outbound: DialOptions,
     route: RouteNetworkOptions,
@@ -190,21 +191,21 @@ struct NetworkInterfaceResolutionCacheKey {
 
 #[derive(Default)]
 struct NetworkInterfaceResolutionCache {
-    generation: Option<u64>,
+    observation: Option<u64>,
     entries: BTreeMap<NetworkInterfaceResolutionCacheKey, ResolvedInterface>,
     insertion_order: VecDeque<NetworkInterfaceResolutionCacheKey>,
 }
 
 impl NetworkInterfaceResolutionCache {
     fn lookup(&mut self, key: &NetworkInterfaceResolutionCacheKey) -> Option<ResolvedInterface> {
-        match self.generation {
-            None => self.generation = Some(key.snapshot_generation),
-            Some(generation) if key.snapshot_generation > generation => {
+        match self.observation {
+            None => self.observation = Some(key.snapshot_observation),
+            Some(observation) if key.snapshot_observation > observation => {
                 self.entries.clear();
                 self.insertion_order.clear();
-                self.generation = Some(key.snapshot_generation);
+                self.observation = Some(key.snapshot_observation);
             }
-            Some(generation) if key.snapshot_generation < generation => return None,
+            Some(observation) if key.snapshot_observation < observation => return None,
             Some(_) => {}
         }
         self.entries.get(key).cloned().map(|mut resolved| {
@@ -214,7 +215,7 @@ impl NetworkInterfaceResolutionCache {
     }
 
     fn insert(&mut self, key: NetworkInterfaceResolutionCacheKey, resolved: ResolvedInterface) {
-        if self.generation != Some(key.snapshot_generation) || self.entries.contains_key(&key) {
+        if self.observation != Some(key.snapshot_observation) || self.entries.contains_key(&key) {
             return;
         }
         while self.entries.len() >= NETWORK_INTERFACE_RESOLUTION_CACHE_CAPACITY {
@@ -260,6 +261,7 @@ impl<C: NetworkInterfaceCatalog> NetworkInterfaceResolver<C> {
     ) -> Result<ResolvedInterface, InterfaceResolutionError> {
         let key = NetworkInterfaceResolutionCacheKey {
             snapshot_generation: snapshot.generation(),
+            snapshot_observation: snapshot.observation_id(),
             destination,
             outbound: outbound.clone(),
             route: route.clone(),

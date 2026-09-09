@@ -124,7 +124,6 @@ pub enum ManagedNetworkDamage {
     ManagedRouteDamaged,
     ManagedDnsDamaged,
     ManagedMtuDamaged,
-    ManagedInterfacePolicyDamaged,
     StrictRouteDamaged,
     TcpIngress,
     OwnershipLedgerUntrusted,
@@ -223,6 +222,17 @@ impl NetworkResetCoordinator {
         self.inner.snapshots.clone()
     }
 
+    /// Refreshes routing observations without cancelling already-bound work.
+    /// Exact expected observation and open admission are checked under the same
+    /// state lock as final resource admission. Pending reset retries cannot be bypassed.
+    pub fn refresh_network_observation(
+        &self,
+        expected: &Arc<NetworkSnapshot>,
+        next: Arc<NetworkSnapshot>,
+    ) -> bool {
+        let state = lock_unpoisoned(&self.inner.state);
+        state.admission_open() && self.inner.snapshots.refresh_if_current(expected, next)
+    }
     /// Returns current state without exposing registered hooks or owner values.
     pub fn status(&self) -> NetworkResetStatus {
         let state = lock_unpoisoned(&self.inner.state);
@@ -279,38 +289,53 @@ impl NetworkResetCoordinator {
         generation: u64,
         kind: NetworkRuntimeOwnerKind,
     ) -> Result<NetworkRuntimeOwner, NetworkRuntimeOwnerRegistrationError> {
+        let snapshot = self.inner.snapshots.snapshot();
+        if snapshot.generation() != generation {
+            return Err(NetworkRuntimeOwnerRegistrationError::StaleGeneration);
+        }
+        self.register_runtime_owner_for_observation(&snapshot, kind)
+    }
+
+    fn register_runtime_owner_for_observation(
+        &self,
+        snapshot: &Arc<NetworkSnapshot>,
+        kind: NetworkRuntimeOwnerKind,
+    ) -> Result<NetworkRuntimeOwner, NetworkRuntimeOwnerRegistrationError> {
+        let generation = snapshot.generation();
         let mut state = lock_unpoisoned(&self.inner.state);
         if !state.admission_open() {
             return Err(NetworkRuntimeOwnerRegistrationError::AdmissionClosed);
         }
-        if generation != self.inner.snapshots.generation() {
-            return Err(NetworkRuntimeOwnerRegistrationError::StaleGeneration);
-        }
-        if state.runtime_owners.len() >= self.inner.limits.max_runtime_owners {
-            return Err(NetworkRuntimeOwnerRegistrationError::CapacityExhausted);
-        }
-        let id = state.next_runtime_owner_id;
-        state.next_runtime_owner_id = state
-            .next_runtime_owner_id
-            .checked_add(1)
-            .ok_or(NetworkRuntimeOwnerRegistrationError::IdentifierExhausted)?;
-        let (cancellation, receiver) = watch::channel(None);
-        state.runtime_owners.insert(
-            id,
-            RuntimeOwnerEntry {
-                generation,
-                kind,
-                cancellation,
-            },
-        );
-        Ok(NetworkRuntimeOwner {
-            coordinator: Arc::downgrade(&self.inner),
-            id,
-            generation,
-            kind,
-            cancellation: receiver,
-            _owner: self.inner.owners.track_network_runtime_owner(),
-        })
+        self.inner
+            .snapshots
+            .with_current_observation(snapshot, || {
+                if state.runtime_owners.len() >= self.inner.limits.max_runtime_owners {
+                    return Err(NetworkRuntimeOwnerRegistrationError::CapacityExhausted);
+                }
+                let id = state.next_runtime_owner_id;
+                state.next_runtime_owner_id = state
+                    .next_runtime_owner_id
+                    .checked_add(1)
+                    .ok_or(NetworkRuntimeOwnerRegistrationError::IdentifierExhausted)?;
+                let (cancellation, receiver) = watch::channel(None);
+                state.runtime_owners.insert(
+                    id,
+                    RuntimeOwnerEntry {
+                        generation,
+                        kind,
+                        cancellation,
+                    },
+                );
+                Ok(NetworkRuntimeOwner {
+                    coordinator: Arc::downgrade(&self.inner),
+                    id,
+                    generation,
+                    kind,
+                    cancellation: receiver,
+                    _owner: self.inner.owners.track_network_runtime_owner(),
+                })
+            })
+            .unwrap_or(Err(NetworkRuntimeOwnerRegistrationError::StaleGeneration))
     }
 
     /// Resolves, prepares, and admits one resource under an exact network generation.
@@ -336,7 +361,7 @@ impl NetworkResetCoordinator {
             let resolved = match resolver.resolve(outbound, route, destination, &snapshot) {
                 Ok(resolved) => resolved,
                 Err(error) => {
-                    if !self.inner.snapshots.is_current(snapshot.generation()) {
+                    if !self.inner.snapshots.is_observation_current(&snapshot) {
                         if attempt == 0 {
                             continue;
                         }
@@ -355,11 +380,7 @@ impl NetworkResetCoordinator {
             let resource = match prepare(&resolved) {
                 Ok(resource) => resource,
                 Err(error) => {
-                    if !self
-                        .inner
-                        .snapshots
-                        .is_current(resolved.snapshot_generation())
-                    {
+                    if !self.inner.snapshots.is_observation_current(&snapshot) {
                         if attempt == 0 {
                             continue;
                         }
@@ -376,11 +397,7 @@ impl NetworkResetCoordinator {
                 }
             };
 
-            if !self
-                .inner
-                .snapshots
-                .is_current(resolved.snapshot_generation())
-            {
+            if !self.inner.snapshots.is_observation_current(&snapshot) {
                 drop(resource);
                 if attempt == 0 {
                     continue;
@@ -392,7 +409,7 @@ impl NetworkResetCoordinator {
                 );
             }
 
-            match self.register_runtime_owner(resolved.snapshot_generation(), kind) {
+            match self.register_runtime_owner_for_observation(&snapshot, kind) {
                 Ok(owner) => {
                     return Ok(AdmittedNetworkRuntimeResource {
                         resource,
@@ -459,7 +476,7 @@ impl NetworkResetCoordinator {
             }
             Err(error) => {
                 if snapshot.generation() != expected_generation
-                    || !self.inner.snapshots.is_current(expected_generation)
+                    || !self.inner.snapshots.is_observation_current(&snapshot)
                 {
                     return Err(
                         NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
@@ -476,7 +493,7 @@ impl NetworkResetCoordinator {
         let resource = match prepare(&resolved) {
             Ok(resource) => resource,
             Err(error) => {
-                if !self.inner.snapshots.is_current(expected_generation) {
+                if !self.inner.snapshots.is_observation_current(&snapshot) {
                     return Err(
                         NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged {
                             attempted_source,
@@ -490,14 +507,14 @@ impl NetworkResetCoordinator {
             }
         };
 
-        if !self.inner.snapshots.is_current(expected_generation) {
+        if !self.inner.snapshots.is_observation_current(&snapshot) {
             drop(resource);
             return Err(
                 NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged { attempted_source },
             );
         }
 
-        match self.register_runtime_owner(expected_generation, kind) {
+        match self.register_runtime_owner_for_observation(&snapshot, kind) {
             Ok(owner) => Ok(AdmittedNetworkRuntimeResource {
                 resource,
                 resolved_interface: resolved,

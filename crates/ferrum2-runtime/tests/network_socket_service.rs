@@ -31,6 +31,12 @@ fn generation_bound_tcp_stream_satisfies_shared_protocol_io_contract() {
 struct Catalog;
 
 impl NetworkInterfaceCatalog for Catalog {
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, ferrum2_net::NetworkInterfaceCatalogError>
+    {
+        Ok(Vec::new())
+    }
     fn read_interfaces(
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
@@ -700,6 +706,112 @@ async fn udp_reset_waits_for_an_inflight_operation_before_acknowledging_its_owne
     assert!(socket.closed().is_some());
     owner.shutdown().await.unwrap();
     assert_eq!(owners.snapshot().network_socket_monitors, 0);
+}
+
+fn complete_observation(generation: u64, added_family: bool, metric: u32) -> Arc<NetworkSnapshot> {
+    let mut rows = snapshot(1).interfaces().to_vec();
+    if added_family {
+        rows.push(
+            ferrum2_net::NetworkInterfaceObservation::new(
+                InterfaceBinding::new(
+                    "underlay-1",
+                    1,
+                    1,
+                    ["2001:db8::1".parse::<IpAddr>().unwrap()],
+                )
+                .unwrap(),
+                ferrum2_net::NetworkFamily::Ipv6,
+                ferrum2_net::InterfaceOperationalState::Operational,
+                ferrum2_net::InterfaceLinkState::Connected,
+                ferrum2_net::NetworkInterfaceKind::Underlay,
+                10,
+                None,
+            )
+            .unwrap(),
+        );
+    }
+    Arc::new(
+        NetworkSnapshot::from_interfaces_and_routes(
+            generation,
+            rows,
+            vec![ferrum2_net::NetworkRouteObservation::new(
+                1,
+                1,
+                destination(443).ip(),
+                32,
+                "192.0.2.254".parse().unwrap(),
+                metric,
+            )],
+        )
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn additive_family_refresh_preserves_tcp_udp_but_route_metric_change_retires_both() {
+    use tokio::io::AsyncWriteExt;
+    let owners = OwnerRegistry::new();
+    let initial = complete_observation(1, false, 10);
+    let coordinator = NetworkResetCoordinator::new(
+        NetworkSnapshotPublisher::new(initial.clone()),
+        NetworkResetLimits::default(),
+        owners.clone(),
+    );
+    let state = Arc::new(FakeState::default());
+    let (service, mut owner) = NetworkSocketService::new(
+        coordinator.clone(),
+        NetworkInterfaceResolver::new(Catalog),
+        FakeOperations { state },
+        NetworkResetLimits::default(),
+        owners.clone(),
+    );
+    let mut tcp = service
+        .connect_tcp(&DialOptions::default(), &route(), destination(443))
+        .await
+        .unwrap();
+    let udp = service
+        .open_udp(&DialOptions::default(), &route(), destination(53))
+        .unwrap();
+    let refreshed = complete_observation(1, true, 10);
+    assert!(coordinator.refresh_network_observation(&initial, refreshed.clone()));
+    tcp.write_all(b"still connected").await.unwrap();
+    assert_eq!(udp.send_to(b"query", destination(53)).await.unwrap(), 5);
+    // A new dial sees the added family rather than the old generation's cached catalog.
+    let added = service
+        .open_udp(
+            &DialOptions::new(Some("underlay-1"), None, None),
+            &route(),
+            "[2001:db8::2]:53".parse().unwrap(),
+        )
+        .unwrap();
+    assert!(
+        added
+            .resolved_interface()
+            .binding()
+            .supports(ferrum2_net::NetworkFamily::Ipv6)
+    );
+    drop(added);
+    let changed = complete_observation(2, true, 11);
+    assert!(!changed.preserves_work_from(&refreshed));
+    assert!(
+        !coordinator.refresh_network_observation(
+            &refreshed,
+            Arc::new((*changed).clone().with_generation(1))
+        )
+    );
+    let report = coordinator
+        .reset_network(
+            changed,
+            NetworkResetIntent::Ordinary(NetworkResetReason::RouteChanged),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.cancelled_runtime_owners(), 2);
+    assert!(tcp.write_all(b"stale").await.is_err());
+    assert!(udp.send_to(b"stale", destination(53)).await.is_err());
+    owner.retire_generation(1).await.unwrap();
+    owner.shutdown().await.unwrap();
+    assert_eq!(owners.snapshot().network_runtime_owners, 0);
 }
 
 #[path = "network_socket_service/ownership.rs"]

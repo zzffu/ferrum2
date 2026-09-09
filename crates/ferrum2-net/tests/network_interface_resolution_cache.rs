@@ -37,6 +37,12 @@ impl CountingCatalog {
 }
 
 impl NetworkInterfaceCatalog for CountingCatalog {
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, ferrum2_net::NetworkInterfaceCatalogError>
+    {
+        Ok(Vec::new())
+    }
     fn read_interfaces(
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {

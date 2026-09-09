@@ -2,7 +2,7 @@ use std::ops::Deref;
 
 use ferrum2_net::{
     NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceObservation,
-    ResolvedInterface, ResolvedSocketBinder, SystemBestRoute,
+    NetworkRouteObservation, ResolvedInterface, ResolvedSocketBinder, SystemBestRoute,
 };
 use socket2::Socket;
 
@@ -74,6 +74,10 @@ impl NetworkInterfaceCatalog for WindowsNetworkInterfaceCatalog {
     fn read_interfaces(
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
+        Err(NetworkInterfaceCatalogError)
+    }
+
+    fn read_routes(&self) -> Result<Vec<NetworkRouteObservation>, NetworkInterfaceCatalogError> {
         Err(NetworkInterfaceCatalogError)
     }
 

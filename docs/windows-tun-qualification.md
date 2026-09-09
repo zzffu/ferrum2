@@ -22,12 +22,13 @@ one real single-stack Wintun adapter (`-AddressFamily IPv4|IPv6`, default `IPv4`
 Each run proves only its selected family. IPv4 and IPv6 require separate successful runs; neither
 proves dual-stack correctness. All product, support, metrics, workload and listener endpoints use
 the selected family, and IPv6 sockets disable IPv4-mapped operation.
-The IPv6-only owned adapter suppresses delayed IPv4 link-local autoconfiguration by disabling
-its IPv4 DHCP address configuration through the product's journaled interface policy. Unexpected
-APIPA creation must not be hidden with a startup
-delay or by ignoring network resets; real managed-state and underlay changes retain their fences.
-Every live IPv6 ingress snapshot independently requires zero IPv4 addresses on the exact owned
-TUN interface; unrelated host IPv4 addresses are outside that check.
+Single-stack means selected-family configuration and traffic qualification. It does not require
+removing Windows-generated link-local addresses of an unconfigured family, disabling protocol
+bindings, or modifying DHCP/APIPA policy. Those incidental addresses do not qualify another family;
+the existing absent-family security filters remain required.
+Network notifications require state revalidation rather than automatically retiring working
+connections. Relevant binding, source, default-route and nondefault-route changes retain their
+reset fences; unrelated added interface-family state must not terminate established traffic.
 
 A result is qualified only when every check passes, cleanup reports zero residue, and the complete
 supervised command finishes in less than 900 seconds.

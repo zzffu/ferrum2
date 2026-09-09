@@ -249,6 +249,56 @@ pub struct SystemBestRouteError;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NetworkInterfaceCatalogError;
 
+/// Stable routing state; deliberately excludes lifetimes that tick without routing changes.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct NetworkRouteObservation {
+    stable_id: u64,
+    index: u32,
+    destination: IpAddr,
+    prefix_length: u8,
+    next_hop: IpAddr,
+    metric: u32,
+}
+
+impl NetworkRouteObservation {
+    pub fn new(
+        stable_id: u64,
+        index: u32,
+        destination: IpAddr,
+        prefix_length: u8,
+        next_hop: IpAddr,
+        metric: u32,
+    ) -> Self {
+        Self {
+            stable_id,
+            index,
+            destination,
+            prefix_length,
+            next_hop,
+            metric,
+        }
+    }
+
+    pub const fn stable_id(&self) -> u64 {
+        self.stable_id
+    }
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+    pub const fn destination(&self) -> IpAddr {
+        self.destination
+    }
+    pub const fn prefix_length(&self) -> u8 {
+        self.prefix_length
+    }
+    pub const fn next_hop(&self) -> IpAddr {
+        self.next_hop
+    }
+    pub const fn metric(&self) -> u32 {
+        self.metric
+    }
+}
+
 /// Read-only platform seam used to capture interfaces and query target-specific routes.
 ///
 /// The Windows implementation belongs at the existing platform unsafe boundary and should use
@@ -259,6 +309,9 @@ pub trait NetworkInterfaceCatalog: Send + Sync {
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError>;
 
+    /// Reads complete per-family routes. Missing support fails capture closed.
+    fn read_routes(&self) -> Result<Vec<NetworkRouteObservation>, NetworkInterfaceCatalogError>;
+
     /// Reads the system best route for the actual destination without changing network state.
     fn system_best_route(
         &self,
@@ -267,12 +320,26 @@ pub trait NetworkInterfaceCatalog: Send + Sync {
 }
 
 /// Immutable, family-aware view of the current underlay network.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq)]
 pub struct NetworkSnapshot {
     generation: u64,
+    observation_id: u64,
+    routes: Option<Arc<[NetworkRouteObservation]>>,
     ipv4_default: Option<InterfaceBinding>,
     ipv6_default: Option<InterfaceBinding>,
     interfaces: Arc<[NetworkInterfaceObservation]>,
+}
+
+impl PartialEq for NetworkSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        // The observation token fences cache/admission races, not semantic reset
+        // equality: recapturing identical state must retain idempotent reset behavior.
+        self.generation == other.generation
+            && self.ipv4_default == other.ipv4_default
+            && self.ipv6_default == other.ipv6_default
+            && self.interfaces == other.interfaces
+            && self.routes == other.routes
+    }
 }
 
 impl NetworkSnapshot {
@@ -309,7 +376,10 @@ impl NetworkSnapshot {
         let interfaces = catalog
             .read_interfaces()
             .map_err(|_| NetworkSnapshotCaptureError::CatalogUnavailable)?;
-        Self::from_interfaces(generation, interfaces)
+        let routes = catalog
+            .read_routes()
+            .map_err(|_| NetworkSnapshotCaptureError::CatalogUnavailable)?;
+        Self::from_interfaces_and_routes(generation, interfaces, routes)
             .map_err(|_| NetworkSnapshotCaptureError::InvalidInterfaceCatalog)
     }
 
@@ -322,6 +392,86 @@ impl NetworkSnapshot {
         let ipv4_default = automatic_default(&interfaces, NetworkFamily::Ipv4);
         let ipv6_default = automatic_default(&interfaces, NetworkFamily::Ipv6);
         Self::from_interfaces_with_defaults(generation, interfaces, ipv4_default, ipv6_default)
+    }
+
+    /// Builds a complete observation, including nondefault route metrics and next hops.
+    pub fn from_interfaces_and_routes(
+        generation: u64,
+        interfaces: Vec<NetworkInterfaceObservation>,
+        mut routes: Vec<NetworkRouteObservation>,
+    ) -> Result<Self, NetworkSnapshotError> {
+        if routes.iter().any(|route| {
+            route.stable_id == 0
+                || route.index == 0
+                || NetworkFamily::of(route.destination) != NetworkFamily::of(route.next_hop)
+                || route.prefix_length > if route.destination.is_ipv4() { 32 } else { 128 }
+        }) {
+            return Err(NetworkSnapshotError);
+        }
+        routes.sort();
+        routes.dedup();
+        let mut snapshot = Self::from_interfaces(generation, interfaces)?;
+        snapshot.routes = Some(routes.into());
+        Ok(snapshot)
+    }
+
+    /// Distinguishes refreshed observations without retiring the work generation.
+    pub const fn observation_id(&self) -> u64 {
+        self.observation_id
+    }
+
+    /// Retains the work generation while publishing a newly captured observation.
+    pub fn with_generation(mut self, generation: u64) -> Self {
+        self.generation = generation;
+        self
+    }
+
+    /// Whether existing bound work can survive this observation.
+    ///
+    /// Existing family rows and all their routes must be identical. New nondefault
+    /// family rows cannot affect already interface-bound sockets, but become visible
+    /// to new dials. Missing route evidence is never considered unchanged.
+    pub fn preserves_work_from(&self, previous: &Self) -> bool {
+        let (Some(routes), Some(old_routes)) = (&self.routes, &previous.routes) else {
+            return false;
+        };
+        if self.ipv4_default != previous.ipv4_default
+            || self.ipv6_default != previous.ipv6_default
+            || previous
+                .interfaces
+                .iter()
+                .any(|old| !self.interfaces.contains(old))
+        {
+            return false;
+        }
+        if old_routes
+            .iter()
+            .any(|route| routes.binary_search(route).is_err())
+        {
+            return false;
+        }
+        // Preserve pre-existing route evidence even when its family had no preferred
+        // address. New routes on a previously unbindable family cannot affect old work.
+        let identities = previous
+            .interfaces
+            .iter()
+            .map(|row| {
+                (
+                    row.family(),
+                    row.binding().stable_id(),
+                    row.binding().index(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        routes.iter().all(|route| {
+            let relevant = route.prefix_length == 0
+                || identities.contains(&(
+                    NetworkFamily::of(route.destination),
+                    route.stable_id,
+                    route.index,
+                ));
+            !relevant || old_routes.binary_search(route).is_ok()
+        })
     }
 
     /// Returns the monotonically increasing network generation.
@@ -365,6 +515,8 @@ impl NetworkSnapshot {
         });
         Ok(Self {
             generation,
+            observation_id: next_observation_id(),
+            routes: None,
             ipv4_default,
             ipv6_default,
             interfaces: interfaces.into(),
@@ -412,6 +564,16 @@ impl NetworkSnapshot {
             })
             .map(|interface| interface.binding().clone())
     }
+}
+
+fn next_observation_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |id| id.checked_add(1),
+    )
+    .expect("network observation identity exhausted")
 }
 
 fn default_observation(

@@ -307,6 +307,12 @@ async fn physical_connector_receives_selected_policy_and_first_concrete_target()
 pub(in crate::run) struct EmptyNetworkCatalog;
 
 impl ferrum2_net::NetworkInterfaceCatalog for EmptyNetworkCatalog {
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, ferrum2_net::NetworkInterfaceCatalogError>
+    {
+        Ok(Vec::new())
+    }
     fn read_interfaces(
         &self,
     ) -> Result<

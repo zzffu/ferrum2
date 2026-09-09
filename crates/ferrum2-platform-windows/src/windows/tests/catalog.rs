@@ -244,6 +244,12 @@ impl NetworkInterfaceCatalog for NoRouteCatalog {
         Err(NetworkInterfaceCatalogError)
     }
 
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, NetworkInterfaceCatalogError> {
+        Err(NetworkInterfaceCatalogError)
+    }
+
     fn system_best_route(
         &self,
         _: std::net::SocketAddr,

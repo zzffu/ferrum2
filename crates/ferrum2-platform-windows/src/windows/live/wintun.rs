@@ -39,7 +39,6 @@ use super::super::core::strict_route::{StrictRouteSession, strict_route_state_ma
 use super::super::core::wintun::{
     SessionJournal, classify_receive_null, classify_send_allocation_failure, classify_wait_result,
 };
-use super::ipv4_link_local::Ipv4LinkLocalLease;
 use super::loader::EventHandle;
 use super::loader::{
     Library, OsVersionInfo, ReleaseReceivePacket, RtlGetVersion, WintunAdapter, WintunSession,
@@ -81,7 +80,6 @@ pub struct Adapter {
     pub(super) luid: NET_LUID_LH,
     pub(super) interface_index: u32,
     pub(super) mtus: [Option<MtuState>; 2],
-    pub(super) ipv4_link_local: Option<Ipv4LinkLocalLease>,
     pub(super) pending_address: Option<MIB_UNICASTIPADDRESS_ROW>,
     pub(super) addresses: Vec<MIB_UNICASTIPADDRESS_ROW>,
     pub(super) session: Option<SessionState>,
@@ -124,7 +122,6 @@ impl Adapter {
             luid: NET_LUID_LH::default(),
             interface_index: 0,
             mtus: [None, None],
-            ipv4_link_local: None,
             pending_address: None,
             addresses: Vec::with_capacity(2),
             session: None,
@@ -394,7 +391,7 @@ impl Adapter {
         if device != ManagedTunHealth::Healthy {
             return Ok(device);
         }
-        let mtu = super::super::core::managed::mtu_health(
+        super::super::core::managed::mtu_health(
             [self.config.ipv4.is_some(), self.config.ipv6.is_some()],
             u32::from(self.config.mtu),
             self.mtus
@@ -403,11 +400,7 @@ impl Adapter {
                 super::managed::read_owned_ip_interface(self.luid, family)
                     .map(|row| row.map(|row| row.NlMtu))
             },
-        )?;
-        if mtu != ManagedTunHealth::Healthy {
-            return Ok(mtu);
-        }
-        self.ipv4_link_local_health()
+        )
     }
 
     /// Revalidates one stable, debounced notification burst against managed state.

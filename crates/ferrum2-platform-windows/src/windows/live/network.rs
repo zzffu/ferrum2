@@ -1,3 +1,5 @@
+mod route_observation;
+
 use std::ffi::c_void;
 use std::os::windows::io::AsRawSocket;
 use std::ptr::{null, null_mut};
@@ -6,7 +8,8 @@ use std::sync::atomic::AtomicU64;
 
 use ferrum2_net::{
     NetworkFamily, NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceKind,
-    NetworkInterfaceObservation, ResolvedInterface, ResolvedSocketBinder, SystemBestRoute,
+    NetworkInterfaceObservation, NetworkRouteObservation, ResolvedInterface, ResolvedSocketBinder,
+    SystemBestRoute,
 };
 use socket2::Socket;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
@@ -51,6 +54,10 @@ impl NetworkInterfaceCatalog for WindowsNetworkInterfaceCatalog {
                 .map_err(|_| NetworkInterfaceCatalogError)?,
         )
         .map_err(|_| NetworkInterfaceCatalogError)
+    }
+
+    fn read_routes(&self) -> Result<Vec<NetworkRouteObservation>, NetworkInterfaceCatalogError> {
+        route_observation::capture_routes().map_err(|_| NetworkInterfaceCatalogError)
     }
 
     fn system_best_route(

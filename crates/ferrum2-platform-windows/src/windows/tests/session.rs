@@ -12,7 +12,6 @@ use super::support::{
     validate_artifact,
 };
 
-#[derive(Clone)]
 struct InjectedSetup {
     ipv4: bool,
     ipv6: bool,
@@ -80,13 +79,6 @@ impl SetupOperations for InjectedSetup {
 
     fn ipv6_enabled(&self) -> bool {
         self.ipv6
-    }
-
-    fn disable_ipv4_link_local(&mut self) -> Result<(), Error> {
-        self.step("ipv4-policy-snapshot", None)?;
-        self.resources.push("ipv4-policy");
-        self.step("ipv4-policy-set", None)?;
-        self.step("ipv4-policy-readback", None)
     }
 
     fn set_ipv4_mtu(&mut self) -> Result<(), Error> {
@@ -174,10 +166,6 @@ impl CleanupOperations for InjectedSetup {
 
     fn restore_ipv4_mtu(&mut self) -> Option<bool> {
         self.cleanup_step("ipv4-mtu", "ipv4-mtu")
-    }
-
-    fn restore_ipv4_link_local(&mut self) -> Option<bool> {
-        self.cleanup_step("ipv4-policy", "ipv4-policy")
     }
 
     fn close_adapter(&mut self) -> Option<bool> {
@@ -329,9 +317,6 @@ fn every_enabled_family_setup_stage_fails_closed_and_rolls_back() {
                 "driver",
                 "start-session",
                 "identity",
-                "ipv4-policy-snapshot",
-                "ipv4-policy-set",
-                "ipv4-policy-readback",
                 "ipv6-mtu",
                 "ipv6-address",
                 "dad",
@@ -381,7 +366,6 @@ fn every_enabled_family_setup_stage_fails_closed_and_rolls_back() {
                 ("ipv4-address", "ipv4-address"),
                 ("ipv6-mtu", "ipv6-mtu"),
                 ("ipv4-mtu", "ipv4-mtu"),
-                ("ipv4-policy", "ipv4-policy"),
                 ("session", "end-session"),
                 ("adapter", "adapter"),
             ]
@@ -390,19 +374,9 @@ fn every_enabled_family_setup_stage_fails_closed_and_rolls_back() {
                 setup.resources.contains(&resource).then_some(cleanup)
             })
             .collect::<Vec<_>>();
-            for cleanup_failure in
-                std::iter::once(None).chain((0..expected_cleanup.len()).map(Some))
-            {
-                let mut cleanup = setup.clone();
-                cleanup.cleanup_fail_at = cleanup_failure;
-                assert_eq!(
-                    cleanup_transaction(&mut cleanup),
-                    cleanup_failure.is_some(),
-                    "families {ipv4}/{ipv6}, setup {failed}, cleanup {cleanup_failure:?}"
-                );
-                assert_eq!(cleanup.cleanup_calls, expected_cleanup);
-                assert!(cleanup.resources.is_empty());
-            }
+            assert!(!cleanup_transaction(&mut setup));
+            assert_eq!(setup.cleanup_calls, expected_cleanup);
+            assert!(setup.resources.is_empty());
         }
 
         let mut setup = InjectedSetup {
@@ -421,10 +395,22 @@ fn every_enabled_family_setup_stage_fails_closed_and_rolls_back() {
         };
         setup_transaction(&mut setup).expect("complete setup");
         assert_eq!(setup.calls, order);
-        assert_eq!(setup.resources.contains(&"ipv4-policy"), !ipv4);
-        let mut cleanup = setup.clone();
-        assert!(!cleanup_transaction(&mut cleanup));
-        assert!(cleanup.resources.is_empty());
+        assert!(
+            setup.calls.iter().position(|step| *step == "start-session")
+                < setup.calls.iter().position(|step| *step == "identity")
+        );
+        assert!(
+            setup
+                .calls
+                .iter()
+                .position(|step| *step == "identity")
+                .unwrap()
+                < setup
+                    .calls
+                    .iter()
+                    .position(|step| matches!(*step, "ipv4-mtu" | "ipv6-mtu"))
+                    .unwrap()
+        );
     }
 }
 

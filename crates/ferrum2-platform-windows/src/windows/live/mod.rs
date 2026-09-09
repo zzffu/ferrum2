@@ -1,7 +1,6 @@
 #![allow(unsafe_code)]
 
 mod config_file;
-mod ipv4_link_local;
 mod loader;
 mod managed;
 mod managed_dns;

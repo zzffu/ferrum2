@@ -46,10 +46,10 @@ IPv4 retains its existing host-address rules, including rejection of `/31` and `
 interface prefixes must be `/126` or wider; `/127` and `/128` do not leave an ordinary synthetic
 peer that Ferrum2 can use for the system TCP path.
 
-When IPv4 is omitted, Ferrum2 disables DHCP address configuration on its own IPv4 interface to
-prevent delayed APIPA assignment from disrupting an IPv6-only session. This exact interface
-policy is journaled, read back, health-checked and restored during owned teardown.
-It does not disable DHCP globally, unbind host protocols or change any physical adapter.
+Single-stack describes Ferrum2's configured addresses, routes and traffic, not disabling an
+operating-system protocol binding. Windows may create an automatic link-local address for an
+unconfigured family; this is not a configured Ferrum2 endpoint or evidence of that family's
+support. Ferrum2 does not change DHCP or APIPA registry policy to suppress those addresses.
 
 
 `auto_dns` retains its existing exact-endpoint semantics. It requires `auto_route = true` and at
@@ -228,11 +228,20 @@ and the complete resolve/create/bind/admit operation is retried at most once.
 
 ## Network changes
 
-A route, interface, address, best-route, DHCP, VPN, or metric notification performs a lightweight
-`ResetNetwork`. Ferrum2 closes generation-bound TCP connections and UDP associations, clears the
+A route, interface, address, best-route, DHCP, VPN, or metric notification triggers revalidation.
+Relevant changes perform a lightweight `ResetNetwork`: Ferrum2 closes generation-bound TCP
+connections and UDP associations, clears the
 TUN stack's provisional UDP, pending response, and fragment state, captures a fresh dual-stack
 interface snapshot, runs the stack/router/outbound/inbound hooks, and resumes only after every hook
 accepts the same generation. Notification bursts are coalesced and resets are serialized.
+
+The Windows server compares fresh interface and complete route observations before resetting.
+Unchanged state, or purely additive nondefault state on a previously absent interface-family,
+refreshes the catalog for new dials without retiring established connections. Existing rows and
+routes must remain exact; source, binding, status, metric, next-hop or default-route changes use
+the ordinary reset path. Read failures are not evidence of unchanged state. Observation refresh
+invalidates resolver caches and fences in-flight admission independently of the connection
+generation, so a socket prepared against an older observation cannot be admitted as current.
 
 An ordinary reset preserves the Wintun adapter and device session, GUID/LUID/index, managed
 addresses, managed routes, managed DNS, strict-route WFP dynamic session and filters, and the

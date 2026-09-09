@@ -215,15 +215,23 @@ async fn reset_server_network(
     {
         coordinator.retry_reset().await.map_err(|_| ())?
     } else {
+        let previous = coordinator.snapshots().snapshot();
         let generation = status.published_generation().checked_add(1).ok_or(())?;
         let snapshot = sockets
             .capture_snapshot(generation)
             .await
-            .map(Arc::new)
+            .map(|snapshot| snapshot.with_generation(previous.generation()))
             .map_err(|_| ())?;
-        if coordinator.status().published_generation() != status.published_generation() {
+        if !coordinator.snapshots().is_observation_current(&previous) {
             return Err(());
         }
+        if snapshot.preserves_work_from(&previous) {
+            if !coordinator.refresh_network_observation(&previous, Arc::new(snapshot)) {
+                return Err(());
+            }
+            return finish_server_network(owner, udp_reset, previous.generation()).await;
+        }
+        let snapshot = Arc::new(snapshot.with_generation(generation));
         coordinator
             .reset_network(snapshot, NetworkResetIntent::Ordinary(reason))
             .await
@@ -236,6 +244,15 @@ async fn reset_server_network(
         return Err(());
     }
     let generation = report.published_generation();
+    finish_server_network(owner, udp_reset, generation).await
+}
+
+#[cfg(all(windows, not(test)))]
+async fn finish_server_network(
+    owner: &tokio::sync::Mutex<ferrum2_runtime::NetworkSocketOwner>,
+    udp_reset: Option<&super::udp::ServerUdpNetworkReset>,
+    generation: u64,
+) -> Result<u64, ()> {
     owner
         .lock()
         .await
@@ -253,6 +270,12 @@ pub(super) struct TestNetworkCatalog;
 
 #[cfg(test)]
 impl ferrum2_net::NetworkInterfaceCatalog for TestNetworkCatalog {
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, ferrum2_net::NetworkInterfaceCatalogError>
+    {
+        Ok(Vec::new())
+    }
     fn read_interfaces(
         &self,
     ) -> Result<

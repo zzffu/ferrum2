@@ -14,6 +14,12 @@ use std::time::Duration;
 
 struct Catalog;
 impl NetworkInterfaceCatalog for Catalog {
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, ferrum2_net::NetworkInterfaceCatalogError>
+    {
+        Ok(Vec::new())
+    }
     fn read_interfaces(
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {

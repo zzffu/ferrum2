@@ -11,6 +11,12 @@ struct Catalog {
 }
 
 impl NetworkInterfaceCatalog for Catalog {
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, ferrum2_net::NetworkInterfaceCatalogError>
+    {
+        Ok(Vec::new())
+    }
     fn read_interfaces(
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
@@ -521,5 +527,149 @@ fn system_route_identity_must_exist_in_the_same_family_snapshot() {
     assert_eq!(
         error.attempted_source(),
         InterfaceSelectionSource::SystemBestRoute
+    );
+}
+
+#[test]
+fn semantic_observation_tracks_existing_family_routes_sources_and_both_defaults() {
+    let base_row = observation(
+        v6("underlay", 1, 1, 1),
+        NetworkFamily::Ipv6,
+        InterfaceOperationalState::Operational,
+        InterfaceLinkState::Connected,
+        NetworkInterfaceKind::Underlay,
+        10,
+        Some(10),
+    );
+    let route = |metric, next_hop| {
+        NetworkRouteObservation::new(1, 1, "2001:db8::99".parse().unwrap(), 128, next_hop, metric)
+    };
+    let hop = "2001:db8::fe".parse().unwrap();
+    let orphan = NetworkRouteObservation::new(
+        2,
+        2,
+        "224.0.0.0".parse().unwrap(),
+        4,
+        "0.0.0.0".parse().unwrap(),
+        256,
+    );
+    let initial = NetworkSnapshot::from_interfaces_and_routes(
+        1,
+        vec![base_row.clone()],
+        vec![route(10, hop), orphan.clone()],
+    )
+    .unwrap();
+    let added = available(
+        binding("unrelated", 2, 2, &["10.20.30.40".parse().unwrap()]),
+        NetworkFamily::Ipv4,
+    );
+    let additive = NetworkSnapshot::from_interfaces_and_routes(
+        1,
+        vec![base_row.clone(), added.clone()],
+        vec![
+            route(10, hop),
+            orphan.clone(),
+            NetworkRouteObservation::new(
+                2,
+                2,
+                "10.20.0.0".parse().unwrap(),
+                16,
+                "0.0.0.0".parse().unwrap(),
+                256,
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(additive.preserves_work_from(&initial));
+    assert!(matches!(
+        additive.resolve_named("unrelated", NetworkFamily::Ipv4),
+        NamedInterfaceResolution::Available(_)
+    ));
+    for changed_route in [route(11, hop), route(10, "2001:db8::fd".parse().unwrap())] {
+        let changed = NetworkSnapshot::from_interfaces_and_routes(
+            2,
+            vec![base_row.clone()],
+            vec![changed_route, orphan.clone()],
+        )
+        .unwrap();
+        assert!(!changed.preserves_work_from(&initial));
+    }
+    let changed_source = observation(
+        v6("underlay", 1, 1, 2),
+        NetworkFamily::Ipv6,
+        InterfaceOperationalState::Operational,
+        InterfaceLinkState::Connected,
+        NetworkInterfaceKind::Underlay,
+        10,
+        Some(10),
+    );
+    let changed = NetworkSnapshot::from_interfaces_and_routes(
+        2,
+        vec![changed_source],
+        vec![route(10, hop), orphan.clone()],
+    )
+    .unwrap();
+    assert!(!changed.preserves_work_from(&initial));
+    let ipv4_default = observation(
+        added.binding().clone(),
+        NetworkFamily::Ipv4,
+        InterfaceOperationalState::Operational,
+        InterfaceLinkState::Connected,
+        NetworkInterfaceKind::Underlay,
+        10,
+        Some(10),
+    );
+    let changed = NetworkSnapshot::from_interfaces_and_routes(
+        2,
+        vec![base_row.clone(), ipv4_default],
+        vec![route(10, hop), orphan.clone()],
+    )
+    .unwrap();
+    assert!(!changed.preserves_work_from(&initial));
+    let orphan_changed = NetworkSnapshot::from_interfaces_and_routes(
+        2,
+        vec![base_row.clone()],
+        vec![
+            route(10, hop),
+            NetworkRouteObservation::new(
+                2,
+                2,
+                orphan.destination(),
+                orphan.prefix_length(),
+                orphan.next_hop(),
+                257,
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(!orphan_changed.preserves_work_from(&initial));
+    let missing_routes = NetworkSnapshot::from_interfaces(2, vec![base_row]).unwrap();
+    assert!(!missing_routes.preserves_work_from(&initial));
+}
+
+#[test]
+fn route_query_failure_cannot_produce_an_unchanged_snapshot() {
+    struct FailedRoutes;
+    impl NetworkInterfaceCatalog for FailedRoutes {
+        fn read_interfaces(
+            &self,
+        ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
+            Ok(Vec::new())
+        }
+        fn read_routes(
+            &self,
+        ) -> Result<Vec<NetworkRouteObservation>, NetworkInterfaceCatalogError> {
+            Err(NetworkInterfaceCatalogError)
+        }
+        fn system_best_route(
+            &self,
+            _: SocketAddr,
+        ) -> Result<SystemBestRoute, NetworkInterfaceCatalogError> {
+            Err(NetworkInterfaceCatalogError)
+        }
+    }
+    assert_eq!(
+        NetworkSnapshot::capture(1, &FailedRoutes),
+        Err(NetworkSnapshotCaptureError::CatalogUnavailable)
     );
 }

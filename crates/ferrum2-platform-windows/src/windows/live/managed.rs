@@ -327,10 +327,6 @@ impl CleanupOperations for PlatformCleanup<'_> {
         self.restore_mtu(0)
     }
 
-    fn restore_ipv4_link_local(&mut self) -> Option<bool> {
-        self.0.restore_ipv4_link_local()
-    }
-
     fn close_adapter(&mut self) -> Option<bool> {
         let adapter = self.0.adapter.take()?;
         // SAFETY: the adapter was taken from its sole owner after session teardown;
@@ -444,10 +440,6 @@ impl SetupOperations for PlatformSetup<'_> {
         } else {
             Ok(())
         }
-    }
-
-    fn disable_ipv4_link_local(&mut self) -> Result<(), Error> {
-        self.owner.disable_ipv4_link_local()
     }
 
     fn set_ipv4_mtu(&mut self) -> Result<(), Error> {

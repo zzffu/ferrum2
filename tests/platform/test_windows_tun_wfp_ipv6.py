@@ -21,7 +21,6 @@ Import-Module Microsoft.PowerShell.Utility
 Add-Type -TypeDefinition @'
 public static class Ferrum2QualificationRouteNotification {
     public static byte[] ApplicationId(string path) { return new byte[] { 1, 2, 3, 4 }; }
-    public static ulong InterfaceLuid(uint index) { return 12345; }
 }
 '@
 function Assert-True([bool]$Value, [string]$Message) { if (-not $Value) { throw $Message } }
@@ -82,23 +81,6 @@ $expanded = Read-Ingress ($text.Replace('fd00:123:45ab:cdef::2', 'FD00:0123:45AB
 $local = @($expanded.filter.conditions | Where-Object field_key -CEQ 'FWPM_CONDITION_IP_LOCAL_ADDRESS')[0]
 Assert-True ($local.type -ceq 'FWP_BYTE_ARRAY16_TYPE' -and $local.value -ceq 'fd00012345abcdef0000000000000002') 'native bytes not canonicalized'
 ''')
-    def test_ipv6_live_witness_rejects_ipv4_on_owned_tun(self) -> None:
-        self.run_script(r'''
-function Invoke-Ferrum2QualificationWfpState { return ConvertFrom-Ferrum2QualificationWfpStateXml -Text $text }
-function Get-Ferrum2QualificationTcpIngressListener { return $listener }
-$runtime | Add-Member -NotePropertyName adapter -NotePropertyValue ([pscustomobject]@{ ifIndex = 7 })
-$script:ipv4 = @([pscustomobject]@{ InterfaceIndex = 42; IPAddress = '192.0.2.1' })
-function Get-NetIPAddress { return $script:ipv4 }
-$witness = Get-Ferrum2QualificationLiveWfpWitness -Context @{} -Runtime $runtime -Network $network `
-    -ExecutablePath ([IO.Path]::GetFullPath('fixture.exe')) -Label offline
-Assert-True ($witness.tcp_ingress.ipv4_address_count -eq 0) 'unrelated host IPv4 was attributed to the TUN'
-$script:ipv4 += [pscustomobject]@{ InterfaceIndex = 7; IPAddress = '169.254.1.2' }
-Assert-Rejected {
-    Get-Ferrum2QualificationLiveWfpWitness -Context @{} -Runtime $runtime -Network $network `
-        -ExecutablePath ([IO.Path]::GetFullPath('fixture.exe')) -Label offline
-}
-''')
-
 
     def test_ipv6_wrong_bytes_family_layer_peer_and_unknown_forms_rejected(self) -> None:
         mutations = [

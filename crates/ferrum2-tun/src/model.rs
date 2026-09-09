@@ -158,7 +158,6 @@ pub enum TunNetworkResetReason {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TunNetworkFullRebuildReason {
     MtuDamage,
-    InterfacePolicyDamage,
     AdapterDamage,
     SessionDamage,
     AddressDamage,

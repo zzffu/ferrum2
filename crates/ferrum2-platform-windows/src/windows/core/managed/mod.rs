@@ -2,8 +2,6 @@ use crate::{CreateError, Error, ManagedNetworkConfig};
 
 mod health;
 mod state;
-#[cfg(not(test))]
-pub(in crate::windows) use health::ipv4_link_local_health;
 pub(in crate::windows) use health::{ReadbackMatch, addresses_match, mtu_health};
 
 #[cfg(test)]
@@ -221,7 +219,6 @@ pub(in crate::windows) trait CleanupOperations {
     fn delete_last_address(&mut self) -> Option<bool>;
     fn restore_ipv6_mtu(&mut self) -> Option<bool>;
     fn restore_ipv4_mtu(&mut self) -> Option<bool>;
-    fn restore_ipv4_link_local(&mut self) -> Option<bool>;
     fn close_adapter(&mut self) -> Option<bool>;
 }
 
@@ -242,7 +239,6 @@ pub(in crate::windows) fn cleanup_transaction(cleanup: &mut impl CleanupOperatio
     }
     failed |= cleanup.restore_ipv6_mtu().unwrap_or(false);
     failed |= cleanup.restore_ipv4_mtu().unwrap_or(false);
-    failed |= cleanup.restore_ipv4_link_local().unwrap_or(false);
     failed |= cleanup.end_session().unwrap_or(false);
     failed |= cleanup.close_adapter().unwrap_or(false);
     failed
@@ -258,7 +254,6 @@ pub(in crate::windows) trait SetupOperations {
     fn identify_adapter(&mut self) -> Result<(), Error>;
     fn ipv4_enabled(&self) -> bool;
     fn ipv6_enabled(&self) -> bool;
-    fn disable_ipv4_link_local(&mut self) -> Result<(), Error>;
     fn set_ipv4_mtu(&mut self) -> Result<(), Error>;
     fn set_ipv6_mtu(&mut self) -> Result<(), Error>;
     fn add_ipv4_address(&mut self) -> Result<(), Error>;
@@ -273,9 +268,6 @@ pub(in crate::windows) fn setup_transaction(setup: &mut impl SetupOperations) ->
     setup.check_driver()?;
     setup.start_session()?;
     setup.identify_adapter()?;
-    if !setup.ipv4_enabled() {
-        setup.disable_ipv4_link_local()?;
-    }
     if setup.ipv4_enabled() {
         setup.set_ipv4_mtu()?;
     }
@@ -311,9 +303,6 @@ mod tests {
             None
         }
         fn restore_ipv4_mtu(&mut self) -> Option<bool> {
-            None
-        }
-        fn restore_ipv4_link_local(&mut self) -> Option<bool> {
             None
         }
         fn close_adapter(&mut self) -> Option<bool> {

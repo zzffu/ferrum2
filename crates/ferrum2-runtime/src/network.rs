@@ -33,6 +33,38 @@ impl NetworkSnapshotPublisher {
         self.generation() == generation
     }
 
+    /// Tests exact observation identity, including same-generation refreshes.
+    pub fn is_observation_current(&self, snapshot: &Arc<NetworkSnapshot>) -> bool {
+        Arc::ptr_eq(&read_unpoisoned(&self.current), snapshot)
+    }
+
+    /// Runs final admission while publication is excluded.
+    pub(crate) fn with_current_observation<T>(
+        &self,
+        expected: &Arc<NetworkSnapshot>,
+        admit: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let current = read_unpoisoned(&self.current);
+        Arc::ptr_eq(&current, expected).then(admit)
+    }
+
+    /// Coordinator-only refresh; its state lock excludes owner admission and resets.
+    pub(crate) fn refresh_if_current(
+        &self,
+        expected: &Arc<NetworkSnapshot>,
+        next: Arc<NetworkSnapshot>,
+    ) -> bool {
+        let mut current = write_unpoisoned(&self.current);
+        if !Arc::ptr_eq(&current, expected)
+            || next.generation() != expected.generation()
+            || !next.preserves_work_from(expected)
+        {
+            return false;
+        }
+        *current = next;
+        true
+    }
+
     /// Publishes a newer snapshot only if the expected generation is still current.
     pub fn publish_if_current(
         &self,

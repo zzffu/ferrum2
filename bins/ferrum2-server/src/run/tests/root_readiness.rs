@@ -47,6 +47,14 @@ fn validated_server_network_policies_reach_the_shared_runtime_resolver() {
     struct NoRouteCatalog;
 
     impl ferrum2_net::NetworkInterfaceCatalog for NoRouteCatalog {
+        fn read_routes(
+            &self,
+        ) -> Result<
+            Vec<ferrum2_net::NetworkRouteObservation>,
+            ferrum2_net::NetworkInterfaceCatalogError,
+        > {
+            Ok(Vec::new())
+        }
         fn read_interfaces(
             &self,
         ) -> Result<

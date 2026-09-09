@@ -17,6 +17,12 @@ use ferrum2_runtime::{
 struct Catalog;
 
 impl NetworkInterfaceCatalog for Catalog {
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, ferrum2_net::NetworkInterfaceCatalogError>
+    {
+        Ok(Vec::new())
+    }
     fn read_interfaces(
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
@@ -345,4 +351,105 @@ fn source_failure_is_observable_and_never_prepares_or_registers() {
     assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
     assert_eq!(coordinator.status().registered_runtime_owners(), 0);
     assert_eq!(owners.snapshot().network_runtime_owners, 0);
+}
+
+fn complete_snapshot() -> Arc<NetworkSnapshot> {
+    Arc::new(
+        NetworkSnapshot::from_interfaces_and_routes(
+            1,
+            snapshot(1).interfaces().to_vec(),
+            Vec::new(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn refresh_during_prepare_discards_old_observation_and_cannot_reuse_its_cache() {
+    let owners = OwnerRegistry::new();
+    let initial = complete_snapshot();
+    let coordinator = NetworkResetCoordinator::new(
+        NetworkSnapshotPublisher::new(initial.clone()),
+        NetworkResetLimits::default(),
+        owners.clone(),
+    );
+    let resolver = NetworkInterfaceResolver::new(Catalog);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut attempts = 0;
+    let admitted = coordinator
+        .prepare_and_admit_runtime_resource(
+            &resolver,
+            &DialOptions::default(),
+            &RouteNetworkOptions::new(
+                ferrum2_net::AutomaticInterfaceSelection::Enabled,
+                None::<&str>,
+            ),
+            destination(),
+            NetworkRuntimeOwnerKind::TcpConnection,
+            |resolved| {
+                attempts += 1;
+                assert!(
+                    !resolved.cache_hit(),
+                    "a refreshed observation must not reuse an old decision"
+                );
+                if attempts == 1 {
+                    assert!(coordinator.refresh_network_observation(&initial, complete_snapshot()));
+                }
+                Ok::<_, ()>(TrackedResource {
+                    generation: resolved.snapshot_generation(),
+                    drops: drops.clone(),
+                })
+            },
+        )
+        .unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(admitted.owner().generation(), 1);
+    drop(admitted);
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn frozen_generation_refresh_race_fails_closed_and_pending_reset_cannot_refresh() {
+    let owners = OwnerRegistry::new();
+    let initial = complete_snapshot();
+    let coordinator = NetworkResetCoordinator::new(
+        NetworkSnapshotPublisher::new(initial.clone()),
+        NetworkResetLimits::default(),
+        owners.clone(),
+    );
+    let resolver = NetworkInterfaceResolver::new(Catalog);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let result = coordinator.prepare_and_admit_runtime_resource_for_generation(
+        1,
+        &resolver,
+        &DialOptions::default(),
+        &RouteNetworkOptions::new(
+            ferrum2_net::AutomaticInterfaceSelection::Enabled,
+            None::<&str>,
+        ),
+        destination(),
+        NetworkRuntimeOwnerKind::UdpAssociation,
+        |resolved| {
+            assert!(coordinator.refresh_network_observation(&initial, complete_snapshot()));
+            Ok::<_, ()>(TrackedResource {
+                generation: resolved.snapshot_generation(),
+                drops: drops.clone(),
+            })
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(NetworkRuntimeResourceAdmissionError::NetworkGenerationChanged { .. })
+    ));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    let current = coordinator.snapshots().snapshot();
+    assert!(!coordinator.refresh_network_observation(&initial, complete_snapshot()));
+    coordinator
+        .queue_reset(
+            snapshot(2),
+            NetworkResetIntent::Ordinary(NetworkResetReason::RouteChanged),
+        )
+        .unwrap();
+    assert!(!coordinator.refresh_network_observation(&current, complete_snapshot()));
 }

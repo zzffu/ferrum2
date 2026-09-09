@@ -86,6 +86,12 @@ struct BlockingCatalog {
     calls: Arc<AtomicUsize>,
 }
 impl NetworkInterfaceCatalog for BlockingCatalog {
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, ferrum2_net::NetworkInterfaceCatalogError>
+    {
+        Ok(Vec::new())
+    }
     fn read_interfaces(
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
@@ -164,6 +170,12 @@ async fn cancelled_capture_and_shutdown_retain_the_one_actual_native_slot() {
 
 struct FailedCatalog;
 impl NetworkInterfaceCatalog for FailedCatalog {
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, ferrum2_net::NetworkInterfaceCatalogError>
+    {
+        Ok(Vec::new())
+    }
     fn read_interfaces(
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {
@@ -227,6 +239,12 @@ async fn shutdown_cancels_inflight_connect_reservations_before_joining_zero() {
 
 struct PanickingCatalog;
 impl NetworkInterfaceCatalog for PanickingCatalog {
+    fn read_routes(
+        &self,
+    ) -> Result<Vec<ferrum2_net::NetworkRouteObservation>, ferrum2_net::NetworkInterfaceCatalogError>
+    {
+        Ok(Vec::new())
+    }
     fn read_interfaces(
         &self,
     ) -> Result<Vec<NetworkInterfaceObservation>, NetworkInterfaceCatalogError> {

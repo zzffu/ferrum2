@@ -8,8 +8,9 @@ pub use capability::{ResolvedSocketBinder, TcpResolver, UdpResolver};
 pub use model::{
     InterfaceBinding, InterfaceBindingError, InterfaceLinkState, InterfaceOperationalState,
     NetworkFamily, NetworkInterfaceCatalog, NetworkInterfaceCatalogError, NetworkInterfaceKind,
-    NetworkInterfaceObservation, NetworkInterfaceObservationError, NetworkSnapshot,
-    NetworkSnapshotCaptureError, NetworkSnapshotError, SystemBestRoute, SystemBestRouteError,
+    NetworkInterfaceObservation, NetworkInterfaceObservationError, NetworkRouteObservation,
+    NetworkSnapshot, NetworkSnapshotCaptureError, NetworkSnapshotError, SystemBestRoute,
+    SystemBestRouteError,
 };
 pub use resolver::{
     AutomaticInterfaceSelection, DialOptions, InterfaceResolutionError,
