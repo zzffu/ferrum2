@@ -18,6 +18,9 @@ use tokio::net::TcpStream;
 
 use crate::OwnerWake;
 
+#[cfg(all(test, feature = "benchmark"))]
+mod memory_tests;
+
 mod socket;
 pub(crate) use socket::FlowSocket;
 
@@ -47,18 +50,18 @@ impl AsyncRead for TcpFlow {
         if destination.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        let mut socket = shared.stream.lock().expect("TUN TCP flow socket");
-        let Some(stream) = socket.as_mut() else {
+        let mut socket = shared.state.lock().expect("TUN TCP flow socket");
+        let Some(stream) = socket.stream.as_mut() else {
             return Poll::Ready(Err(connection_reset()));
         };
 
         match Pin::new(stream).poll_read(context, destination) {
             Poll::Ready(result) => {
-                shared.clear_read_waker();
+                socket.read.take();
                 Poll::Ready(result.map_err(|error| shared.map_io_error(error)))
             }
             Poll::Pending => {
-                shared.register_read_waker(context.waker());
+                set_waker(&mut socket.read, context.waker());
                 if shared.valid.load(Ordering::Acquire) {
                     Poll::Pending
                 } else {
@@ -89,17 +92,17 @@ impl AsyncWrite for TcpFlow {
             return Poll::Ready(Ok(0));
         }
 
-        let mut socket = shared.stream.lock().expect("TUN TCP flow socket");
-        let Some(stream) = socket.as_mut() else {
+        let mut socket = shared.state.lock().expect("TUN TCP flow socket");
+        let Some(stream) = socket.stream.as_mut() else {
             return Poll::Ready(Err(connection_reset()));
         };
         match Pin::new(stream).poll_write(context, source) {
             Poll::Ready(result) => {
-                shared.clear_write_waker();
+                socket.write.take();
                 Poll::Ready(result.map_err(|error| shared.map_io_error(error)))
             }
             Poll::Pending => {
-                shared.register_write_waker(context.waker());
+                set_waker(&mut socket.write, context.waker());
                 if shared.valid.load(Ordering::Acquire) {
                     Poll::Pending
                 } else {
@@ -125,8 +128,8 @@ impl AsyncWrite for TcpFlow {
         if shared.write_shutdown.swap(true, Ordering::AcqRel) {
             return Poll::Ready(Ok(()));
         }
-        let mut socket = shared.stream.lock().expect("TUN TCP flow socket");
-        let Some(stream) = socket.as_mut() else {
+        let mut socket = shared.state.lock().expect("TUN TCP flow socket");
+        let Some(stream) = socket.stream.as_mut() else {
             return Poll::Ready(Err(connection_reset()));
         };
         let result = stream.shutdown(_context);
@@ -141,7 +144,6 @@ impl AsyncWrite for TcpFlow {
 impl Drop for TcpFlow {
     fn drop(&mut self) {
         self.shared.flow_present.store(false, Ordering::Release);
-        self.shared.clear_wakers();
         self.shared.close_socket();
         self.shared.owner_wake.signal();
     }
@@ -176,7 +178,9 @@ impl TcpSocketLease {
 }
 
 struct FlowShared {
-    stream: Mutex<Option<FlowSocket>>,
+    // Socket polling and cancellation-waker registration share one critical
+    // section. Fencing takes both before waking outside the lock.
+    state: Mutex<FlowState>,
     #[cfg(any(
         all(windows, target_arch = "x86_64", feature = "live-backend"),
         test,
@@ -186,45 +190,18 @@ struct FlowShared {
     valid: AtomicBool,
     write_shutdown: AtomicBool,
     flow_present: AtomicBool,
-    wakers: Mutex<FlowWakers>,
     owner_wake: OwnerWake,
     registry_owner: Mutex<Option<TunTcpFlowOwner>>,
 }
 
 impl FlowShared {
-    fn register_read_waker(&self, waker: &Waker) {
-        set_waker(
-            &mut self.wakers.lock().expect("TUN TCP flow wakers").read,
-            waker,
-        );
-    }
-
-    fn register_write_waker(&self, waker: &Waker) {
-        set_waker(
-            &mut self.wakers.lock().expect("TUN TCP flow wakers").write,
-            waker,
-        );
-    }
-    fn clear_read_waker(&self) {
-        self.wakers.lock().expect("TUN TCP flow wakers").read.take();
-    }
-
-    fn clear_write_waker(&self) {
-        self.wakers
-            .lock()
-            .expect("TUN TCP flow wakers")
-            .write
-            .take();
-    }
-
-    fn clear_wakers(&self) {
-        let mut wakers = self.wakers.lock().expect("TUN TCP flow wakers");
-        wakers.read.take();
-        wakers.write.take();
-    }
-
     fn close_socket(&self) {
-        if let Some(stream) = self.stream.lock().expect("TUN TCP flow socket").take() {
+        let (stream, wakers) = {
+            let mut state = self.state.lock().expect("TUN TCP flow socket");
+            (state.stream.take(), [state.read.take(), state.write.take()])
+        };
+        drop(wakers);
+        if let Some(stream) = stream {
             stream.close();
         }
         self.registry_owner
@@ -239,20 +216,15 @@ impl FlowShared {
     ))]
     fn invalidate(&self) -> io::Result<()> {
         self.valid.store(false, Ordering::Release);
-        let result = self
-            .stream
-            .lock()
-            .expect("TUN TCP flow socket")
-            .take()
-            .map_or(Ok(()), FlowSocket::abort);
+        let (stream, wakers) = {
+            let mut state = self.state.lock().expect("TUN TCP flow socket");
+            (state.stream.take(), [state.read.take(), state.write.take()])
+        };
+        let result = stream.map_or(Ok(()), FlowSocket::abort);
         self.registry_owner
             .lock()
             .expect("TUN TCP flow registry owner")
             .take();
-        let wakers = {
-            let mut wakers = self.wakers.lock().expect("TUN TCP flow wakers");
-            [wakers.read.take(), wakers.write.take()]
-        };
         for waker in wakers.into_iter().flatten() {
             waker.wake();
         }
@@ -273,9 +245,10 @@ impl Drop for FlowShared {
     fn drop(&mut self) {
         self.valid.store(false, Ordering::Release);
         if let Some(stream) = self
-            .stream
+            .state
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stream
             .take()
         {
             stream.close();
@@ -288,7 +261,8 @@ impl Drop for FlowShared {
 }
 
 #[derive(Default)]
-struct FlowWakers {
+struct FlowState {
+    stream: Option<FlowSocket>,
     read: Option<Waker>,
     write: Option<Waker>,
 }
@@ -306,12 +280,14 @@ pub(crate) fn tcp_flow_from_stream(
     owner_wake: OwnerWake,
 ) -> (TcpFlow, TcpSocketLease) {
     let shared = Arc::new(FlowShared {
-        stream: Mutex::new(Some(stream.into())),
+        state: Mutex::new(FlowState {
+            stream: Some(stream.into()),
+            ..FlowState::default()
+        }),
         generation,
         valid: AtomicBool::new(true),
         write_shutdown: AtomicBool::new(false),
         flow_present: AtomicBool::new(true),
-        wakers: Mutex::new(FlowWakers::default()),
         owner_wake,
         registry_owner: Mutex::new(Some(registry.track_tun_tcp_flow())),
     });
@@ -441,8 +417,9 @@ mod tests {
 
     async fn exhaust_write_capacity(flow: &mut super::TcpFlow) -> (usize, Arc<ReadinessWake>) {
         {
-            let socket = flow.shared.stream.lock().expect("socket");
+            let socket = flow.shared.state.lock().expect("socket");
             socket
+                .stream
                 .as_ref()
                 .expect("live socket")
                 .set_send_buffer_size(4096)
