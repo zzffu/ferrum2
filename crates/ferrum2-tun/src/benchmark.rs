@@ -7,8 +7,10 @@
 //! buffer capacities, reassembly headers/pieces, charged UDP payloads and fixtures
 //! (including preallocated capture). It excludes metadata, allocator overhead,
 //! transient buffers between samples, mock socket storage and process RSS.
+mod flow;
 mod owner;
 mod recipe;
+mod udp;
 
 use crate::packet::TransportMetadata;
 use crate::{UdpResponseDropReason, UdpResponseSendOutcome};
@@ -21,6 +23,17 @@ use std::time::Instant;
 /// Runs one closed recipe and returns exactly one trial object. Invalid arguments
 /// fail before any work. A failed correctness assertion never produces a trial.
 pub fn trial(scenario: &str, mode: &str) -> Result<String, &'static str> {
+    match scenario {
+        "tcp-socket-ready" | "tcp-flow-ready" | "tcp-socket-pending" | "tcp-flow-pending" => {
+            return flow::trial(scenario, mode);
+        }
+        "udp-deadline-same"
+        | "udp-deadline-advance"
+        | "udp-ingress-full"
+        | "udp-response-full"
+        | "udp-consumer-lag" => return udp::trial(scenario, mode),
+        _ => {}
+    }
     let confirm = match mode {
         "Quick" => false,
         "Confirm" => true,

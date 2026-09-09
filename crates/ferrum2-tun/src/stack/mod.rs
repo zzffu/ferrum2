@@ -428,7 +428,11 @@ impl Stack {
     }
 
     pub(crate) fn process_one_tcp_packet(&mut self) -> bool {
-        self.device.promote_one_ingress()
+        // A response deferred by the preceding UDP stage owns the next free
+        // slot. Its successful injection clears that claim, so TCP gets the
+        // following turn even with a continuously replenished response queue.
+        // Both protocols retain their FIFO and the single-slot backpressure.
+        !self.udp.has_pending_response() && self.device.promote_one_ingress()
     }
 
     pub(crate) fn flush_output(

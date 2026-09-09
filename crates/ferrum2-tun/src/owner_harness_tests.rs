@@ -1,3 +1,5 @@
+mod fairness;
+
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -53,6 +55,7 @@ struct FakeAdapter {
     wait_durations: Vec<Duration>,
     receive_calls: usize,
     semantic_checks: usize,
+    output_paused: bool,
 }
 
 impl FakeAdapter {
@@ -207,6 +210,7 @@ impl OwnerSessionHarness {
                 WorkStage::Control => {
                     StepOutcome::from_work(stack.process_one_udp_control(now_millis, admitting))
                 }
+                WorkStage::FlushOutput if adapter.output_paused => StepOutcome::Idle,
                 WorkStage::FlushOutput => {
                     match stack.flush_output(|packet| match adapter.send(packet) {
                         FakeSendOutcome::Sent => {
