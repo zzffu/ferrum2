@@ -255,8 +255,7 @@ impl UdpTable {
         }
 
         if let Some(slot) = self.index.get(&endpoints.source).copied()
-            && let Some(admission) =
-                self.enqueue_existing(slot, endpoints, payload, ingress_payload_bound, now_millis)
+            && let Some(admission) = self.enqueue_existing(slot, endpoints, payload, now_millis)
         {
             return admission;
         }
@@ -350,7 +349,6 @@ impl UdpTable {
         slot: usize,
         endpoints: UdpDatagramEndpoints,
         payload: &[u8],
-        ingress_payload_bound: usize,
         now_millis: i64,
     ) -> Option<Admission> {
         let id = self.generations.current(slot);
@@ -376,6 +374,16 @@ impl UdpTable {
                 .emit(TunEvent::PacketRejected(TunRejectReason::StaleGeneration));
             return Some(Admission::Dropped);
         };
+        // Endpoint and payload bounds were checked by admit_with_ingress_bound.
+        let sender = match entry {
+            Slot::Candidate { sender, .. } | Slot::Association { sender, .. } => sender,
+        };
+        let Ok(permit) = sender.try_reserve() else {
+            self.events.emit(TunEvent::UdpDatagramQueueFull);
+            self.events
+                .emit(TunEvent::PacketRejected(TunRejectReason::UdpQueueFull));
+            return Some(Admission::Dropped);
+        };
         let Ok(payload_owner) = super::BudgetedPayload::new(payload, &self.budget) else {
             self.events.emit(TunEvent::UdpDatagramQueueFull);
             self.events
@@ -387,46 +395,19 @@ impl UdpTable {
             target: endpoints.target,
             payload: Arc::new(payload_owner),
         };
+        permit.send(datagram);
         let mut refresh_deadline = None;
         let admission = match entry {
-            Slot::Candidate { sender, .. } => {
-                if payload.len() > ingress_payload_bound {
-                    self.events.emit(TunEvent::PacketRejected(
-                        TunRejectReason::InvalidTransportLength,
-                    ));
-                    Admission::Dropped
-                } else if sender.try_send(datagram).is_err() {
-                    self.events.emit(TunEvent::UdpDatagramQueueFull);
-                    self.events
-                        .emit(TunEvent::PacketRejected(TunRejectReason::UdpQueueFull));
-                    Admission::Dropped
-                } else {
-                    Admission::CandidateQueued
-                }
-            }
+            Slot::Candidate { .. } => Admission::CandidateQueued,
             Slot::Association {
-                sender,
-                deadline_millis,
-                ..
+                deadline_millis, ..
             } => {
-                if payload.len() > ingress_payload_bound {
-                    self.events.emit(TunEvent::PacketRejected(
-                        TunRejectReason::InvalidTransportLength,
-                    ));
-                    Admission::Dropped
-                } else if sender.try_send(datagram).is_err() {
-                    self.events.emit(TunEvent::UdpDatagramQueueFull);
-                    self.events
-                        .emit(TunEvent::PacketRejected(TunRejectReason::UdpQueueFull));
-                    Admission::Dropped
-                } else {
-                    let next_deadline = now_millis.saturating_add(self.idle_millis);
-                    if *deadline_millis != next_deadline {
-                        *deadline_millis = next_deadline;
-                        refresh_deadline = Some(next_deadline);
-                    }
-                    Admission::Mapped
+                let next_deadline = now_millis.saturating_add(self.idle_millis);
+                if *deadline_millis != next_deadline {
+                    *deadline_millis = next_deadline;
+                    refresh_deadline = Some(next_deadline);
                 }
+                Admission::Mapped
             }
         };
         if let Some(deadline_millis) = refresh_deadline {

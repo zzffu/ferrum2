@@ -159,6 +159,13 @@ impl UdpDatagram {
     }
 }
 
+// Counts actual payload copies only in hosted regression tests. Thread-local
+// snapshots isolate concurrent tests; production and benchmark builds pay zero.
+#[cfg(test)]
+thread_local! {
+    static PAYLOAD_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 struct BudgetedPayload {
     bytes: Box<[u8]>,
     _reservation: ferrum2_runtime::UdpBufferReservation,
@@ -167,6 +174,8 @@ struct BudgetedPayload {
 impl BudgetedPayload {
     fn new(payload: &[u8], budget: &ferrum2_runtime::UdpBufferBudget) -> Result<Self, ()> {
         let reservation = budget.reserve(payload.len()).map_err(|_| ())?;
+        #[cfg(test)]
+        PAYLOAD_COPIES.set(PAYLOAD_COPIES.get() + 1);
         Ok(Self {
             bytes: payload.into(),
             _reservation: reservation,
@@ -638,6 +647,31 @@ impl UdpResponseSink {
             }
             Ok(true) => {}
         }
+        let permit = match self.responses.try_reserve() {
+            Ok(permit) => permit,
+            Err(error) => {
+                // Previously the byte budget preceded try_send. Preserve its
+                // QueueFull precedence over a concurrently closed receiver,
+                // without allocating or copying on either failure path.
+                if matches!(error, mpsc::error::TrySendError::Closed(()))
+                    && self.budget.reserve(payload.len()).is_ok()
+                {
+                    emit_response_drop(
+                        &self.lease.events,
+                        UdpResponseDropReason::AssociationClosed,
+                        TunRejectReason::UdpResponseClosed,
+                    );
+                    return UdpResponseSendOutcome::Closed;
+                }
+                self.lease.events.emit(TunEvent::UdpResponseQueueFull);
+                emit_response_drop(
+                    &self.lease.events,
+                    UdpResponseDropReason::QueueFull,
+                    TunRejectReason::UdpQueueFull,
+                );
+                return UdpResponseSendOutcome::QueueFull;
+            }
+        };
         let Ok(payload) = BudgetedPayload::new(payload, &self.budget) else {
             self.lease.events.emit(TunEvent::UdpResponseQueueFull);
             emit_response_drop(
@@ -653,29 +687,9 @@ impl UdpResponseSink {
             response_source: source,
             payload,
         };
-        match self.responses.try_send(response) {
-            Ok(()) => {
-                self.response_wake.signal();
-                UdpResponseSendOutcome::Queued
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.lease.events.emit(TunEvent::UdpResponseQueueFull);
-                emit_response_drop(
-                    &self.lease.events,
-                    UdpResponseDropReason::QueueFull,
-                    TunRejectReason::UdpQueueFull,
-                );
-                UdpResponseSendOutcome::QueueFull
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                emit_response_drop(
-                    &self.lease.events,
-                    UdpResponseDropReason::AssociationClosed,
-                    TunRejectReason::UdpResponseClosed,
-                );
-                UdpResponseSendOutcome::Closed
-            }
-        }
+        permit.send(response);
+        self.response_wake.signal();
+        UdpResponseSendOutcome::Queued
     }
 }
 
