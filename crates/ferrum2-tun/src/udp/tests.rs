@@ -1,3 +1,5 @@
+mod deadlines;
+
 use super::*;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
@@ -32,11 +34,6 @@ fn table(
         }),
     );
     (table, candidates, wakes)
-}
-
-#[test]
-fn udp_filtering_defaults_to_endpoint_independent() {
-    assert_eq!(UdpFiltering::default(), UdpFiltering::EndpointIndependent);
 }
 
 async fn commit(table: &mut UdpTable, candidate: UdpCandidate, now_millis: i64) -> UdpAssociation {

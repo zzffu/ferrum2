@@ -420,8 +420,11 @@ impl UdpTable {
                         .emit(TunEvent::PacketRejected(TunRejectReason::UdpQueueFull));
                     Admission::Dropped
                 } else {
-                    *deadline_millis = now_millis.saturating_add(self.idle_millis);
-                    refresh_deadline = Some(*deadline_millis);
+                    let next_deadline = now_millis.saturating_add(self.idle_millis);
+                    if *deadline_millis != next_deadline {
+                        *deadline_millis = next_deadline;
+                        refresh_deadline = Some(next_deadline);
+                    }
                     Admission::Mapped
                 }
             }
@@ -708,10 +711,11 @@ impl UdpTable {
                     deadline_millis: current,
                     ..
                 }) = self.slots.get_mut(id.slot).and_then(Option::as_mut)
+                    && *current != deadline_millis
                 {
                     *current = deadline_millis;
+                    self.schedule_deadline(id, deadline_millis);
                 }
-                self.schedule_deadline(id, deadline_millis);
                 ResponseProcessOutcome::Injected
             }
             InjectOutcome::Backpressured => {
@@ -810,6 +814,9 @@ impl UdpTable {
         outcome
     }
 
+    // Creation and commit always schedule. A live association already owns a
+    // timer for its current deadline: refresh callers need only schedule a
+    // changed value. Pruning removes stale values; expiry removes the slot too.
     fn schedule_deadline(&mut self, id: GenerationId, deadline_millis: i64) {
         self.deadlines.push(Reverse(DeadlineEntry {
             deadline_millis,
