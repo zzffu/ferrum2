@@ -7,6 +7,7 @@
 //! buffer capacities, reassembly headers/pieces, charged UDP payloads and fixtures
 //! (including preallocated capture). It excludes metadata, allocator overhead,
 //! transient buffers between samples, mock socket storage and process RSS.
+mod established;
 mod fairness;
 mod flow;
 mod maintenance;
@@ -26,6 +27,7 @@ use std::time::Instant;
 /// fail before any work. A failed correctness assertion never produces a trial.
 pub fn trial(scenario: &str, mode: &str) -> Result<String, &'static str> {
     match scenario {
+        "tcp-established-v4" | "tcp-established-v6" => return established::trial(scenario, mode),
         "mixed-sustained" => return fairness::trial(scenario, mode),
         "tcp-maintenance-idle" | "tcp-maintenance-changed" => {
             return maintenance::trial(scenario, mode);

@@ -129,6 +129,11 @@ impl UdpTable {
     }
 
     #[cfg(test)]
+    pub(super) fn response_receiver_for_test(&mut self) -> &mut mpsc::Receiver<OwnerResponse> {
+        &mut self.responses
+    }
+
+    #[cfg(test)]
     pub(crate) fn index_len_for_test(&self) -> usize {
         self.index.len()
     }
@@ -910,6 +915,13 @@ impl UdpTable {
 
 impl Drop for UdpTable {
     fn drop(&mut self) {
+        {
+            let mut owner_live = match self.response_wake.owner_live.write() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *owner_live = false;
+        }
         self.session_epoch
             .store(self.session_generation.wrapping_add(1), Ordering::Release);
         self.responses.close();

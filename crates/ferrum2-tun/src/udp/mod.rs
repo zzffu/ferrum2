@@ -166,6 +166,14 @@ thread_local! {
     static PAYLOAD_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+// One-shot rendezvous after a real channel reservation. Tests install this only
+// on their sender thread; taking it before invocation also permits unwind cleanup.
+#[cfg(test)]
+thread_local! {
+    static RESPONSE_RESERVED_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 struct BudgetedPayload {
     bytes: Box<[u8]>,
     _reservation: ferrum2_runtime::UdpBufferReservation,
@@ -543,6 +551,10 @@ struct OwnerResponse {
 }
 
 struct ResponseWake {
+    // Only message commit holds a read guard; owner destruction marks this
+    // false under the write guard before draining. A reserved Tokio permit
+    // otherwise permits enqueue after Receiver::drop, retaining orphan payloads.
+    owner_live: std::sync::RwLock<bool>,
     pending: AtomicBool,
     wake: OwnerWake,
 }
@@ -550,6 +562,7 @@ struct ResponseWake {
 impl ResponseWake {
     fn new(wake: OwnerWake) -> Self {
         Self {
+            owner_live: std::sync::RwLock::new(true),
             pending: AtomicBool::new(false),
             wake,
         }
@@ -672,6 +685,13 @@ impl UdpResponseSink {
                 return UdpResponseSendOutcome::QueueFull;
             }
         };
+        #[cfg(test)]
+        {
+            let hook = RESPONSE_RESERVED_HOOK.with(|hook| hook.borrow_mut().take());
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let Ok(payload) = BudgetedPayload::new(payload, &self.budget) else {
             self.lease.events.emit(TunEvent::UdpResponseQueueFull);
             emit_response_drop(
@@ -687,7 +707,21 @@ impl UdpResponseSink {
             response_source: source,
             payload,
         };
-        permit.send(response);
+        let committed = match self.response_wake.owner_live.read() {
+            Ok(owner_live) if *owner_live => {
+                permit.send(response);
+                true
+            }
+            Ok(_) | Err(_) => false,
+        };
+        if !committed {
+            emit_response_drop(
+                &self.lease.events,
+                UdpResponseDropReason::AssociationClosed,
+                TunRejectReason::UdpResponseClosed,
+            );
+            return UdpResponseSendOutcome::Closed;
+        }
         self.response_wake.signal();
         UdpResponseSendOutcome::Queued
     }

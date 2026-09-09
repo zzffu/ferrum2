@@ -1,5 +1,6 @@
 mod congestion;
 mod deadlines;
+mod permit_races;
 
 use super::*;
 use std::sync::atomic::AtomicUsize;
