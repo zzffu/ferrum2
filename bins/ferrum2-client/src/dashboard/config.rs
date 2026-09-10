@@ -238,7 +238,13 @@ pub fn catalog(source: &str) -> Result<Value, ConfigStoreError> {
         route["rules"] = rows(
             dns.get("route").and_then(|v| v.get("rules")),
             &[
-                "action", "server", "outbound", "strategy", "qtype", "rule_set",
+                "action",
+                "server",
+                "outbound",
+                "strategy",
+                "qtype",
+                "rule_set",
+                "match_response",
             ],
         );
         value["route"] = route;

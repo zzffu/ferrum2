@@ -92,12 +92,14 @@ pub(super) fn run_error_for_dns_policy_compile(error: DnsPolicyCompileError) -> 
         DnsPolicyCompileError::Allocation | DnsPolicyCompileError::IndexOverflow => {
             RunError::RuleAllocation
         }
-        DnsPolicyCompileError::EmptyRule
-        | DnsPolicyCompileError::InvalidQueryMatchSet
+        DnsPolicyCompileError::InvalidQueryMatchSet
         | DnsPolicyCompileError::DuplicateConstraint
         | DnsPolicyCompileError::InvalidPortRange
         | DnsPolicyCompileError::UnknownRuleSet
-        | DnsPolicyCompileError::ResponseDependentReject
+        | DnsPolicyCompileError::QueryModeCidrRuleSet
+        | DnsPolicyCompileError::ResponseModeRequiresCidrRuleSet
+        | DnsPolicyCompileError::ResponseMatchWithoutEvaluate
+        | DnsPolicyCompileError::RespondWithoutEvaluate
         | DnsPolicyCompileError::Internal => RunError::RuleCompile,
     }
 }

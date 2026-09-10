@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use ferrum2_rule::{
     CompiledRuleProgram, DnsPolicyActionDescriptor, DnsPolicyAddressStrategy, DnsPolicyBlueprint,
-    RuleCompileError, RuleEngineRegistry, RuleEngineSnapshot, RuleProgramMode,
+    DnsPolicyMatchMode, RuleCompileError, RuleEngineRegistry, RuleEngineSnapshot, RuleProgramMode,
 };
 
 use super::evaluation::{
@@ -36,7 +36,7 @@ impl DnsPolicyProgram {
             .try_reserve_exact(descriptors.len())
             .map_err(|_| DnsPolicyCompileError::Allocation)?;
         for descriptor in descriptors {
-            let (matcher, action) = descriptor.into_parts();
+            let (matcher, mode, action) = descriptor.into_parts();
             let matcher = DnsPolicyMatcher::try_from_descriptor(matcher)?;
             let action = match action {
                 DnsPolicyActionDescriptor::Route(route) => {
@@ -45,9 +45,16 @@ impl DnsPolicyProgram {
                         dns_strategy_from_blueprint(route.strategy()),
                     ))
                 }
+                DnsPolicyActionDescriptor::Evaluate(route) => {
+                    DnsPolicyAction::Evaluate(DnsPolicyRoute::new(
+                        DnsServerId::new(route.server()),
+                        dns_strategy_from_blueprint(route.strategy()),
+                    ))
+                }
+                DnsPolicyActionDescriptor::Respond => DnsPolicyAction::Respond,
                 DnsPolicyActionDescriptor::Reject => DnsPolicyAction::Reject,
             };
-            rules.push(DnsPolicyRule::new(matcher, action));
+            rules.push(DnsPolicyRule::new(matcher, mode, action));
         }
         Self::try_new(
             rules,
@@ -65,18 +72,31 @@ impl DnsPolicyProgram {
         validation_snapshot: &RuleEngineSnapshot,
     ) -> Result<Self, DnsPolicyCompileError> {
         let mut response_rules = 0_usize;
+        let mut has_evaluate = false;
         for rule in &rules {
-            let mut response_dependent = false;
+            if rule.mode == DnsPolicyMatchMode::Response && !has_evaluate {
+                return Err(DnsPolicyCompileError::ResponseMatchWithoutEvaluate);
+            }
+            if rule.action == DnsPolicyAction::Respond && !has_evaluate {
+                return Err(DnsPolicyCompileError::RespondWithoutEvaluate);
+            }
             for rule_set in rule.matcher.rule_sets.iter().copied() {
                 let descriptor = validation_snapshot
                     .rule_set(rule_set)
                     .ok_or(DnsPolicyCompileError::UnknownRuleSet)?;
-                if rule.action == DnsPolicyAction::Reject && descriptor.capabilities().ip_cidr {
-                    return Err(DnsPolicyCompileError::ResponseDependentReject);
+                match rule.mode {
+                    DnsPolicyMatchMode::Query if descriptor.capabilities().ip_cidr => {
+                        return Err(DnsPolicyCompileError::QueryModeCidrRuleSet);
+                    }
+                    DnsPolicyMatchMode::Response if !descriptor.capabilities().ip_cidr => {
+                        return Err(DnsPolicyCompileError::ResponseModeRequiresCidrRuleSet);
+                    }
+                    _ => {}
                 }
-                response_dependent |= descriptor.capabilities().ip_cidr;
             }
-            response_rules = response_rules.saturating_add(usize::from(response_dependent));
+            response_rules = response_rules
+                .saturating_add(usize::from(rule.mode == DnsPolicyMatchMode::Response));
+            has_evaluate |= matches!(rule.action, DnsPolicyAction::Evaluate(_));
         }
         let compiled = CompiledRuleProgram::try_new(rules, DnsQueryCandidateIndex::try_build)
             .map_err(map_candidate_compile_error)?;

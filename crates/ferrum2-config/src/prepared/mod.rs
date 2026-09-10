@@ -4,7 +4,6 @@ const DEFAULT_RULE_SET_CACHE_DIR: &str = "./rule-set-cache";
 const DEFAULT_RULE_SET_DOWNLOAD_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_RULE_SET_MAX_REDIRECTS: u8 = 5;
 const PLACEHOLDER_ENDPOINT: &str = "192.0.2.254:9";
-const PLACEHOLDER_DOMAIN: &str = "prepared.invalid";
 const MAX_RESOLVED_DNS_CANDIDATES: usize = 16;
 
 mod access;

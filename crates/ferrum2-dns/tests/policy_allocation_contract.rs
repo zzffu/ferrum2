@@ -30,6 +30,7 @@ fn indexed_query_with_caller_owned_scratch_allocates_nothing() {
             .expect("inbound matcher");
             DnsPolicyRule::new(
                 matcher,
+                ferrum2_rule::DnsPolicyMatchMode::Query,
                 DnsPolicyAction::Route(DnsPolicyRoute::new(
                     DnsServerId::new(1),
                     DnsStrategy::Ipv4Only,

@@ -484,10 +484,14 @@ impl DnsProxy {
                                 &mut memo,
                             )
                             .await?;
+                        // The evaluator borrows the latest explicit evaluation;
+                        // only this adapter owns responses and performs I/O.
                         step = evaluation
                             .evaluate_response(&memo[position].response)
                             .map_err(|_| DnsError::Protocol)?;
                     }
+                    // Respond (or a terminal evaluated DNS error) selects an
+                    // existing memo entry, never another upstream query.
                     DnsPolicyStep::AcceptResponse { server, strategy } => {
                         let Some(position) = memo_position(&memo, server, &qname, qtype) else {
                             return Err(DnsError::Protocol);

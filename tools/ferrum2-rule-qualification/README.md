@@ -73,11 +73,19 @@ scale, additional mixed rows enable and consume the same selected-rule match
 observation used by production metrics, including its allocation-free matcher
 category recheck. DNS measurements cover ordinary and
 RuleSet qname routing, CN-IP response hit/miss, cache hit/miss, and reuse of one
-response across same-server continuation. Qname rows cover the 64/65 linear-to-
-indexed boundary and 1,000/10,000 indexed scales; every row records the actual
-program mode and query candidate visits, and indexed last-hit/miss probes must
-remain sublinear. Response, cache, and continuation rows retain their bounded
-1, 100, and 1,000 scales. All DNS rows report p50, p99, and queries/second.
+response across same-server continuation. CN-IP rows explicitly evaluate the remote
+upstream, route a response-IP hit to the local upstream, and respond with the remote
+answer on a miss. Same-server continuation evaluates the local upstream once, then
+tests the same borrowed response against successive response-IP rules until a hit
+responds with it. These rows measure policy execution with supplied responses, not
+upstream I/O. Their evidence identifiers and address-rule counts are unchanged, but
+CN-IP programs now include two unconditional control rules and continuation programs
+include one. Historical implicit-evaluation timings are not equivalent workloads;
+comparisons require both runners to use this explicit-policy source.
+Qname rows cover the 64/65 linear-to-indexed boundary and 1,000/10,000 indexed scales;
+every row records the actual program mode and query candidate visits, and indexed
+last-hit/miss probes must remain sublinear. Response, cache, and continuation rows
+retain their bounded 1, 100, and 1,000 scales. All DNS rows report p50, p99, and queries/second.
 
 Route bitmap-shape rows separately exercise sparse and dense domain postings with
 an independent port constraint, first/last/miss selection, and up to eight ordered

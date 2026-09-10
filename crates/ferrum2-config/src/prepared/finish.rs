@@ -177,9 +177,16 @@ pub(super) fn build_dns_policy_blueprint(
                     dns_policy_strategy(prepared.strategy),
                 ))
             }
+            PreparedDnsAction::Evaluate { server } => {
+                DnsPolicyActionDescriptor::Evaluate(DnsPolicyRouteDescriptor::new(
+                    checked_u32(server)?,
+                    dns_policy_strategy(prepared.strategy),
+                ))
+            }
+            PreparedDnsAction::Respond => DnsPolicyActionDescriptor::Respond,
             PreparedDnsAction::Reject => DnsPolicyActionDescriptor::Reject,
         };
-        rules.push(DnsPolicyRuleDescriptor::new(matcher, action));
+        rules.push(DnsPolicyRuleDescriptor::new(matcher, prepared.mode, action));
     }
     let final_route = DnsPolicyRouteDescriptor::new(
         checked_u32(final_server)?,
@@ -200,14 +207,18 @@ pub(super) const fn dns_policy_strategy(strategy: DnsStrategy) -> DnsPolicyAddre
 
 pub(super) fn map_dns_policy_blueprint_error(error: DnsPolicyBlueprintError) -> ConfigError {
     match error {
-        DnsPolicyBlueprintError::UnknownRuleSet => {
+        DnsPolicyBlueprintError::UnknownRuleSet
+        | DnsPolicyBlueprintError::QueryModeCidrRuleSet
+        | DnsPolicyBlueprintError::ResponseModeRequiresCidrRuleSet => {
             ConfigError::semantic(ConfigField::DnsRouteRulesRuleSet)
         }
-        DnsPolicyBlueprintError::ResponseDependentReject => {
+        DnsPolicyBlueprintError::RespondWithoutEvaluate => {
             ConfigError::semantic(ConfigField::DnsRouteRulesAction)
         }
-        DnsPolicyBlueprintError::EmptyRule
-        | DnsPolicyBlueprintError::InvalidQueryMatchSet
+        DnsPolicyBlueprintError::ResponseMatchWithoutEvaluate => {
+            ConfigError::semantic(ConfigField::DnsRouteRulesMatchResponse)
+        }
+        DnsPolicyBlueprintError::InvalidQueryMatchSet
         | DnsPolicyBlueprintError::DuplicateConstraint => {
             ConfigError::semantic(ConfigField::DnsRouteRules)
         }

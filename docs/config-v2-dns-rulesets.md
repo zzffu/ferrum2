@@ -138,12 +138,85 @@ field are also ORed, while different fields in the same rule remain ANDed.
 RuleSets stay as stable snapshot references and are never expanded into tens of
 thousands of ordinary route rows.
 
-For DNS, domain categories are evaluated before an upstream query. An `ads`
-reject can therefore return immediately. CIDRs are evaluated against A/AAAA
-answers (including a CNAME chain in the same Answer section); a miss or empty
-answer continues at the next rule. One evaluation captures one registry
-generation, and repeated continuation through the same server/query reuses the
-same server-scoped response.
+For DNS, query-mode RuleSets match domain categories before an upstream query.
+An `ads` reject can therefore return immediately. Response-IP matching is explicit:
+set `match_response = true` after an `evaluate` action. Its RuleSets match relevant
+A/AAAA answers, including a CNAME chain in the same Answer section; unrelated
+Answer records and Additional records cannot select the domestic upstream.
+Query-mode references to CIDR-capable RuleSets are rejected at materialization;
+there is no legacy "query the rule's server, then test its answer" behavior.
+Response-mode references must have CIDR capability; mixed sets use only their
+CIDR entries in that mode. Other fields continue to constrain the original query.
+
+## Explicit DNS response evaluation
+
+| Action or field | Meaning |
+|---|---|
+| `action = "route"` | Query `server` and return its response, ending evaluation |
+| `action = "reject"` | Refuse the query without another upstream request |
+| `action = "evaluate"` | Query `server`, retain its response, and continue to later rules |
+| `match_response = true` | Match RuleSet CIDRs against the latest evaluated response |
+| `action = "respond"` | Return the latest evaluated response without querying again |
+
+Rules without match fields are unconditional. `route` and `evaluate` require
+`server` and may override the address strategy used by application resolution.
+`reject` and `respond` must omit `server`, `outbound`, and `strategy`.
+DNS actions do not accept an `outbound`; configure the DNS server's `detour`.
+The default matching mode is query mode (`match_response = false`).
+
+For domain-first domestic DNS with a remote-first IP check:
+
+```toml
+[dns.route]
+final = "google"
+
+[[dns.route.rules]]
+rule_set = "cn"
+action = "route"
+server = "local"
+
+[[dns.route.rules]]
+action = "evaluate"
+server = "google"
+
+[[dns.route.rules]]
+match_response = true
+rule_set = "cnip"
+action = "route"
+server = "local"
+
+[[dns.route.rules]]
+action = "respond"
+```
+
+This fragment assumes declared DNS servers and RuleSets; the complete example
+also puts advertising rejection and explicit proxy-domain rules before these
+rules. The `google` server must use the intended proxy `detour`. Known domestic
+domains query only `local`. Other domains query `google` first; only a response
+matching `cnip` selects a subsequent `local` query. The selected local answer is
+returned without testing it again against `cnip`. Otherwise `respond` returns
+the Google answer. A remote CDN address can miss `cnip`, which is why domain-first
+rules remain useful. Different domains can legitimately expose different
+recursive exits; this configuration is not a guarantee that a DNS leak website
+will report one country or one resolver.
+
+Response matching and `respond` require a preceding `evaluate` declaration.
+If a conditional `evaluate` was skipped and a response-dependent action is
+reached without an evaluated response, that query fails closed. Another executed
+`evaluate` replaces the latest response. A transport failure does not try
+another upstream. Evaluated DNS error responses other than NXDOMAIN terminate
+with that response; NXDOMAIN and valid empty answers have no matching addresses
+and can be returned by `respond`. A selected local query failure never silently
+returns the earlier remote answer. `final` is used only after rule exhaustion,
+not as an error handler.
+
+One evaluation captures one registry generation. Repeated queries to the same
+server/name/type within that evaluation reuse its server-scoped response.
+Ordinary DNS replies retain their original question and transaction binding;
+`respond` inherits the evaluated action's address strategy for application
+resolution. Explicit Direct resolvers still bypass `dns.route`, as documented
+above. See the [response-policy architecture](architecture/dns-response-policy-design.md)
+for ownership, state transitions, and resource invariants.
 
 ## Cache and refresh
 
@@ -241,7 +314,7 @@ URLs, keys, or other configuration values.
 | RuleSet declaration | `route.rule_set`, `.tag`, `.type`, `.format`, `.url`, `.download_resolver`, `.download_detour`, `.update_interval_seconds` | `config.semantic` |
 | Loader | `rule_set_loader`, `.cache_dir`, `.download_timeout_ms`, `.max_redirects` | `config.semantic` |
 | Ordinary route | `route.rules.domain_keyword`, `route.rules.rule_set` | `config.semantic`, `rule.compile`, `rule.allocation` |
-| DNS policy | `dns.strategy`, `dns.cache.*`, `dns.route.rules.domain_keyword`, `.rule_set`, `.action`, `.strategy`, `.server` | `config.semantic` |
+| DNS policy | `dns.strategy`, `dns.cache.*`, `dns.route.rules.domain_keyword`, `.rule_set`, `.action`, `.match_response`, `.strategy`, `.server` | `config.semantic` |
 | Fixed endpoints | `outbounds.domain_resolver`, `outbounds.domain_strategy`, `dns.servers.domain_resolver`, `dns.servers.domain_strategy` | `config.semantic`, `dns.resolver_required` |
 | Reserved DNS resolver name | `dns.servers.tag` | `dns.reserved_resolver_name` |
 | Dependency graph | `config.dependency_cycle` | `config.dependency_cycle` |

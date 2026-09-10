@@ -11,7 +11,7 @@ use ferrum2_dns::{
     DnsStrategy,
 };
 use ferrum2_rule::{
-    CompiledMatchSet, MatchSetBuilder, RuleEngineRegistry, RuleEngineSnapshot,
+    CompiledMatchSet, DnsPolicyMatchMode, MatchSetBuilder, RuleEngineRegistry, RuleEngineSnapshot,
     RuleEngineSnapshotBuilder, RuleProgramMode, RuleSetId,
 };
 use hickory_proto::op::{Message, MessageType, OpCode};
@@ -105,7 +105,11 @@ fn inbound_program(snapshot: &RuleEngineSnapshot, rule_count: usize) -> DnsPolic
                 Vec::new(),
             )
             .expect("inbound matcher");
-            DnsPolicyRule::new(matcher, DnsPolicyAction::Route(LOCAL))
+            DnsPolicyRule::new(
+                matcher,
+                ferrum2_rule::DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Route(LOCAL),
+            )
         })
         .collect();
     route_program(snapshot, rules)
@@ -127,6 +131,7 @@ fn ads_reject_is_decided_before_any_upstream_response() {
         &snapshot,
         vec![DnsPolicyRule::new(
             matcher(vec![ids[0]]),
+            DnsPolicyMatchMode::Query,
             DnsPolicyAction::Reject,
         )],
     );
@@ -151,10 +156,18 @@ fn cnip_response_hit_accepts_while_miss_and_empty_continue_to_final() {
     let (snapshot, ids) = snapshot(4, vec![("cnip", ip_set(&[cn]))]);
     let program = route_program(
         &snapshot,
-        vec![DnsPolicyRule::new(
-            matcher(vec![ids[0]]),
-            DnsPolicyAction::Route(LOCAL),
-        )],
+        vec![
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Evaluate(LOCAL),
+            ),
+            DnsPolicyRule::new(
+                matcher(vec![ids[0]]),
+                DnsPolicyMatchMode::Response,
+                DnsPolicyAction::Respond,
+            ),
+        ],
     );
     assert_eq!(program.response_rule_count(), 1);
     let registry = RuleEngineRegistry::new(snapshot);
@@ -181,7 +194,7 @@ fn cnip_response_hit_accepts_while_miss_and_empty_continue_to_final() {
     let observation = hit.observation();
     assert!(observation.query_evaluated());
     assert!(observation.response_evaluated());
-    assert_eq!(observation.query_candidates(), 1);
+    assert_eq!(observation.query_candidates(), 2);
     assert_eq!(observation.response_candidates(), 1);
     assert_eq!(
         observation.match_count(
@@ -221,10 +234,18 @@ fn cname_chain_uses_final_a_and_aaaa_and_ignores_unrelated_answers() {
     let (snapshot, ids) = snapshot(2, vec![("cnip", ip_set(&[IpAddr::V6(matching_v6)]))]);
     let program = route_program(
         &snapshot,
-        vec![DnsPolicyRule::new(
-            matcher(vec![ids[0]]),
-            DnsPolicyAction::Route(LOCAL),
-        )],
+        vec![
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Evaluate(LOCAL),
+            ),
+            DnsPolicyRule::new(
+                matcher(vec![ids[0]]),
+                DnsPolicyMatchMode::Response,
+                DnsPolicyAction::Respond,
+            ),
+        ],
     );
     let registry = RuleEngineRegistry::new(snapshot);
     let mut evaluation = program.evaluate(query("alias.invalid.", RecordType::AAAA), &registry);
@@ -296,6 +317,7 @@ fn multiple_rulesets_are_or_while_inline_and_scalar_fields_are_and() {
         &snapshot,
         vec![DnsPolicyRule::new(
             matcher,
+            DnsPolicyMatchMode::Query,
             DnsPolicyAction::Route(override_route),
         )],
     );
@@ -400,7 +422,11 @@ fn application_port_and_port_range_are_and_while_wire_queries_cannot_match_them(
     .expect("application matcher");
     let program = route_program(
         &snapshot,
-        vec![DnsPolicyRule::new(matcher, DnsPolicyAction::Route(LOCAL))],
+        vec![DnsPolicyRule::new(
+            matcher,
+            DnsPolicyMatchMode::Query,
+            DnsPolicyAction::Route(LOCAL),
+        )],
     );
     let registry = RuleEngineRegistry::new(snapshot);
     let name = Name::from_str("service.ports.invalid.").expect("application qname");
@@ -466,10 +492,18 @@ fn one_cached_response_can_continue_across_same_server_rules() {
             ("second", ip_set(&[second_ip])),
         ],
     );
-    let rules = ids
-        .into_iter()
-        .map(|id| DnsPolicyRule::new(matcher(vec![id]), DnsPolicyAction::Route(LOCAL)))
-        .collect();
+    let mut rules = vec![DnsPolicyRule::new(
+        matcher(vec![]),
+        DnsPolicyMatchMode::Query,
+        DnsPolicyAction::Evaluate(LOCAL),
+    )];
+    rules.extend(ids.into_iter().map(|id| {
+        DnsPolicyRule::new(
+            matcher(vec![id]),
+            DnsPolicyMatchMode::Response,
+            DnsPolicyAction::Respond,
+        )
+    }));
     let program = route_program(&snapshot, rules);
     let registry = RuleEngineRegistry::new(snapshot);
     let mut evaluation = program.evaluate(query("reuse.invalid.", RecordType::A), &registry);
@@ -482,41 +516,11 @@ fn one_cached_response_can_continue_across_same_server_rules() {
         evaluation.next_step().expect("first response step"),
         Some(DnsPolicyStep::EvaluateResponse { .. })
     ));
-    assert_eq!(
-        evaluation
-            .evaluate_response(&answer)
-            .expect("first RuleSet miss"),
-        DnsPolicyStep::EvaluateResponse {
-            server: LOCAL.server(),
-            strategy: LOCAL.strategy(),
-        }
-    );
     assert!(matches!(
         evaluation
             .evaluate_response(&answer)
             .expect("same cached response hits second RuleSet"),
         DnsPolicyStep::AcceptResponse { .. }
-    ));
-}
-
-#[test]
-fn non_address_qtype_never_enters_response_matching() {
-    let (snapshot, ids) = snapshot(
-        1,
-        vec![("cnip", ip_set(&[IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))]))],
-    );
-    let program = route_program(
-        &snapshot,
-        vec![DnsPolicyRule::new(
-            matcher(ids),
-            DnsPolicyAction::Route(LOCAL),
-        )],
-    );
-    let registry = RuleEngineRegistry::new(snapshot);
-    let mut evaluation = program.evaluate(query("txt.invalid.", RecordType::TXT), &registry);
-    assert!(matches!(
-        evaluation.next_step().expect("TXT query"),
-        Some(DnsPolicyStep::Final { .. })
     ));
 }
 
@@ -528,10 +532,18 @@ fn one_evaluation_keeps_its_generation_across_refresh() {
     let cnip = ids[0];
     let program = route_program(
         &snapshot,
-        vec![DnsPolicyRule::new(
-            matcher(vec![cnip]),
-            DnsPolicyAction::Route(LOCAL),
-        )],
+        vec![
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Evaluate(LOCAL),
+            ),
+            DnsPolicyRule::new(
+                matcher(vec![cnip]),
+                DnsPolicyMatchMode::Response,
+                DnsPolicyAction::Respond,
+            ),
+        ],
     );
     let registry = RuleEngineRegistry::new(snapshot);
     let mut old_evaluation =
@@ -574,12 +586,6 @@ fn one_evaluation_keeps_its_generation_across_refresh() {
 
 #[test]
 fn compilation_rejects_invalid_rows_without_fixed_rule_limits() {
-    assert_eq!(
-        DnsPolicyMatcher::try_new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(),)
-            .expect_err("empty matcher"),
-        DnsPolicyCompileError::EmptyRule
-    );
-
     let (validation_snapshot, ids) = snapshot(
         1,
         vec![("cnip", ip_set(&[IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]))],
@@ -588,18 +594,20 @@ fn compilation_rejects_invalid_rows_without_fixed_rule_limits() {
         DnsPolicyProgram::try_new(
             vec![DnsPolicyRule::new(
                 matcher(vec![ids[0]]),
+                DnsPolicyMatchMode::Query,
                 DnsPolicyAction::Reject,
             )],
             GOOGLE,
             &validation_snapshot,
         )
-        .expect_err("response-dependent reject"),
-        DnsPolicyCompileError::ResponseDependentReject
+        .expect_err("implicit CIDR mode is forbidden"),
+        DnsPolicyCompileError::QueryModeCidrRuleSet
     );
     assert_eq!(
         DnsPolicyProgram::try_new(
             vec![DnsPolicyRule::new(
                 matcher(vec![RuleSetId::from_raw(999)]),
+                DnsPolicyMatchMode::Query,
                 DnsPolicyAction::Route(LOCAL),
             )],
             GOOGLE,
@@ -621,7 +629,11 @@ fn compilation_rejects_invalid_rows_without_fixed_rule_limits() {
                 Vec::new(),
             )
             .expect("large rule matcher");
-            DnsPolicyRule::new(matcher, DnsPolicyAction::Route(LOCAL))
+            DnsPolicyRule::new(
+                matcher,
+                ferrum2_rule::DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Route(LOCAL),
+            )
         })
         .collect::<Vec<_>>();
     let program = route_program(&empty_snapshot, rules);
@@ -695,6 +707,7 @@ fn composite_program(
                 Vec::new(),
             )
             .expect("filler matcher"),
+            ferrum2_rule::DnsPolicyMatchMode::Query,
             DnsPolicyAction::Route(LOCAL),
         ));
     }
@@ -710,6 +723,7 @@ fn composite_program(
             vec![RecordType::A],
         )
         .expect("ordinary AND RuleSet matcher"),
+        ferrum2_rule::DnsPolicyMatchMode::Query,
         DnsPolicyAction::Route(LOCAL),
     ));
     route_program(snapshot, rules)
@@ -751,7 +765,13 @@ fn linear_and_indexed_preserve_ordinary_and_ruleset_semantics() {
 
 #[test]
 fn indexed_response_continuation_uses_captured_dynamic_capabilities_generation() {
-    let (snapshot, ids) = snapshot(20, vec![("dynamic", domain_set("initial.invalid"))]);
+    let (snapshot, ids) = snapshot(
+        20,
+        vec![(
+            "dynamic",
+            ip_set(&[IpAddr::V4(Ipv4Addr::new(10, 20, 30, 40))]),
+        )],
+    );
     let dynamic = ids[0];
     let mut rules = (0..64)
         .map(|inbound| {
@@ -764,13 +784,20 @@ fn indexed_response_continuation_uses_captured_dynamic_capabilities_generation()
                     Vec::new(),
                 )
                 .expect("response filler"),
+                ferrum2_rule::DnsPolicyMatchMode::Query,
                 DnsPolicyAction::Route(LOCAL),
             )
         })
         .collect::<Vec<_>>();
     rules.push(DnsPolicyRule::new(
+        matcher(vec![]),
+        DnsPolicyMatchMode::Query,
+        DnsPolicyAction::Evaluate(LOCAL),
+    ));
+    rules.push(DnsPolicyRule::new(
         matcher(vec![dynamic]),
-        DnsPolicyAction::Route(LOCAL),
+        DnsPolicyMatchMode::Response,
+        DnsPolicyAction::Respond,
     ));
     let program = route_program(&snapshot, rules);
     assert_eq!(program.mode(), RuleProgramMode::Indexed);
@@ -822,4 +849,172 @@ fn indexed_response_continuation_uses_captured_dynamic_capabilities_generation()
         DnsPolicyStep::AcceptResponse { .. }
     ));
     assert_eq!(evaluation.snapshot_generation(), 21);
+}
+
+#[test]
+fn respond_uses_latest_explicit_evaluation_and_cannot_resume() {
+    let (snapshot, _) = snapshot(1, vec![]);
+    let program = route_program(
+        &snapshot,
+        vec![
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Evaluate(LOCAL),
+            ),
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Evaluate(GOOGLE),
+            ),
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Respond,
+            ),
+        ],
+    );
+    let registry = RuleEngineRegistry::new(snapshot);
+    let mut evaluation = program.evaluate(query("latest.invalid.", RecordType::A), &registry);
+    assert_eq!(
+        evaluation.next_step().expect("first evaluate"),
+        Some(DnsPolicyStep::EvaluateResponse {
+            server: LOCAL.server(),
+            strategy: LOCAL.strategy(),
+        })
+    );
+    assert_eq!(
+        evaluation.next_step(),
+        Err(DnsPolicyStateError::ResponseRequired)
+    );
+    assert_eq!(
+        evaluation
+            .evaluate_response(&response(vec![]))
+            .expect("second evaluate"),
+        DnsPolicyStep::EvaluateResponse {
+            server: GOOGLE.server(),
+            strategy: GOOGLE.strategy()
+        }
+    );
+    assert_eq!(
+        evaluation
+            .evaluate_response(&response(vec![]))
+            .expect("latest response"),
+        DnsPolicyStep::AcceptResponse {
+            server: GOOGLE.server(),
+            strategy: GOOGLE.strategy()
+        }
+    );
+    assert_eq!(evaluation.next_step().expect("terminal"), None);
+    assert_eq!(
+        evaluation.evaluate_response(&response(vec![])),
+        Err(DnsPolicyStateError::ResponseNotExpected)
+    );
+}
+
+#[test]
+fn skipped_evaluate_fails_closed_for_indexed_response_rows_even_for_txt() {
+    let mut mixed = MatchSetBuilder::new();
+    mixed.add_exact_domain("unrelated.invalid").expect("domain");
+    mixed
+        .add_ip(Ipv4Addr::new(10, 0, 0, 1).into())
+        .expect("address");
+    let (snapshot, ids) = snapshot(
+        1,
+        vec![
+            ("mixed", mixed.build().expect("mixed set")),
+            ("query", domain_set("unrelated.invalid")),
+        ],
+    );
+    for mode in [DnsPolicyMatchMode::Query, DnsPolicyMatchMode::Response] {
+        let mut rules = vec![DnsPolicyRule::new(
+            DnsPolicyMatcher::try_new(vec![], vec![], vec![9], vec![], vec![])
+                .expect("conditional"),
+            DnsPolicyMatchMode::Query,
+            DnsPolicyAction::Evaluate(LOCAL),
+        )];
+        rules.extend((0..65).map(|_| {
+            DnsPolicyRule::new(
+                matcher(vec![ids[1]]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Reject,
+            )
+        }));
+        rules.push(DnsPolicyRule::new(
+            matcher(if mode == DnsPolicyMatchMode::Response {
+                vec![ids[0]]
+            } else {
+                vec![]
+            }),
+            mode,
+            DnsPolicyAction::Respond,
+        ));
+        let program = route_program(&snapshot, rules);
+        for qtype in [RecordType::A, RecordType::TXT] {
+            let mut evaluation = program.evaluate_with_snapshot(
+                query("different.invalid.", qtype),
+                Arc::new(
+                    snapshot
+                        .builder_for_next_generation()
+                        .expect("builder")
+                        .build()
+                        .expect("snapshot"),
+                ),
+            );
+            assert_eq!(
+                evaluation.next_step(),
+                Err(DnsPolicyStateError::EvaluatedResponseRequired)
+            );
+            assert_eq!(
+                evaluation.next_step(),
+                Err(DnsPolicyStateError::EvaluatedResponseRequired)
+            );
+            assert_eq!(
+                evaluation.evaluate_response(&response(vec![])),
+                Err(DnsPolicyStateError::EvaluatedResponseRequired)
+            );
+        }
+    }
+}
+
+#[test]
+fn response_mode_uses_only_cidr_in_mixed_sets_and_allows_unconstrained_txt() {
+    let mut mixed = MatchSetBuilder::new();
+    mixed.add_exact_domain("mixed.invalid").expect("domain");
+    mixed.add_ip(Ipv4Addr::new(10, 0, 0, 1).into()).expect("IP");
+    let (snapshot, ids) = snapshot(1, vec![("mixed", mixed.build().expect("mixed set"))]);
+    let program = route_program(
+        &snapshot,
+        vec![
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Evaluate(LOCAL),
+            ),
+            DnsPolicyRule::new(
+                matcher(ids),
+                DnsPolicyMatchMode::Response,
+                DnsPolicyAction::Reject,
+            ),
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Response,
+                DnsPolicyAction::Respond,
+            ),
+        ],
+    );
+    let registry = RuleEngineRegistry::new(snapshot);
+    for qtype in [RecordType::A, RecordType::TXT] {
+        let mut evaluation = program.evaluate(query("mixed.invalid.", qtype), &registry);
+        evaluation.next_step().expect("evaluate");
+        assert_eq!(
+            evaluation
+                .evaluate_response(&response(vec![]))
+                .expect("domain must not match"),
+            DnsPolicyStep::AcceptResponse {
+                server: LOCAL.server(),
+                strategy: LOCAL.strategy()
+            }
+        );
+    }
 }

@@ -3,14 +3,13 @@ use std::net::SocketAddr;
 use crate::dependency::{DependencyGraph, DependencyGraphError, DependencyNode, DependencySource};
 use crate::error::{ConfigError, ConfigField};
 use crate::model::{DirectDomainResolver, ResolverRef};
-use crate::raw::{RawDns, RawRoute, ScalarOrList};
+use crate::raw::{RawDns, RawRoute};
 
+use super::super::PLACEHOLDER_ENDPOINT;
 use super::super::model::{
     DialEndpoint, PreparedDependencyNode, PreparedDnsEndpoint, PreparedEgressRef, PreparedRuleSet,
     PreparedRuleSetDownloadMode,
 };
-use super::super::{PLACEHOLDER_DOMAIN, PLACEHOLDER_ENDPOINT};
-use super::dns_policy::dns_matcher_present;
 use super::draft::{ClientPreparationDraft, ServerPreparationDraft};
 use crate::validation::AdmittedEgressGraph;
 
@@ -361,8 +360,5 @@ pub(super) fn sanitize_dns(dns: Option<&mut RawDns>) {
     };
     for rule in &mut route.rules {
         rule.rule_set = None;
-        if !dns_matcher_present(rule) {
-            rule.domain_keyword = Some(ScalarOrList::Scalar(PLACEHOLDER_DOMAIN.to_owned()));
-        }
     }
 }

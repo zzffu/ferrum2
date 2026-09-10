@@ -65,12 +65,14 @@ const fn run_error_for_dns_policy_compile(error: ferrum2_dns::DnsPolicyCompileEr
     match error {
         ferrum2_dns::DnsPolicyCompileError::Allocation
         | ferrum2_dns::DnsPolicyCompileError::IndexOverflow => RunError::RuleAllocation,
-        ferrum2_dns::DnsPolicyCompileError::EmptyRule
-        | ferrum2_dns::DnsPolicyCompileError::InvalidQueryMatchSet
+        ferrum2_dns::DnsPolicyCompileError::InvalidQueryMatchSet
         | ferrum2_dns::DnsPolicyCompileError::DuplicateConstraint
         | ferrum2_dns::DnsPolicyCompileError::InvalidPortRange
         | ferrum2_dns::DnsPolicyCompileError::UnknownRuleSet
-        | ferrum2_dns::DnsPolicyCompileError::ResponseDependentReject
+        | ferrum2_dns::DnsPolicyCompileError::QueryModeCidrRuleSet
+        | ferrum2_dns::DnsPolicyCompileError::ResponseModeRequiresCidrRuleSet
+        | ferrum2_dns::DnsPolicyCompileError::ResponseMatchWithoutEvaluate
+        | ferrum2_dns::DnsPolicyCompileError::RespondWithoutEvaluate
         | ferrum2_dns::DnsPolicyCompileError::Internal => RunError::RuleCompile,
     }
 }

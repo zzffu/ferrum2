@@ -3,9 +3,9 @@ use std::num::NonZeroU16;
 
 use ferrum2_core::route::Network;
 use ferrum2_rule::{
-    MatchCandidateIndex, MatchCandidateIndexBuilder, MatchCategories, PortRangeCandidateIndex,
-    PortRangeCandidateIndexBuilder, RuleCompileError, RuleEngineSnapshot, RuleSetId,
-    SparseValueIndex, SparseValueIndexBuilder,
+    DnsPolicyMatchMode, MatchCandidateIndex, MatchCandidateIndexBuilder, MatchCategories,
+    PortRangeCandidateIndex, PortRangeCandidateIndexBuilder, RuleCompileError, RuleEngineSnapshot,
+    RuleSetId, SparseValueIndex, SparseValueIndexBuilder,
 };
 use hickory_proto::rr::RecordType;
 
@@ -144,7 +144,7 @@ impl DnsQueryCandidateIndex {
                     query_match_set.try_add_match_set(index, field, MatchCategories::DOMAIN)?;
                 }
             }
-            if matcher.rule_sets.is_empty() {
+            if matcher.rule_sets.is_empty() || rule.mode == DnsPolicyMatchMode::Response {
                 unconstrained[QueryCandidateField::RuleSet.index()].push(candidate);
             } else {
                 constrained[QueryCandidateField::RuleSet.index()] = true;
@@ -271,11 +271,6 @@ impl DnsQueryCandidateIndex {
                 snapshot.visit_matching_rule_sets(query.canonical_qname(), None, |rule_set| {
                     self.rule_set.visit_candidate_list(&rule_set, &mut visit);
                 });
-                if is_address_qtype(query.qtype()) {
-                    snapshot.visit_ip_rule_sets(|rule_set| {
-                        self.rule_set.visit_candidate_list(&rule_set, &mut visit);
-                    });
-                }
             }
         }
     }

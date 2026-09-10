@@ -23,8 +23,8 @@ pub use candidate::{
 pub use compiled_program::{CompiledRuleProgram, RuleProgramMode};
 pub use dns_blueprint::{
     DnsPolicyActionDescriptor, DnsPolicyAddressStrategy, DnsPolicyBlueprint,
-    DnsPolicyBlueprintError, DnsPolicyMatcherDescriptor, DnsPolicyMatcherDescriptorParts,
-    DnsPolicyRouteDescriptor, DnsPolicyRuleDescriptor,
+    DnsPolicyBlueprintError, DnsPolicyMatchMode, DnsPolicyMatcherDescriptor,
+    DnsPolicyMatcherDescriptorParts, DnsPolicyRouteDescriptor, DnsPolicyRuleDescriptor,
 };
 pub use error::RuleCompileError;
 pub use match_set::{

@@ -41,7 +41,16 @@ impl DnsPolicyRouteDescriptor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DnsPolicyActionDescriptor {
     Route(DnsPolicyRouteDescriptor),
+    Evaluate(DnsPolicyRouteDescriptor),
+    Respond,
     Reject,
+}
+
+/// Selects query matching or matching against the latest evaluated response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsPolicyMatchMode {
+    Query,
+    Response,
 }
 
 /// One validated conjunction of DNS query fields and RuleSet references.
@@ -82,16 +91,6 @@ impl DnsPolicyMatcherDescriptor {
         ports: Vec<NonZeroU16>,
         port_ranges: Vec<PortRange>,
     ) -> Result<Self, DnsPolicyBlueprintError> {
-        if query_fields.is_empty()
-            && rule_sets.is_empty()
-            && inbounds.is_empty()
-            && networks.is_empty()
-            && qtypes.is_empty()
-            && ports.is_empty()
-            && port_ranges.is_empty()
-        {
-            return Err(DnsPolicyBlueprintError::EmptyRule);
-        }
         if query_fields.iter().any(|field| {
             let capabilities = field.capabilities();
             field.is_empty()
@@ -173,27 +172,43 @@ impl fmt::Debug for DnsPolicyMatcherDescriptor {
 #[derive(Clone)]
 pub struct DnsPolicyRuleDescriptor {
     matcher: DnsPolicyMatcherDescriptor,
+    mode: DnsPolicyMatchMode,
     action: DnsPolicyActionDescriptor,
 }
 
 impl DnsPolicyRuleDescriptor {
     pub const fn new(
         matcher: DnsPolicyMatcherDescriptor,
+        mode: DnsPolicyMatchMode,
         action: DnsPolicyActionDescriptor,
     ) -> Self {
-        Self { matcher, action }
+        Self {
+            matcher,
+            mode,
+            action,
+        }
     }
 
     pub const fn matcher(&self) -> &DnsPolicyMatcherDescriptor {
         &self.matcher
     }
 
+    pub const fn mode(&self) -> DnsPolicyMatchMode {
+        self.mode
+    }
+
     pub const fn action(&self) -> DnsPolicyActionDescriptor {
         self.action
     }
 
-    pub fn into_parts(self) -> (DnsPolicyMatcherDescriptor, DnsPolicyActionDescriptor) {
-        (self.matcher, self.action)
+    pub fn into_parts(
+        self,
+    ) -> (
+        DnsPolicyMatcherDescriptor,
+        DnsPolicyMatchMode,
+        DnsPolicyActionDescriptor,
+    ) {
+        (self.matcher, self.mode, self.action)
     }
 }
 
@@ -212,8 +227,8 @@ pub struct DnsPolicyBlueprint {
 }
 
 impl DnsPolicyBlueprint {
-    /// Validates RuleSet IDs and capability-sensitive reject semantics against
-    /// the exact initial snapshot that will also back ordinary Route matching.
+    /// Validates stage ordering and RuleSet capabilities against the exact
+    /// initial snapshot that will also back ordinary Route matching.
     pub fn try_new(
         rules: Vec<DnsPolicyRuleDescriptor>,
         final_route: DnsPolicyRouteDescriptor,
@@ -223,20 +238,33 @@ impl DnsPolicyBlueprint {
             return Err(DnsPolicyBlueprintError::IndexOverflow);
         }
         let mut response_rules = 0_usize;
+        let mut evaluated = false;
         for rule in &rules {
-            let mut response_dependent = false;
+            if rule.mode == DnsPolicyMatchMode::Response && !evaluated {
+                return Err(DnsPolicyBlueprintError::ResponseMatchWithoutEvaluate);
+            }
+            if rule.action == DnsPolicyActionDescriptor::Respond && !evaluated {
+                return Err(DnsPolicyBlueprintError::RespondWithoutEvaluate);
+            }
             for rule_set in rule.matcher.rule_sets.iter().copied() {
                 let descriptor = validation_snapshot
                     .rule_set(rule_set)
                     .ok_or(DnsPolicyBlueprintError::UnknownRuleSet)?;
-                if rule.action == DnsPolicyActionDescriptor::Reject
-                    && descriptor.capabilities().ip_cidr
-                {
-                    return Err(DnsPolicyBlueprintError::ResponseDependentReject);
+                match rule.mode {
+                    DnsPolicyMatchMode::Query => {
+                        if descriptor.capabilities().ip_cidr {
+                            return Err(DnsPolicyBlueprintError::QueryModeCidrRuleSet);
+                        }
+                    }
+                    DnsPolicyMatchMode::Response => {
+                        if !descriptor.capabilities().ip_cidr {
+                            return Err(DnsPolicyBlueprintError::ResponseModeRequiresCidrRuleSet);
+                        }
+                    }
                 }
-                response_dependent |= descriptor.capabilities().ip_cidr;
             }
-            response_rules = response_rules.saturating_add(usize::from(response_dependent));
+            response_rules += usize::from(rule.mode == DnsPolicyMatchMode::Response);
+            evaluated |= matches!(rule.action, DnsPolicyActionDescriptor::Evaluate(_));
         }
         Ok(Self {
             rules: rules.into_boxed_slice(),
@@ -279,24 +307,32 @@ impl fmt::Debug for DnsPolicyBlueprint {
 /// Closed validation failures for runtime-neutral DNS policy blueprints.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DnsPolicyBlueprintError {
-    EmptyRule,
     InvalidQueryMatchSet,
     DuplicateConstraint,
     UnknownRuleSet,
-    ResponseDependentReject,
+    QueryModeCidrRuleSet,
+    ResponseModeRequiresCidrRuleSet,
+    ResponseMatchWithoutEvaluate,
+    RespondWithoutEvaluate,
     IndexOverflow,
 }
 
 impl fmt::Display for DnsPolicyBlueprintError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::EmptyRule => "DNS policy rule has no matcher",
             Self::InvalidQueryMatchSet => "DNS query field has an unsupported matcher",
             Self::DuplicateConstraint => "DNS policy field contains a duplicate constraint",
             Self::UnknownRuleSet => "DNS policy references an unknown RuleSet",
-            Self::ResponseDependentReject => {
-                "DNS reject policy cannot depend on response address matching"
+            Self::QueryModeCidrRuleSet => {
+                "DNS query matching cannot reference a CIDR-capable RuleSet"
             }
+            Self::ResponseModeRequiresCidrRuleSet => {
+                "DNS response matching requires a CIDR-capable RuleSet"
+            }
+            Self::ResponseMatchWithoutEvaluate => {
+                "DNS response matching requires a preceding evaluate action"
+            }
+            Self::RespondWithoutEvaluate => "DNS respond requires a preceding evaluate action",
             Self::IndexOverflow => "DNS policy index capacity was exceeded",
         })
     }

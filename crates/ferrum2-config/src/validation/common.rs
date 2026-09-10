@@ -207,13 +207,16 @@ pub(super) fn validate_dns(
             .action
             .as_deref()
             .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteRulesAction))?;
-        if action == "reject" {
+        if action == "reject" || action == "respond" {
             if rule.server.is_some() {
                 return Err(ConfigError::semantic(ConfigField::DnsRouteRulesServer));
             }
+            if rule.strategy.is_some() {
+                return Err(ConfigError::semantic(ConfigField::DnsRouteRulesStrategy));
+            }
             continue;
         }
-        if action != "route" {
+        if action != "route" && action != "evaluate" {
             return Err(ConfigError::semantic(ConfigField::DnsRouteRulesAction));
         }
         let server_tag = rule

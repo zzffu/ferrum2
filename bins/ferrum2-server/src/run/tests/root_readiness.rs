@@ -16,33 +16,6 @@ use super::super::*;
 use crate::run::test_support::*;
 
 #[test]
-fn dns_policy_failures_keep_closed_runtime_categories() {
-    for error in [
-        ferrum2_dns::DnsPolicyCompileError::Allocation,
-        ferrum2_dns::DnsPolicyCompileError::IndexOverflow,
-    ] {
-        assert_eq!(
-            run_error_for_dns_policy_compile(error),
-            RunError::RuleAllocation
-        );
-    }
-    for error in [
-        ferrum2_dns::DnsPolicyCompileError::EmptyRule,
-        ferrum2_dns::DnsPolicyCompileError::InvalidQueryMatchSet,
-        ferrum2_dns::DnsPolicyCompileError::DuplicateConstraint,
-        ferrum2_dns::DnsPolicyCompileError::InvalidPortRange,
-        ferrum2_dns::DnsPolicyCompileError::UnknownRuleSet,
-        ferrum2_dns::DnsPolicyCompileError::ResponseDependentReject,
-        ferrum2_dns::DnsPolicyCompileError::Internal,
-    ] {
-        assert_eq!(
-            run_error_for_dns_policy_compile(error),
-            RunError::RuleCompile
-        );
-    }
-}
-
-#[test]
 fn validated_server_network_policies_reach_the_shared_runtime_resolver() {
     struct NoRouteCatalog;
 

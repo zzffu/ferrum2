@@ -92,11 +92,22 @@ action = "route"
 server = "local"
 strategy = "ipv4_only"
 
+# Unknown domains are evaluated through the proxy before any domestic query.
 [[dns.route.rules]]
+action = "evaluate"
+server = "google"
+strategy = "ipv4_only"
+
+[[dns.route.rules]]
+match_response = true
 rule_set = "cnip"
 action = "route"
 server = "local"
 strategy = "ipv4_only"
+
+# A non-domestic answer is returned without another upstream query.
+[[dns.route.rules]]
+action = "respond"
 
 [route]
 final = "MY"

@@ -80,6 +80,7 @@ cargo run -p ferrum2-client --locked -- --config client.toml --dashboard-listen 
 
 - [文档索引](docs/README.md)：配置、架构、验证流程和性能证据。
 - [DNS 与 RuleSet 配置](docs/config-v2-dns-rulesets.md)。
+- [显式 DNS 响应策略设计](docs/architecture/dns-response-policy-design.md)：先代理解析、再按响应 IP 选择国内 DNS，包含失败语义与缓存职责。
 - [Windows TUN 配置](docs/config-v2-tun.md)：当前 schema-v2 字段、系统 TCP、原生 UDP 和网络生命周期。
 - [内嵌 rocom 录制与离线解码](docs/architecture/rocom-recording-design.md)：自动识别 TSF4G 连接，每条连接独立保存原始数据/key JSONL，普通 TCP 不录制；敏感录制须显式开启。
 - [Windows TUN 正确性验证](docs/windows-tun-qualification.md)：真实网卡验证的专用流程。

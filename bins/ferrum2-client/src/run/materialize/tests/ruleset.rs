@@ -236,9 +236,17 @@ action = "route"
 server = "local"
 
 [[dns.route.rules]]
+action = "evaluate"
+server = "google"
+
+[[dns.route.rules]]
+match_response = true
 rule_set = "cnip"
 action = "route"
 server = "local"
+
+[[dns.route.rules]]
+action = "respond"
 
 [route]
 final = "direct"
@@ -416,7 +424,7 @@ max_redirects = 0
     let mut cnip_dns = policy.evaluate(query(response_name), &dns_registry);
     assert!(matches!(
         cnip_dns.next_step().expect("CNIP response rule"),
-        Some(DnsPolicyStep::EvaluateResponse { server, .. }) if server.get() == 0
+        Some(DnsPolicyStep::EvaluateResponse { server, .. }) if server.get() == 1
     ));
     let mut response = Message::new(9, MessageType::Response, OpCode::Query);
     response.add_answer(Record::from_rdata(
@@ -426,13 +434,13 @@ max_redirects = 0
     ));
     assert!(matches!(
         cnip_dns.evaluate_response(&response).expect("CNIP response hit"),
-        DnsPolicyStep::AcceptResponse { server, .. } if server.get() == 0
+        DnsPolicyStep::RouteImmediately { server, .. } if server.get() == 0
     ));
 
     let mut cnip_miss = policy.evaluate(query(response_name), &dns_registry);
     assert!(matches!(
         cnip_miss.next_step().expect("CNIP response rule"),
-        Some(DnsPolicyStep::EvaluateResponse { server, .. }) if server.get() == 0
+        Some(DnsPolicyStep::EvaluateResponse { server, .. }) if server.get() == 1
     ));
     let mut response = Message::new(10, MessageType::Response, OpCode::Query);
     response.add_answer(Record::from_rdata(
@@ -444,7 +452,7 @@ max_redirects = 0
         cnip_miss
             .evaluate_response(&response)
             .expect("CNIP response miss"),
-        DnsPolicyStep::Final { server, .. } if server.get() == 1
+        DnsPolicyStep::AcceptResponse { server, .. } if server.get() == 1
     ));
     materialized.validate_only().expect("four-RuleSet cleanup");
 

@@ -31,6 +31,7 @@ Commands assume the repository root unless a guide says otherwise. Use `python` 
 |---|---|
 | [Repository guidelines](../AGENTS.md) | Build/test commands, compatibility policy, and contribution rules; scoped guides refine ownership |
 | [Invariant ledger](architecture/invariants.md) | Owner boundaries, behavioral contracts, evidence, and remaining gaps |
+| [Explicit DNS response policy](architecture/dns-response-policy-design.md) | Ordered evaluation/response matching, fail-closed semantics, cache ownership, and clean schema-v2 cutover |
 | [TUN system TCP design](architecture/tun-system-tcp-design.md) | Windows TCP conversion with native UDP unchanged; selected minimal temporary ingress allowance and authorized host qualification |
 | [Gate ledger](architecture/gates.md) | Current workflows, triggers, commands, privilege boundaries, and required contexts |
 | [Fixture and evidence ledger](architecture/fixtures-and-evidence.md) | Reviewed inputs, vendor patches, hashes, and retention requirements |

@@ -13,7 +13,7 @@ use ferrum2_dns::{
     ResolverGeneration, TaggedResolver,
 };
 use ferrum2_rule::{
-    CompiledMatchSet, MatchSetBuilder, RuleEngineRegistry, RuleEngineSnapshot,
+    CompiledMatchSet, DnsPolicyMatchMode, MatchSetBuilder, RuleEngineRegistry, RuleEngineSnapshot,
     RuleEngineSnapshotBuilder, RuleSetId,
 };
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
@@ -187,7 +187,11 @@ async fn reject_is_refused_for_wire_and_terminal_for_application_without_upstrea
     let (snapshot, ids) = snapshot(vec![("ads", suffix_set("ads.invalid"))]);
     let program = policy(
         &snapshot,
-        vec![DnsPolicyRule::new(matcher(ids), DnsPolicyAction::Reject)],
+        vec![DnsPolicyRule::new(
+            matcher(ids),
+            DnsPolicyMatchMode::Query,
+            DnsPolicyAction::Reject,
+        )],
         LOCAL,
     );
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
@@ -290,10 +294,18 @@ async fn response_is_reused_across_same_server_continuation_and_rebound_to_reque
         ("first", ip_set(Ipv4Addr::new(10, 0, 0, 1).into())),
         ("second", ip_set(Ipv4Addr::new(10, 0, 0, 2).into())),
     ]);
-    let rules = ids
-        .into_iter()
-        .map(|id| DnsPolicyRule::new(matcher(vec![id]), DnsPolicyAction::Route(LOCAL)))
-        .collect();
+    let mut rules = vec![DnsPolicyRule::new(
+        matcher(vec![]),
+        DnsPolicyMatchMode::Query,
+        DnsPolicyAction::Evaluate(LOCAL),
+    )];
+    rules.extend(ids.into_iter().map(|id| {
+        DnsPolicyRule::new(
+            matcher(vec![id]),
+            DnsPolicyMatchMode::Response,
+            DnsPolicyAction::Respond,
+        )
+    }));
     let program = policy(&snapshot, rules, LOCAL);
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
     let proxy = DnsProxy::new(Arc::clone(&resolver), program, registry, 1, 0);
@@ -367,10 +379,18 @@ async fn response_miss_continues_to_the_final_server_once() {
     let (snapshot, ids) = snapshot(vec![("cnip", ip_set(Ipv4Addr::new(10, 0, 0, 0).into()))]);
     let program = policy(
         &snapshot,
-        vec![DnsPolicyRule::new(
-            matcher(ids),
-            DnsPolicyAction::Route(LOCAL),
-        )],
+        vec![
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Evaluate(LOCAL),
+            ),
+            DnsPolicyRule::new(
+                matcher(ids),
+                DnsPolicyMatchMode::Response,
+                DnsPolicyAction::Respond,
+            ),
+        ],
         REMOTE,
     );
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
@@ -455,6 +475,7 @@ async fn application_policy_route_overrides_requested_strategy() {
         &snapshot,
         vec![DnsPolicyRule::new(
             application_matcher,
+            DnsPolicyMatchMode::Query,
             DnsPolicyAction::Route(override_route),
         )],
         LOCAL,
@@ -524,10 +545,18 @@ async fn application_selected_server_failure_is_terminal_without_final_fallback(
     let (snapshot, ids) = snapshot(vec![("cnip", ip_set(Ipv4Addr::new(10, 0, 0, 1).into()))]);
     let program = policy(
         &snapshot,
-        vec![DnsPolicyRule::new(
-            matcher(ids),
-            DnsPolicyAction::Route(LOCAL),
-        )],
+        vec![
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Evaluate(LOCAL),
+            ),
+            DnsPolicyRule::new(
+                matcher(ids),
+                DnsPolicyMatchMode::Response,
+                DnsPolicyAction::Respond,
+            ),
+        ],
         REMOTE,
     );
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
@@ -704,6 +733,7 @@ async fn live_policy_refresh_uses_the_evaluation_generation_for_cache_isolation(
         &snapshot,
         vec![DnsPolicyRule::new(
             matcher(ids),
+            DnsPolicyMatchMode::Query,
             DnsPolicyAction::Route(LOCAL),
         )],
         LOCAL,
@@ -885,10 +915,18 @@ async fn policy_response_continuation_reuses_server_scoped_cache_across_transpor
     let (snapshot, ids) = snapshot(vec![("cnip", ip_set(Ipv4Addr::new(10, 0, 0, 1).into()))]);
     let program = policy(
         &snapshot,
-        vec![DnsPolicyRule::new(
-            matcher(ids),
-            DnsPolicyAction::Route(LOCAL),
-        )],
+        vec![
+            DnsPolicyRule::new(
+                matcher(vec![]),
+                DnsPolicyMatchMode::Query,
+                DnsPolicyAction::Evaluate(LOCAL),
+            ),
+            DnsPolicyRule::new(
+                matcher(ids),
+                DnsPolicyMatchMode::Response,
+                DnsPolicyAction::Respond,
+            ),
+        ],
         DnsPolicyRoute::new(DnsServerId::new(1), DnsStrategy::Ipv4Only),
     );
     let registry = Arc::new(RuleEngineRegistry::new(snapshot));
@@ -1002,10 +1040,18 @@ async fn oversized_policy_answers_preserve_cold_and_warm_upstream_selection() {
         let route = DnsPolicyRoute::new(DnsServerId::new(0), strategy);
         let program = policy(
             &snapshot,
-            vec![DnsPolicyRule::new(
-                matcher(ids),
-                DnsPolicyAction::Route(route),
-            )],
+            vec![
+                DnsPolicyRule::new(
+                    matcher(vec![]),
+                    DnsPolicyMatchMode::Query,
+                    DnsPolicyAction::Evaluate(route),
+                ),
+                DnsPolicyRule::new(
+                    matcher(ids),
+                    DnsPolicyMatchMode::Response,
+                    DnsPolicyAction::Respond,
+                ),
+            ],
             DnsPolicyRoute::new(DnsServerId::new(1), strategy),
         );
         let cache =
@@ -1153,5 +1199,118 @@ async fn negative_alias_cache_expires_with_alias_and_rejects_zero_or_invalid_cha
         task.await.expect("upstream join");
         drop((proxy, resolver));
         assert_eq!(owner.shutdown().await.expect("shutdown").runtime_tasks, 0);
+    }
+}
+
+#[tokio::test]
+async fn explicit_remote_evaluation_routes_only_domestic_answers_and_errors_never_fallback() {
+    let _network = TEST_NETWORK.lock().await;
+    let domestic_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let local_answer = Ipv4Addr::new(192, 0, 2, 99);
+    for (remote_ip, code, should_query_local) in [
+        (Ipv4Addr::new(203, 0, 113, 1), ResponseCode::NoError, false),
+        (domestic_ip, ResponseCode::NoError, true),
+        (domestic_ip, ResponseCode::ServFail, false),
+        (domestic_ip, ResponseCode::NXDomain, false),
+    ] {
+        let local = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("domestic");
+        let remote = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("remote");
+        let servers = vec![udp_server(&local), udp_server(&remote)];
+        let remote_task = tokio::spawn(async move {
+            let (request, peer) = receive_request(&remote).await;
+            let mut response = if code == ResponseCode::NoError {
+                address_response(&request, remote_ip.into())
+            } else {
+                let mut response = Message::response(request.metadata.id, OpCode::Query);
+                response.add_query(request.queries[0].clone());
+                response
+            };
+            response.metadata.response_code = code;
+            send_response(&remote, peer, response).await;
+            let mut wire = [0_u8; 4096];
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), remote.recv_from(&mut wire))
+                    .await
+                    .is_err(),
+                "respond or domestic routing queried remote again"
+            );
+        });
+        let (resolver, mut owner) = TaggedResolver::direct(
+            servers,
+            Duration::from_millis(200),
+            NonZeroU16::new(1).expect("capacity"),
+        )
+        .expect("resolver");
+        owner.ready().await.expect("ready");
+        let resolver = Arc::new(resolver);
+        let (snapshot, ids) = snapshot(vec![("domestic", ip_set(domestic_ip.into()))]);
+        let program = policy(
+            &snapshot,
+            vec![
+                DnsPolicyRule::new(
+                    matcher(vec![]),
+                    DnsPolicyMatchMode::Query,
+                    DnsPolicyAction::Evaluate(REMOTE),
+                ),
+                DnsPolicyRule::new(
+                    matcher(ids),
+                    DnsPolicyMatchMode::Response,
+                    DnsPolicyAction::Route(LOCAL),
+                ),
+                DnsPolicyRule::new(
+                    matcher(vec![]),
+                    DnsPolicyMatchMode::Query,
+                    DnsPolicyAction::Respond,
+                ),
+            ],
+            LOCAL,
+        );
+        let proxy = DnsProxy::new(
+            Arc::clone(&resolver),
+            program,
+            Arc::new(RuleEngineRegistry::new(snapshot)),
+            1,
+            0,
+        );
+        let request = wire_query(0x7111, "explicit.policy.invalid.", RecordType::A)
+            .to_vec()
+            .expect("wire");
+        let answer = proxy.answer(ProxyIngress::Listener(0), ProxyTransport::Udp, &request);
+        let serve_local = async {
+            if should_query_local {
+                let (request, peer) = receive_request(&local).await;
+                send_response(
+                    &local,
+                    peer,
+                    address_response(&request, local_answer.into()),
+                )
+                .await;
+            }
+        };
+        let (answer, ()) = tokio::join!(answer, serve_local);
+        let answer = Message::from_vec(&answer.expect("answer")).expect("typed answer");
+        assert_eq!(answer.metadata.response_code, code);
+        if code == ResponseCode::NoError {
+            let expected = if should_query_local {
+                local_answer
+            } else {
+                remote_ip
+            };
+            assert_eq!(answer.answers[0].data, RData::A(A(expected)));
+        }
+        let mut wire = [0_u8; 4096];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), local.recv_from(&mut wire))
+                .await
+                .is_err(),
+            "unexpected domestic query"
+        );
+        remote_task.await.expect("remote task");
+        drop((proxy, resolver, local));
+        owner.shutdown().await.expect("shutdown");
     }
 }

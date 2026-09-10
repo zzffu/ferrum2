@@ -2,7 +2,9 @@ use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use ferrum2_core::DomainName;
-use ferrum2_rule::{CompiledMatchSet, MatchSetBuilder, Network, PortRange, RuleCompileError};
+use ferrum2_rule::{
+    CompiledMatchSet, DnsPolicyMatchMode, MatchSetBuilder, Network, PortRange, RuleCompileError,
+};
 
 use crate::error::{ConfigError, ConfigField};
 use crate::model::{DnsQueryType, DnsStrategy};
@@ -53,15 +55,29 @@ pub(super) fn prepare_dns_rules(
     prepared
         .try_reserve_exact(route.rules.len())
         .map_err(|_| ConfigError::semantic(ConfigField::ResourceMaterialization))?;
+    let mut evaluated = false;
     for (rule_index, rule) in route.rules.iter().enumerate() {
-        if !dns_matcher_present(rule) {
-            return Err(ConfigError::semantic(ConfigField::DnsRouteRules));
+        let mode = if rule.match_response {
+            DnsPolicyMatchMode::Response
+        } else {
+            DnsPolicyMatchMode::Query
+        };
+        if rule.match_response && !evaluated {
+            return Err(ConfigError::semantic(
+                ConfigField::DnsRouteRulesMatchResponse,
+            ));
         }
         let matcher = prepare_dns_matcher(rule, dns, role, ordinary_inbounds)?;
         let rule_sets = rule
             .rule_set
             .as_ref()
-            .map(|raw| resolve_rule_set_refs(raw, rule_sets, ConfigField::DnsRouteRulesRuleSet))
+            .map(|raw| {
+                if rule.match_response && raw.len() == 0 {
+                    Ok(Vec::new())
+                } else {
+                    resolve_rule_set_refs(raw, rule_sets, ConfigField::DnsRouteRulesRuleSet)
+                }
+            })
             .transpose()?
             .unwrap_or_default();
         let action = match rule
@@ -69,7 +85,7 @@ pub(super) fn prepare_dns_rules(
             .as_deref()
             .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteRulesAction))?
         {
-            "route" => {
+            action @ ("route" | "evaluate") => {
                 if rule.outbound.is_some() {
                     return Err(ConfigError::semantic(ConfigField::DnsRouteRulesServer));
                 }
@@ -78,31 +94,44 @@ pub(super) fn prepare_dns_rules(
                     .as_deref()
                     .and_then(|tag| servers.iter().position(|server| server.tag == tag))
                     .ok_or_else(|| ConfigError::semantic(ConfigField::DnsRouteRulesServer))?;
-                PreparedDnsAction::Route { server }
+                if action == "evaluate" {
+                    PreparedDnsAction::Evaluate { server }
+                } else {
+                    PreparedDnsAction::Route { server }
+                }
             }
-            "reject" => {
+            action @ ("reject" | "respond") => {
                 if rule.server.is_some() || rule.outbound.is_some() {
                     return Err(ConfigError::semantic(ConfigField::DnsRouteRulesServer));
                 }
                 if rule.strategy.is_some() {
                     return Err(ConfigError::semantic(ConfigField::DnsRouteRulesStrategy));
                 }
-                PreparedDnsAction::Reject
+                if action == "respond" {
+                    if !evaluated {
+                        return Err(ConfigError::semantic(ConfigField::DnsRouteRulesAction));
+                    }
+                    PreparedDnsAction::Respond
+                } else {
+                    PreparedDnsAction::Reject
+                }
             }
             _ => return Err(ConfigError::semantic(ConfigField::DnsRouteRulesAction)),
         };
         let strategy = match action {
-            PreparedDnsAction::Reject => default_strategy,
-            PreparedDnsAction::Route { .. } => rule
+            PreparedDnsAction::Reject | PreparedDnsAction::Respond => default_strategy,
+            PreparedDnsAction::Route { .. } | PreparedDnsAction::Evaluate { .. } => rule
                 .strategy
                 .as_deref()
                 .map_or(Ok(default_strategy), |value| {
                     parse_strategy(Some(value), ConfigField::DnsRouteRulesStrategy)
                 })?,
         };
+        evaluated |= matches!(action, PreparedDnsAction::Evaluate { .. });
         prepared.push(PreparedDnsRule {
             rule_index,
             rule_sets,
+            mode,
             action,
             strategy,
             matcher,
@@ -399,18 +428,4 @@ pub(super) fn resolve_rule_set_refs(
         resolved.push(index);
     }
     Ok(resolved)
-}
-
-pub(super) fn dns_matcher_present(rule: &RawDnsRouteRule) -> bool {
-    rule.inbound.is_some()
-        || rule.network.is_some()
-        || rule.qname.is_some()
-        || rule.qname_suffix.is_some()
-        || rule.qtype.is_some()
-        || rule.domain.is_some()
-        || rule.domain_suffix.is_some()
-        || rule.domain_keyword.is_some()
-        || rule.rule_set.is_some()
-        || rule.port.is_some()
-        || rule.port_range.is_some()
 }

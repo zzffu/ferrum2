@@ -4,8 +4,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ferrum2_core::CanonicalDomain;
-use ferrum2_rule::{CompiledMatchSet, RuleEngineSnapshot, RuleProgramMode, RuleSetId};
-use hickory_proto::op::Message;
+use ferrum2_rule::{
+    CompiledMatchSet, DnsPolicyMatchMode, RuleEngineSnapshot, RuleProgramMode, RuleSetId,
+};
+use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::RecordType;
 
 use super::compiler::DnsPolicyProgram;
@@ -57,6 +59,7 @@ impl DnsPolicyStep {
 pub enum DnsPolicyStateError {
     ResponseRequired,
     ResponseNotExpected,
+    EvaluatedResponseRequired,
 }
 
 impl fmt::Display for DnsPolicyStateError {
@@ -64,6 +67,7 @@ impl fmt::Display for DnsPolicyStateError {
         formatter.write_str(match self {
             Self::ResponseRequired => "DNS policy response evaluation is required",
             Self::ResponseNotExpected => "DNS policy response evaluation is not expected",
+            Self::EvaluatedResponseRequired => "DNS policy has no evaluated response",
         })
     }
 }
@@ -100,6 +104,8 @@ pub(super) struct DnsPolicyEvaluationState {
     snapshot: Arc<RuleEngineSnapshot>,
     cursor: usize,
     pending_rule: Option<usize>,
+    latest_route: Option<DnsPolicyRoute>,
+    failed: bool,
     finished: bool,
     observation: DnsPolicyObservation,
 }
@@ -111,6 +117,8 @@ impl DnsPolicyEvaluationState {
             snapshot,
             cursor: 0,
             pending_rule: None,
+            latest_route: None,
+            failed: false,
             finished: false,
             observation: DnsPolicyObservation::default(),
         }
@@ -148,11 +156,8 @@ impl DnsPolicyEvaluation<'_> {
         next_policy_step(self.program, &mut self.state, &mut self.scratch)
     }
 
-    /// Applies one upstream response to the pending response-dependent row.
-    ///
-    /// A miss resumes at the following row. If that row asks for the same
-    /// server, callers may submit the same cached `(server, qname, qtype)`
-    /// response again instead of performing another upstream query.
+    /// Borrows one explicitly evaluated upstream response and advances until
+    /// the next I/O or terminal action. The caller retains response ownership.
     pub fn evaluate_response(
         &mut self,
         response: &Message,
@@ -226,10 +231,13 @@ fn next_policy_step(
     state: &mut DnsPolicyEvaluationState,
     scratch: &mut DnsPolicyScratch,
 ) -> Result<Option<DnsPolicyStep>, DnsPolicyStateError> {
+    if state.failed {
+        return Err(DnsPolicyStateError::EvaluatedResponseRequired);
+    }
     if state.pending_rule.is_some() {
         return Err(DnsPolicyStateError::ResponseRequired);
     }
-    Ok(advance_observed(program, state, scratch))
+    advance_observed(program, state, scratch, None)
 }
 
 fn evaluate_policy_response(
@@ -238,60 +246,60 @@ fn evaluate_policy_response(
     scratch: &mut DnsPolicyScratch,
     response: &Message,
 ) -> Result<DnsPolicyStep, DnsPolicyStateError> {
+    if state.failed {
+        return Err(DnsPolicyStateError::EvaluatedResponseRequired);
+    }
     let rule_index = state
         .pending_rule
         .take()
         .ok_or(DnsPolicyStateError::ResponseNotExpected)?;
-    let rule = &program.compiled.rules()[rule_index];
-    let DnsPolicyAction::Route(route) = rule.action else {
+    let DnsPolicyAction::Evaluate(route) = program.compiled.rules()[rule_index].action else {
         return Err(DnsPolicyStateError::ResponseNotExpected);
     };
-    let started = Instant::now();
-    let matched = response_matches_rule_sets(
-        &state.snapshot,
-        &rule.matcher.rule_sets,
-        &state.query,
-        response,
-    );
-    let elapsed = elapsed_ns(started);
-    state.observation.record_response(elapsed);
-    state.observation.record_match(
-        DnsPolicyStage::Response,
-        DnsPolicyMatchSource::RuleSet,
-        DnsPolicyMatchType::IpCidr,
-        matched,
-    );
-    if matched {
+    state.latest_route = Some(route);
+    if !matches!(
+        response.metadata.response_code,
+        ResponseCode::NoError | ResponseCode::NXDomain
+    ) {
         state.finished = true;
         return Ok(DnsPolicyStep::AcceptResponse {
             server: route.server,
             strategy: route.strategy,
         });
     }
-    advance_observed(program, state, scratch).ok_or(DnsPolicyStateError::ResponseNotExpected)
+    advance_observed(program, state, scratch, Some(response))?
+        .ok_or(DnsPolicyStateError::ResponseNotExpected)
 }
 
 fn advance_observed(
     program: &DnsPolicyProgram,
     state: &mut DnsPolicyEvaluationState,
     scratch: &mut DnsPolicyScratch,
-) -> Option<DnsPolicyStep> {
+    response: Option<&Message>,
+) -> Result<Option<DnsPolicyStep>, DnsPolicyStateError> {
     let started = Instant::now();
     scratch.candidate_visits = 0;
-    let result = advance(program, state, scratch);
+    let result = advance(program, state, scratch, response);
     state
         .observation
         .record_query(scratch.candidate_visits, elapsed_ns(started));
     result
 }
 
+fn missing_response(state: &mut DnsPolicyEvaluationState) -> DnsPolicyStateError {
+    state.failed = true;
+    state.finished = true;
+    DnsPolicyStateError::EvaluatedResponseRequired
+}
+
 fn advance(
     program: &DnsPolicyProgram,
     state: &mut DnsPolicyEvaluationState,
     scratch: &mut DnsPolicyScratch,
-) -> Option<DnsPolicyStep> {
+    response: Option<&Message>,
+) -> Result<Option<DnsPolicyStep>, DnsPolicyStateError> {
     if state.finished {
-        return None;
+        return Ok(None);
     }
     while let Some(rule_index) =
         program.next_query_candidate(state.cursor, &state.query, &state.snapshot, scratch)
@@ -305,36 +313,70 @@ fn advance(
         {
             continue;
         }
-        if rule.matcher.rule_sets.is_empty()
-            || matches_query_rule_sets(
-                &state.snapshot,
-                &rule.matcher.rule_sets,
-                state.query.canonical_qname.as_ref(),
-                &mut state.observation,
-            )
-        {
-            state.finished = true;
-            return Some(immediate_step(rule.action));
+        let matched = match rule.mode {
+            DnsPolicyMatchMode::Query => {
+                rule.matcher.rule_sets.is_empty()
+                    || matches_query_rule_sets(
+                        &state.snapshot,
+                        &rule.matcher.rule_sets,
+                        state.query.canonical_qname.as_ref(),
+                        &mut state.observation,
+                    )
+            }
+            DnsPolicyMatchMode::Response => {
+                let response = response.ok_or_else(|| missing_response(state))?;
+                let started = Instant::now();
+                let matched = rule.matcher.rule_sets.is_empty()
+                    || response_matches_rule_sets(
+                        &state.snapshot,
+                        &rule.matcher.rule_sets,
+                        &state.query,
+                        response,
+                    );
+                state.observation.record_response(elapsed_ns(started));
+                if !rule.matcher.rule_sets.is_empty() {
+                    state.observation.record_match(
+                        DnsPolicyStage::Response,
+                        DnsPolicyMatchSource::RuleSet,
+                        DnsPolicyMatchType::IpCidr,
+                        matched,
+                    );
+                }
+                matched
+            }
+        };
+        if !matched {
+            continue;
         }
-        if let DnsPolicyAction::Route(route) = rule.action
-            && is_address_qtype(state.query.qtype)
-            && rule.matcher.rule_sets.iter().copied().any(|rule_set| {
-                rule_set_match_set(&state.snapshot, rule_set)
-                    .is_some_and(|set| set.capabilities().ip_cidr)
-            })
-        {
-            state.pending_rule = Some(rule_index);
-            return Some(DnsPolicyStep::EvaluateResponse {
+        let step = match rule.action {
+            DnsPolicyAction::Evaluate(route) => {
+                state.pending_rule = Some(rule_index);
+                return Ok(Some(DnsPolicyStep::EvaluateResponse {
+                    server: route.server,
+                    strategy: route.strategy,
+                }));
+            }
+            DnsPolicyAction::Respond => {
+                let route = state.latest_route.ok_or_else(|| missing_response(state))?;
+                DnsPolicyStep::AcceptResponse {
+                    server: route.server,
+                    strategy: route.strategy,
+                }
+            }
+            DnsPolicyAction::Reject => DnsPolicyStep::Reject,
+            DnsPolicyAction::Route(route) => DnsPolicyStep::RouteImmediately {
                 server: route.server,
                 strategy: route.strategy,
-            });
-        }
+            },
+        };
+        state.finished = true;
+        return Ok(Some(step));
     }
     state.finished = true;
-    Some(DnsPolicyStep::Final {
+    Ok(Some(DnsPolicyStep::Final {
         server: program.final_route.server,
         strategy: program.final_route.strategy,
-    })
+    }))
 }
 
 impl DnsPolicyProgram {
@@ -360,16 +402,6 @@ impl DnsPolicyProgram {
             }
         };
         candidates.next_candidate(field, cursor, query, snapshot)
-    }
-}
-
-fn immediate_step(action: DnsPolicyAction) -> DnsPolicyStep {
-    match action {
-        DnsPolicyAction::Reject => DnsPolicyStep::Reject,
-        DnsPolicyAction::Route(route) => DnsPolicyStep::RouteImmediately {
-            server: route.server,
-            strategy: route.strategy,
-        },
     }
 }
 

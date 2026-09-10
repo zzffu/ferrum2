@@ -6,8 +6,8 @@ use std::sync::Arc;
 use ferrum2_core::CanonicalDomain;
 use ferrum2_core::route::Network;
 use ferrum2_rule::{
-    CompiledMatchSet, DnsPolicyMatcherDescriptor, DnsPolicyMatcherDescriptorParts, DomainMatchType,
-    RuleSetId,
+    CompiledMatchSet, DnsPolicyMatchMode, DnsPolicyMatcherDescriptor,
+    DnsPolicyMatcherDescriptorParts, DomainMatchType, RuleSetId,
 };
 use hickory_proto::rr::{Name, RecordType};
 
@@ -39,6 +39,8 @@ impl DnsPolicyRoute {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DnsPolicyAction {
     Route(DnsPolicyRoute),
+    Evaluate(DnsPolicyRoute),
+    Respond,
     Reject,
 }
 
@@ -409,16 +411,6 @@ impl DnsPolicyMatcher {
         ports: Vec<NonZeroU16>,
         port_ranges: Vec<DnsPortRange>,
     ) -> Result<Self, DnsPolicyCompileError> {
-        if query_fields.is_empty()
-            && rule_sets.is_empty()
-            && inbounds.is_empty()
-            && networks.is_empty()
-            && qtypes.is_empty()
-            && ports.is_empty()
-            && port_ranges.is_empty()
-        {
-            return Err(DnsPolicyCompileError::EmptyRule);
-        }
         if query_fields.iter().any(|field| {
             let capabilities = field.capabilities();
             field.is_empty()
@@ -597,12 +589,25 @@ impl fmt::Debug for DnsPolicyMatcher {
 /// One ordered DNS policy row.
 pub struct DnsPolicyRule {
     pub(crate) matcher: DnsPolicyMatcher,
+    pub(crate) mode: DnsPolicyMatchMode,
     pub(super) action: DnsPolicyAction,
 }
 
 impl DnsPolicyRule {
-    pub const fn new(matcher: DnsPolicyMatcher, action: DnsPolicyAction) -> Self {
-        Self { matcher, action }
+    pub const fn new(
+        matcher: DnsPolicyMatcher,
+        mode: DnsPolicyMatchMode,
+        action: DnsPolicyAction,
+    ) -> Self {
+        Self {
+            matcher,
+            mode,
+            action,
+        }
+    }
+
+    pub const fn mode(&self) -> DnsPolicyMatchMode {
+        self.mode
     }
 }
 
@@ -615,12 +620,14 @@ impl fmt::Debug for DnsPolicyRule {
 /// Fallible DNS policy compilation failures without rule contents or names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DnsPolicyCompileError {
-    EmptyRule,
     InvalidQueryMatchSet,
     DuplicateConstraint,
     InvalidPortRange,
     UnknownRuleSet,
-    ResponseDependentReject,
+    QueryModeCidrRuleSet,
+    ResponseModeRequiresCidrRuleSet,
+    ResponseMatchWithoutEvaluate,
+    RespondWithoutEvaluate,
     Allocation,
     IndexOverflow,
     Internal,
@@ -629,14 +636,20 @@ pub enum DnsPolicyCompileError {
 impl fmt::Display for DnsPolicyCompileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::EmptyRule => "DNS policy rule has no matcher",
             Self::InvalidQueryMatchSet => "DNS query field has an unsupported matcher",
             Self::DuplicateConstraint => "DNS policy field contains a duplicate constraint",
             Self::InvalidPortRange => "DNS policy port range is invalid",
             Self::UnknownRuleSet => "DNS policy references an unknown RuleSet",
-            Self::ResponseDependentReject => {
-                "DNS reject policy cannot depend on response address matching"
+            Self::QueryModeCidrRuleSet => {
+                "DNS query matching cannot reference a CIDR-capable RuleSet"
             }
+            Self::ResponseModeRequiresCidrRuleSet => {
+                "DNS response matching requires a CIDR-capable RuleSet"
+            }
+            Self::ResponseMatchWithoutEvaluate => {
+                "DNS response matching requires a preceding evaluate action"
+            }
+            Self::RespondWithoutEvaluate => "DNS respond requires a preceding evaluate action",
             Self::Allocation => "DNS policy allocation failed",
             Self::IndexOverflow => "DNS policy index capacity was exceeded",
             Self::Internal => "DNS policy compilation failed",

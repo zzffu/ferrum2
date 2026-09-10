@@ -421,6 +421,8 @@ pub struct PreparedRouteRuleSets {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparedDnsAction {
     Route { server: usize },
+    Evaluate { server: usize },
+    Respond,
     Reject,
 }
 
@@ -439,6 +441,7 @@ pub(super) struct PreparedDnsMatcherDraft {
 pub struct PreparedDnsRule {
     pub rule_index: usize,
     pub rule_sets: Vec<usize>,
+    pub mode: ferrum2_rule::DnsPolicyMatchMode,
     pub action: PreparedDnsAction,
     pub strategy: DnsStrategy,
     pub(super) matcher: PreparedDnsMatcherDraft,

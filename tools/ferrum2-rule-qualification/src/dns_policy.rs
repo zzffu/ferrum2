@@ -9,7 +9,8 @@ use ferrum2_dns::{
     DnsPolicyRule, DnsPolicyStep, DnsServerId, DnsStrategy,
 };
 use ferrum2_rule::{
-    MatchSetBuilder, RuleEngineSnapshot, RuleEngineSnapshotBuilder, RuleProgramMode,
+    DnsPolicyMatchMode, MatchSetBuilder, RuleEngineSnapshot, RuleEngineSnapshotBuilder,
+    RuleProgramMode,
 };
 use hickory_proto::op::{Message, MessageType, OpCode};
 use hickory_proto::rr::rdata::A;
@@ -186,6 +187,7 @@ pub(crate) fn build_dns_qname_fixture(
         );
         rules.push(DnsPolicyRule::new(
             matcher,
+            DnsPolicyMatchMode::Query,
             DnsPolicyAction::Route(DnsPolicyRoute::new(server, DnsStrategy::PreferIpv4)),
         ));
     }
@@ -238,10 +240,19 @@ pub(crate) fn run_dns_cnip(
         let mut snapshot_builder = RuleEngineSnapshotBuilder::new(1);
         let mut rules = Vec::new();
         rules
-            .try_reserve_exact(count)
+            .try_reserve_exact(count + 2)
             .map_err(|_| QualificationError::new("cnip rule allocation failed"))?;
         let local = DnsPolicyRoute::new(DnsServerId::new(7), DnsStrategy::Ipv4Only);
         let final_route = DnsPolicyRoute::new(DnsServerId::new(8), DnsStrategy::PreferIpv4);
+        let unconditional = || {
+            DnsPolicyMatcher::try_new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                .map_err(|error| QualificationError::new(format!("cnip matcher failed: {error}")))
+        };
+        rules.push(DnsPolicyRule::new(
+            unconditional()?,
+            DnsPolicyMatchMode::Query,
+            DnsPolicyAction::Evaluate(final_route),
+        ));
         for index in 0..count {
             let mut builder = MatchSetBuilder::new();
             builder
@@ -267,8 +278,17 @@ pub(crate) fn run_dns_cnip(
                 Vec::new(),
             )
             .map_err(|error| QualificationError::new(format!("cnip matcher failed: {error}")))?;
-            rules.push(DnsPolicyRule::new(matcher, DnsPolicyAction::Route(local)));
+            rules.push(DnsPolicyRule::new(
+                matcher,
+                DnsPolicyMatchMode::Response,
+                DnsPolicyAction::Route(local),
+            ));
         }
+        rules.push(DnsPolicyRule::new(
+            unconditional()?,
+            DnsPolicyMatchMode::Query,
+            DnsPolicyAction::Respond,
+        ));
         let snapshot =
             Arc::new(snapshot_builder.build().map_err(|error| {
                 QualificationError::new(format!("cnip snapshot failed: {error}"))
@@ -415,15 +435,29 @@ pub(crate) fn run_dns_continuation(
         let final_route = DnsPolicyRoute::new(DnsServerId::new(12), DnsStrategy::PreferIpv4);
         let mut rules = Vec::new();
         rules
-            .try_reserve_exact(rule_count)
+            .try_reserve_exact(rule_count + 1)
             .map_err(|_| QualificationError::new("continuation rule allocation failed"))?;
+        let unconditional =
+            DnsPolicyMatcher::try_new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                .map_err(|error| {
+                QualificationError::new(format!("continuation matcher failed: {error}"))
+            })?;
+        rules.push(DnsPolicyRule::new(
+            unconditional,
+            DnsPolicyMatchMode::Query,
+            DnsPolicyAction::Evaluate(local),
+        ));
         for id in ids {
             let matcher =
                 DnsPolicyMatcher::try_new(Vec::new(), vec![id], Vec::new(), Vec::new(), Vec::new())
                     .map_err(|error| {
                         QualificationError::new(format!("continuation matcher failed: {error}"))
                     })?;
-            rules.push(DnsPolicyRule::new(matcher, DnsPolicyAction::Route(local)));
+            rules.push(DnsPolicyRule::new(
+                matcher,
+                DnsPolicyMatchMode::Response,
+                DnsPolicyAction::Respond,
+            ));
         }
         let snapshot = Arc::new(snapshot_builder.build().map_err(|error| {
             QualificationError::new(format!("continuation snapshot failed: {error}"))

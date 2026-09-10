@@ -309,6 +309,8 @@ pub(super) struct RawDnsRoute {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawDnsRouteRule {
+    #[serde(default)]
+    pub(super) match_response: bool,
     pub(super) inbound: Option<ScalarOrList<String>>,
     pub(super) network: Option<ScalarOrList<String>>,
     pub(super) qname: Option<ScalarOrList<String>>,

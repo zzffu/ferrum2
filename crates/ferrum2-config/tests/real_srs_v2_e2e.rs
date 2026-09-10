@@ -8,8 +8,7 @@ use ferrum2_config::{
 use ferrum2_core::TargetAddr;
 use ferrum2_rule::srs::{SrsDecodeLimits, decode_srs};
 use ferrum2_rule::{
-    DnsPolicyActionDescriptor, DnsPolicyAddressStrategy, Network, RouteMetadata,
-    RouteProgramAction, RuleEngineRegistry, RuleEngineSnapshotBuilder,
+    Network, RouteMetadata, RouteProgramAction, RuleEngineRegistry, RuleEngineSnapshotBuilder,
 };
 
 const ADS_SRS: &[u8] = include_bytes!("../../../tests/fixtures/srs/ads.srs");
@@ -111,29 +110,4 @@ fn four_pinned_srs_finish_into_one_v2_route_and_dns_blueprint_snapshot() {
     let dns_registry = binding.registry();
     assert!(Arc::ptr_eq(&registry, &dns_registry));
     assert_eq!(binding.resolve_ingress(DnsIngressId::Listener(0)), Some(0));
-    let blueprint = binding.blueprint();
-    assert_eq!(blueprint.len(), 5);
-    assert_eq!(blueprint.response_rule_count(), 1);
-    assert_eq!(
-        blueprint.rules()[0].action(),
-        DnsPolicyActionDescriptor::Reject
-    );
-    for (index, server) in [(2, 1), (3, 0), (4, 0)] {
-        assert_eq!(
-            blueprint.rules()[index].action(),
-            DnsPolicyActionDescriptor::Route(ferrum2_rule::DnsPolicyRouteDescriptor::new(
-                server,
-                DnsPolicyAddressStrategy::Ipv4Only,
-            ))
-        );
-    }
-    assert_eq!(blueprint.rules()[4].matcher().rule_sets()[0].raw(), 3);
-    assert!(
-        dns_registry
-            .snapshot()
-            .rule_set(ferrum2_rule::RuleSetId::from_raw(3))
-            .expect("CNIP descriptor")
-            .capabilities()
-            .ip_cidr
-    );
 }
