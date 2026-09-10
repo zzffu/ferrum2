@@ -75,29 +75,56 @@ async fn abandoned_native_call_keeps_capacity_and_shutdown_join_is_retryable() {
     assert_eq!(owner.shutdown().await, report);
 }
 
-struct FinishedLookup(sync_mpsc::Sender<()>);
-impl NativeLookup for FinishedLookup {
-    fn resolve(&self, _host: &str, port: u16) -> Result<Candidates, SystemResolutionError> {
-        let result = Candidates::collect([SocketAddr::from(([192, 0, 2, 2], port))]);
-        self.0.send(()).unwrap();
-        Ok(result)
+struct DispatchWake(Notify);
+impl std::task::Wake for DispatchWake {
+    fn wake(self: Arc<Self>) {
+        self.0.notify_one();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.notify_one();
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn completed_but_unjoined_work_retains_its_slot() {
-    let (finished, receive) = sync_mpsc::channel();
-    let (resolver, mut owner) = start(
-        NonZeroU16::new(1).unwrap(),
-        Duration::from_secs(1),
-        Arc::new(FinishedLookup(finished)),
-    );
+    let (release, receive_native) = sync_mpsc::channel();
+    let native = Arc::new(GatedLookup {
+        started: Notify::new(),
+        release: Mutex::new(receive_native),
+        calls: AtomicUsize::new(0),
+    });
+    let shared = Arc::new(Shared {
+        slots: Arc::new(Semaphore::new(1)),
+        stop: Notify::new(),
+        timeout: Duration::from_secs(1),
+    });
+    let (send, receive) = mpsc::channel(1);
+    let resolver = SystemResolver {
+        send,
+        shared: shared.clone(),
+    };
+    let mut dispatcher = Box::pin(dispatch(receive, shared.clone(), native.clone()));
+    let wake = Arc::new(DispatchWake(Notify::new()));
+    let waker = std::task::Waker::from(wake.clone());
     let mut request =
         Box::pin(resolver.resolve("native.test", 80, Instant::now() + Duration::from_secs(1)));
     assert!(futures_util::poll!(&mut request).is_pending());
-    tokio::task::yield_now().await;
-    // Keep the dispatcher off this current-thread runtime until native completion.
-    receive.recv_timeout(Duration::from_secs(2)).unwrap();
+    // Advance the real dispatcher only until the gated native task is pending.
+    assert!(
+        dispatcher
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+            .is_pending()
+    );
+    native.started.notified().await;
+    // Discard any insertion wake; after release, only task completion can wake it.
+    let _ = futures_util::FutureExt::now_or_never(wake.0.notified());
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), wake.0.notified())
+        .await
+        .unwrap();
+    // Native completion has woken the dispatcher, but it has not been polled to join.
     assert_eq!(
         resolver
             .resolve(
@@ -108,14 +135,34 @@ async fn completed_but_unjoined_work_retains_its_slot() {
             .await,
         Err(SystemResolutionError::Busy)
     );
+    let (answers, report) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(
+            async {
+                let first = request.await;
+                release.send(()).unwrap();
+                let second = resolver
+                    .resolve(
+                        "replacement.test",
+                        81,
+                        Instant::now() + Duration::from_secs(1),
+                    )
+                    .await;
+                shared.close();
+                (first, second)
+            },
+            dispatcher
+        )
+    })
+    .await
+    .unwrap();
     assert_eq!(
-        request.await,
-        Ok(vec![SocketAddr::from(([192, 0, 2, 2], 80))])
+        answers,
+        (
+            Ok(vec![SocketAddr::from(([192, 0, 2, 1], 80))]),
+            Ok(vec![SocketAddr::from(([192, 0, 2, 1], 81))]),
+        )
     );
-    assert_eq!(
-        owner.shutdown().await,
-        Ok(SystemResolutionReport::default())
-    );
+    assert_eq!(report, Ok(SystemResolutionReport::default()));
 }
 
 struct PanickingLookup;
