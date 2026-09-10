@@ -3,6 +3,7 @@
 //! Connection leases never lock a shared table when transferring bytes. Each generation
 //! owns separate counters, so retained old leases cannot affect a replacement runtime.
 
+mod attribution;
 mod connection;
 mod io;
 pub mod wire;
@@ -85,6 +86,7 @@ struct State {
     runtime: String,
     error: Option<String>,
     catalog: Value,
+    connection_catalog: Arc<attribution::RouteCatalog>,
     domains: Value,
     resources: Value,
     cpu: Option<f64>,
@@ -122,6 +124,7 @@ impl Dashboard {
                 runtime: "stopped".into(),
                 error: None,
                 catalog: Value::Null,
+                connection_catalog: Arc::default(),
                 domains: json!({}),
                 resources: json!({}),
                 cpu: None,
@@ -143,6 +146,7 @@ impl Dashboard {
     pub fn start_generation(&self, generation: u64) {
         let mut state = lock(&self.0.state);
         state.generation = Arc::new(Generation::new(generation));
+        state.connection_catalog = Arc::default();
         state.runtime = "starting".into();
         state.error = None;
         state.domains = json!({});
@@ -168,6 +172,18 @@ impl Dashboard {
     /// Publishes the caller's redacted catalog matching the browser protocol.
     pub fn set_catalog(&self, catalog: Value) {
         lock(&self.0.state).catalog = catalog;
+    }
+
+    /// Whether sensitive connection endpoints and route conditions may be captured.
+    pub fn connection_details_enabled(&self) -> bool {
+        self.0.details
+    }
+
+    /// Captures immutable names and rule descriptions for subsequently admitted connections.
+    /// This private projection is never published as the browser's configuration catalog.
+    pub fn set_connection_catalog(&self, catalog: Value) {
+        lock(&self.0.state).connection_catalog =
+            Arc::new(attribution::RouteCatalog::new(&catalog, self.0.details));
     }
 
     /// Publishes observations/capabilities from the current generation's real domain owners.
@@ -233,9 +249,12 @@ impl Dashboard {
     /// At most 4,096 live detail rows, 512 completed rows (five-minute TTL), and
     /// 1,024 logs are retained. Hidden live leases still contribute to totals.
     pub fn begin(&self, metadata: ConnectionMetadata) -> Connection {
-        let generation = lock(&self.0.state).generation.clone();
+        let (generation, catalog) = {
+            let state = lock(&self.0.state);
+            (state.generation.clone(), state.connection_catalog.clone())
+        };
         let sequence = self.0.sequence.fetch_add(1, Ordering::Relaxed);
-        Connection::new(generation, sequence, self.0.details, metadata)
+        Connection::new(generation, sequence, self.0.details, metadata, catalog)
     }
 
     /// Requests cooperative cancellation of precisely these current-generation IDs.

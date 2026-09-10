@@ -165,8 +165,7 @@ pub(super) fn observe_route(
     rule_index: Option<usize>,
 ) {
     if let Some(observation) = observation {
-        let rule = rule_index.map_or_else(|| "final".to_owned(), |index| format!("rule[{index}]"));
-        observation.set_route(Some(rule), Some(format!("{:?}", plan.hops())));
+        observation.set_selected_route(rule_index, plan.hops());
     }
 }
 

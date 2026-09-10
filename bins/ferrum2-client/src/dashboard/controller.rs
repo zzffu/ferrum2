@@ -133,12 +133,18 @@ impl Controller {
             return Err("config.tun_unsupported");
         }
         let catalog = catalog(source).map_err(|error| error.code())?;
+        let connection_catalog = if self.dashboard.connection_details_enabled() {
+            super::config::connection_catalog(source).map_err(|error| error.code())?
+        } else {
+            catalog.clone()
+        };
         self.generation = self
             .generation
             .checked_add(1)
             .ok_or("runtime.generation_exhausted")?;
         self.dashboard.start_generation(self.generation);
         self.dashboard.set_catalog(catalog);
+        self.dashboard.set_connection_catalog(connection_catalog);
         self.dashboard.set_runtime("starting", None);
         self.running_revision = Some(revision);
         let management = Management {

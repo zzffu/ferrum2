@@ -220,8 +220,16 @@ export function Connections() {
     !history &&
     !rows.some((c) => c.generation !== s.generation) &&
     s.domains.capabilities?.includes("connections.close");
+  function switchHistory(next: boolean) {
+    if (next === history) return;
+    setHistory(next);
+    setFrozen(null);
+    setSelected(new Set());
+    setConfirmation(null);
+    setPage(0);
+  }
   function confirm(ids: string[]) {
-    if (s && ids.length)
+    if (canClose && s && ids.length)
       setConfirmation({ ids: [...ids], generation: s.generation });
   }
   return (
@@ -234,10 +242,30 @@ export function Connections() {
           </button>
         }
       >
+        <div
+          className="segments connection-modes"
+          role="group"
+          aria-label="连接记录类型"
+        >
+          <button
+            type="button"
+            aria-pressed={!history}
+            onClick={() => switchHistory(false)}
+          >
+            活动连接 <span>{s?.connections.length ?? 0}</span>
+          </button>
+          <button
+            type="button"
+            aria-pressed={history}
+            onClick={() => switchHistory(true)}
+          >
+            已关闭记录 <span>{s?.history.length ?? 0}</span>
+          </button>
+        </div>
         <div className="toolbar">
           <input
             aria-label="搜索连接"
-            placeholder="搜索目标、入口、路由或 ID"
+            placeholder="搜索目标、入口、出站、路由或 ID"
             value={search}
             onChange={(e) => {
               setSearch(e.target.value);
@@ -265,19 +293,6 @@ export function Connections() {
             <option value="bytes">总流量 ↓</option>
             <option value="target">目标 A–Z</option>
           </select>
-          <label>
-            <input
-              type="checkbox"
-              checked={history}
-              onChange={(e) => {
-                setHistory(e.target.checked);
-                setFrozen(null);
-                setSelected(new Set());
-                setPage(0);
-              }}
-            />
-            关闭历史
-          </label>
         </div>
         <div className="actions">
           <button
@@ -304,9 +319,17 @@ export function Connections() {
               !canClose ||
               !s?.domains.capabilities?.includes("connections.close_all")
             }
-            onClick={() =>
-              setConfirmation({ ids: [], generation: s!.generation, all: true })
-            }
+            onClick={() => {
+              if (
+                canClose &&
+                s?.domains.capabilities?.includes("connections.close_all")
+              )
+                setConfirmation({
+                  ids: [],
+                  generation: s.generation,
+                  all: true,
+                });
+            }}
           >
             关闭所有活动连接
           </button>
@@ -330,7 +353,7 @@ export function Connections() {
         )}
         {s && !s.details && (
           <p className="notice">
-            未开启敏感详情；源地址、目标与路由可能不可用。
+            未开启敏感详情；源地址、目标与路由条件不会展示，出站名称仍可用。
           </p>
         )}
         {s && s.omitted_connections > 0 && (
@@ -361,6 +384,7 @@ export function Connections() {
                       <input
                         type="checkbox"
                         aria-label={`选择连接 ${c.id}`}
+                        disabled={!canClose}
                         checked={selected.has(`${c.generation}:${c.id}`)}
                         onChange={(e) =>
                           setSelected((prev) => {
@@ -383,9 +407,19 @@ export function Connections() {
                         <small>→ {c.target ?? "未提供"}</small>
                       </td>
                     )}
-                    <td>
-                      {c.outbound ?? "未提供"}
-                      <small>{c.route ?? "未提供"}</small>
+                    <td className="connection-provenance">
+                      <strong
+                        className="connection-outbound"
+                        title={c.outbound ?? "未记录"}
+                      >
+                        {c.outbound ?? "未记录"}
+                      </strong>
+                      <small
+                        className="connection-route"
+                        title={c.route ?? "未记录"}
+                      >
+                        {c.route ?? "未记录"}
+                      </small>
                     </td>
                     <td>
                       {`${bytes(c.upload_bytes)} · ${bytes(c.upload_rate)}/s`}
@@ -427,39 +461,59 @@ export function Connections() {
                 关闭
               </button>
             </div>
+            <dl className="connection-detail-provenance">
+              <dt>出站</dt>
+              <dd>{detail.outbound ?? "未记录"}</dd>
+              <dt>路由命中</dt>
+              <dd>{detail.route ?? "未记录"}</dd>
+            </dl>
+            {(!detail.outbound || !detail.route) && (
+              <p>
+                未记录表示此连接快照没有相应信息；未开启敏感详情时不展示路由条件。
+              </p>
+            )}
             <Structured value={detail} />
           </section>
         </div>
       )}
-      {confirmation && (
-        <Confirm
-          title={
-            confirmation.all
-              ? "确认关闭所有活动连接？"
-              : `确认关闭 ${confirmation.ids.length} 条连接？`
-          }
-          busy={busy}
-          close={() => setConfirmation(null)}
-          accept={() => {
-            const fixed = confirmation;
-            setConfirmation(null);
-            void action.run(
-              fixed.all
-                ? { action: "connections.close_all" }
-                : { action: "connections.close", ids: fixed.ids },
-              fixed.generation,
-            );
-          }}
-        >
-          <p>
-            {confirmation.all
-              ? "关闭执行时该运行代的全部活动连接，包括未展示的连接和确认后新到达的连接。"
-              : "仅发送以下固定 ID。"}
-            运行代变化将拒绝请求；取消信号不代表清理已经完成。
-          </p>
-          <Structured value={confirmation} />
-        </Confirm>
-      )}
+      {confirmation &&
+        canClose &&
+        confirmation.generation === s?.generation && (
+          <Confirm
+            title={
+              confirmation.all
+                ? "确认关闭所有活动连接？"
+                : `确认关闭 ${confirmation.ids.length} 条连接？`
+            }
+            busy={busy}
+            close={() => setConfirmation(null)}
+            accept={() => {
+              const fixed = confirmation;
+              setConfirmation(null);
+              if (
+                !canClose ||
+                fixed.generation !== s?.generation ||
+                (fixed.all &&
+                  !s.domains.capabilities?.includes("connections.close_all"))
+              )
+                return;
+              void action.run(
+                fixed.all
+                  ? { action: "connections.close_all" }
+                  : { action: "connections.close", ids: fixed.ids },
+                fixed.generation,
+              );
+            }}
+          >
+            <p>
+              {confirmation.all
+                ? "关闭执行时该运行代的全部活动连接，包括未展示的连接和确认后新到达的连接。"
+                : "仅发送以下固定 ID。"}
+              运行代变化将拒绝请求；取消信号不代表清理已经完成。
+            </p>
+            <Structured value={confirmation} />
+          </Confirm>
+        )}
     </>
   );
 }

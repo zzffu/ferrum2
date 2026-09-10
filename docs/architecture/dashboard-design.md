@@ -98,7 +98,11 @@ Report runtime generation and lifecycle, client version, uptime, separate inboun
 
 ### Connections
 
-Stable generation-qualified IDs, protocol/inbound, optional sensitive source/target metadata, selected ordered-rule index/default egress and frozen concrete hop IDs, duration, live counters/rates and terminal status. Filtering/sorting uses bounded 50-row pagination. Close one, selected IDs, a fixed filtered set, or all active connections with confirmation.
+Stable generation-qualified IDs, protocol/inbound, optional sensitive source/target metadata, duration, live counters/rates and terminal status. Outbound attribution uses the concrete selected hop tags in order, not internal indices or the selector's later choice. With `--dashboard-details`, route attribution includes the one-based rule number, configured match conditions and action/target; default routing names `route.final`. Explicit DNS hijack, configured TUN synthetic DNS interception and rejection are distinguished. Missing attribution stays unrecorded rather than being inferred.
+
+Each connection captures immutable configuration attribution at admission. Selected paths and retained closed rows are never reinterpreted against a later selector choice or configuration catalog; runtime generation replacement still clears the existing history as before. Rule conditions are not retained without sensitive details. TUN UDP attribution remains association-level: once ordinary traffic selects its frozen route, that route replaces initial synthetic-DNS-only attribution, not each subsequent packet.
+
+The `活动连接` / `已关闭记录` buttons select separate bounded lists with counts. Switching clears frozen display, selected IDs, pending closure confirmation and pagination, while preserving search/protocol filters. Filtering and sorting happen before 50-row pagination, so search and confirmed filtered closure cover matching rows across pages, not just the visible page. Long rule descriptions are bounded in the list, available in full via hover and the labeled connection detail. Close one, selected IDs, a fixed filtered set, or all active connections with confirmation; history cannot issue closure commands.
 
 There are at most 4,096 visible live rows, 512 five-minute history rows and 1,024 log entries. Aggregate TCP/UDP counts include omitted rows. A 65,536-entry weak index supports additional individual cancellations; close-all uses a generation broadcast and reaches even unindexed leases. New admissions after that broadcast are unaffected.
 
@@ -170,6 +174,8 @@ Required scenarios: one shipping HTML with no external asset fetches; authentica
 Format/lint/test affected packages once integration is settled. The client test binary remains compile-only in ordinary gates. Run safe shared-crate tests and a real loopback process/browser smoke instead. Privileged TUN correctness requires its existing dedicated host runner and explicit authorization; report that verification limitation.
 
 ### Executed evidence
+
+- Connection attribution update (2026-09-10): the real isolated loopback client reported named concrete outbounds, matched TCP/UDP rule conditions, default routing, TCP/UDP DNS hijack and TCP rejection. Switching `manual` from `direct-a` to `direct-b` preserved the existing TCP path and its closed-history attribution while a new flow used `direct-b`. Chromium verified the newly embedded page with those live records; a separate 56-row browser fixture verified cross-page search, full long-rule details and the active/history switch at desktop and 390-pixel widths. Dashboard tests, client build/all-feature compile-only tests, affected Clippy, formatting and embedded build parity passed. No privileged TUN runtime was exercised for this update.
 
 - Windows MSVC client/server builds, client all-feature test-binary compilation, affected-package Clippy and workspace formatting checks succeeded. The client test executable was not run.
 - Shared dashboard/core/rule/RuleSet/config/DNS/observability and server suites: 388 passing tests. Hosted-safe Windows-platform and TUN suites: 75 and 139 passing tests. Selected M0 process/contracts suites: 52 passing tests, three ignored.

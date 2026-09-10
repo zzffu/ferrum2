@@ -124,6 +124,7 @@ pub(super) async fn client_connection(
         }
         ClientTerminalRoute::Reject => {
             if let Some(observation) = &observation {
+                observation.set_terminal_route(route_scratch.selected_rule_index(), "拒绝");
                 observation.finish("rejected");
             }
             let _ = reply.failed(ConnectErrorKind::PolicyDenied).await;
@@ -131,7 +132,7 @@ pub(super) async fn client_connection(
         }
         ClientTerminalRoute::HijackDns => {
             if let Some(observation) = &observation {
-                observation.set_route(Some("hijack_dns".into()), None);
+                observation.set_terminal_route(route_scratch.selected_rule_index(), "DNS 接管");
             }
             let Some(proxy) = context
                 .dns

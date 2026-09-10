@@ -28,6 +28,9 @@ pub(super) async fn run_tcp<IO>(
     let observed_target = TargetAddr::ip(target).ok();
     let observation = context.observe("tcp", "tun", None, observed_target.as_ref());
     if synthetic_dns.matches(target) {
+        if let Some(observation) = &observation {
+            observation.set_tun_dns_route();
+        }
         let Some(proxy) = context
             .dns
             .as_ref()
@@ -80,12 +83,13 @@ pub(super) async fn run_tcp<IO>(
     match selection.terminal {
         ClientTerminalRoute::Reject => {
             if let Some(observation) = &observation {
+                observation.set_terminal_route(selection.rule_index, "拒绝");
                 observation.finish("rejected");
             }
         }
         ClientTerminalRoute::HijackDns => {
             if let Some(observation) = &observation {
-                observation.set_route(Some("hijack_dns".into()), None);
+                observation.set_terminal_route(selection.rule_index, "DNS 接管");
             }
             let Some(proxy) = context
                 .dns

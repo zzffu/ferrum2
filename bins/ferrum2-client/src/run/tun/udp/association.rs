@@ -64,6 +64,7 @@ pub(super) struct DispatchServices {
 pub(super) struct OrdinaryGeneration {
     pub(super) value: RouteGeneration,
     pub(super) changed: RouteGenerationChange,
+    rule_index: Option<usize>,
 }
 
 enum OrdinaryTerminal {
@@ -157,6 +158,7 @@ impl DispatchServices {
         let mut generation = OrdinaryGeneration {
             value,
             changed: self.routing.watch_route_generation_from(value),
+            rule_index: scratch.selected_rule_index(),
         };
         let terminal = match plan {
             TunUdpPlan::Route {
@@ -185,12 +187,17 @@ impl DispatchServices {
             }
             TunUdpPlan::HijackDns => {
                 if let Some(observation) = &self.observation {
-                    observation.set_route(Some("hijack_dns".into()), None);
+                    observation.set_terminal_route(scratch.selected_rule_index(), "DNS 接管");
                 }
                 self.proxy.as_ref()?;
                 OrdinaryTerminal::HijackDns
             }
-            TunUdpPlan::Reject => OrdinaryTerminal::Reject,
+            TunUdpPlan::Reject => {
+                if let Some(observation) = &self.observation {
+                    observation.set_terminal_route(scratch.selected_rule_index(), "拒绝");
+                }
+                OrdinaryTerminal::Reject
+            }
             TunUdpPlan::SyntheticDns => return None,
         };
         self.current(Some(&generation))
@@ -254,9 +261,22 @@ pub(in crate::run::tun) async fn run_udp(
                 route.observe_path(observation);
             }
             Some(OrdinaryTerminal::HijackDns) => {
-                observation.set_route(Some("hijack_dns".into()), None)
+                observation.set_terminal_route(
+                    ordinary
+                        .generation()
+                        .and_then(|generation| generation.rule_index),
+                    "DNS 接管",
+                );
             }
-            Some(OrdinaryTerminal::Reject) | None => {}
+            Some(OrdinaryTerminal::Reject) => {
+                observation.set_terminal_route(
+                    ordinary
+                        .generation()
+                        .and_then(|generation| generation.rule_index),
+                    "拒绝",
+                );
+            }
+            None => observation.set_tun_dns_route(),
         }
     }
     let response_sink = association.response_sink();

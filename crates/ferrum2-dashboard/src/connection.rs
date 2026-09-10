@@ -88,6 +88,7 @@ struct Lease {
     record: Arc<Record>,
     tracked: bool,
     details: bool,
+    catalog: Arc<crate::attribution::RouteCatalog>,
     finished: AtomicBool,
     cancel_epoch: u64,
 }
@@ -138,6 +139,7 @@ impl Connection {
         sequence: u64,
         details: bool,
         metadata: ConnectionMetadata,
+        catalog: Arc<crate::attribution::RouteCatalog>,
     ) -> Self {
         let started = Instant::now();
         let record = Arc::new(Record {
@@ -186,6 +188,7 @@ impl Connection {
             record,
             tracked,
             details,
+            catalog,
             cancel_epoch,
             finished: AtomicBool::new(false),
         }))
@@ -208,6 +211,26 @@ impl Connection {
         let mut attribution = lock(&self.0.record.attribution);
         attribution.route = route;
         attribution.outbound = outbound;
+    }
+
+    /// Records the concrete selected hop indices, never a selector's later current value.
+    pub fn set_selected_route(&self, rule_index: Option<usize>, hops: &[usize]) {
+        self.set_route(self.0.catalog.rule(rule_index), self.0.catalog.path(hops));
+    }
+
+    /// Records a terminal policy action without pretending it opened an outbound.
+    pub fn set_terminal_route(&self, rule_index: Option<usize>, outbound: &'static str) {
+        self.set_route(self.0.catalog.rule(rule_index), Some(outbound.to_owned()));
+    }
+
+    /// TUN synthetic DNS preprocessing bypasses the ordinary route program.
+    pub fn set_tun_dns_route(&self) {
+        self.set_route(
+            self.0
+                .details
+                .then(|| "TUN 配置 DNS 拦截（合成 DNS 地址，端口 53）".to_owned()),
+            Some("DNS 接管".to_owned()),
+        );
     }
 
     /// Adds successfully transferred upload bytes. No shared table lock is acquired.

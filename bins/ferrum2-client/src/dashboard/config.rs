@@ -205,6 +205,15 @@ fn validate(source: &str) -> Result<PreparedClientV2, ConfigStoreError> {
 /// A separate, allowlisted projection; never use this value as editable configuration source.
 /// Endpoint addresses, URLs, TLS/auth objects, paths and credentials are never copied.
 pub fn catalog(source: &str) -> Result<Value, ConfigStoreError> {
+    project_catalog(source, false)
+}
+
+/// Private generation attribution, including explicitly enabled sensitive match conditions.
+pub(super) fn connection_catalog(source: &str) -> Result<Value, ConfigStoreError> {
+    project_catalog(source, true)
+}
+
+fn project_catalog(source: &str, connection_details: bool) -> Result<Value, ConfigStoreError> {
     validate(source)?;
     let mut root: toml::Value = toml::from_str(source).map_err(|_| ConfigStoreError::Invalid)?;
     let mut route = project(root.get("route"), &["final", "auto_detect_interface"]);
@@ -222,6 +231,36 @@ pub fn catalog(source: &str) -> Result<Value, ConfigStoreError> {
             "sniffers",
         ],
     );
+    if connection_details
+        && let Some(rules) = root
+            .get("route")
+            .and_then(|route| route.get("rules"))
+            .and_then(toml::Value::as_array)
+        && let Some(projected) = route["rules"].as_array_mut()
+    {
+        for (source, destination) in rules.iter().zip(projected) {
+            let conditions = project(
+                Some(source),
+                &[
+                    "domain",
+                    "domain_suffix",
+                    "domain_keyword",
+                    "ip",
+                    "ip_cidr",
+                    "server",
+                ],
+            );
+            destination
+                .as_object_mut()
+                .expect("projected rule object")
+                .extend(
+                    conditions
+                        .as_object()
+                        .expect("projected conditions")
+                        .clone(),
+                );
+        }
+    }
     route["rule_set"] = rows(
         root.get("route").and_then(|v| v.get("rule_set")),
         &["tag", "type", "format", "update_interval_seconds"],

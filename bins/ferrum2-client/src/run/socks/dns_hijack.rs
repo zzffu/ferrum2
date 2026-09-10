@@ -11,13 +11,19 @@ pub(super) enum DnsDisposition {
     Terminated,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct DnsRoute<'a> {
+    pub(super) inbound: usize,
+    pub(super) proxy: &'a DnsProxy,
+    pub(super) rule_index: Option<usize>,
+}
+
 pub(super) async fn relay_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
     endpoint: &mut SocksUdpEndpoint,
     control: &mut SocksStream<IO>,
     cancellation: &mut CancellationToken,
     context: &ClientContext,
-    inbound: usize,
-    proxy: &DnsProxy,
+    route: DnsRoute<'_>,
 ) {
     let mut control_byte = [0];
     let observation = endpoint.observation.clone();
@@ -34,16 +40,7 @@ pub(super) async fn relay_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
             received = receive_candidate(endpoint, context) => match received { Ok(Some(candidate)) => candidate, Ok(None) => continue, Err(_) => return },
         };
         if matches!(
-            answer_hijacked_udp(
-                endpoint,
-                control,
-                cancellation,
-                inbound,
-                proxy,
-                candidate,
-                context
-            )
-            .await,
+            answer_hijacked_udp(endpoint, control, cancellation, route, candidate, context).await,
             DnsDisposition::Terminated
         ) {
             return;
@@ -55,8 +52,7 @@ pub(super) async fn answer_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
     endpoint: &mut SocksUdpEndpoint,
     control: &mut SocksStream<IO>,
     cancellation: &mut CancellationToken,
-    inbound: usize,
-    proxy: &DnsProxy,
+    route: DnsRoute<'_>,
     candidate: CandidateRequest,
     context: &ClientContext,
 ) -> DnsDisposition {
@@ -65,8 +61,8 @@ pub(super) async fn answer_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
     let observation = endpoint.observation.clone();
     let mut control_byte = [0];
     let response = {
-        let answering = proxy.answer(
-            ProxyIngress::Ordinary(inbound),
+        let answering = route.proxy.answer(
+            ProxyIngress::Ordinary(route.inbound),
             ProxyTransport::Udp,
             &candidate.payload,
         );
@@ -105,7 +101,7 @@ pub(super) async fn answer_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
             observed_target.as_ref(),
         );
         if let Some(observation) = &endpoint.observation {
-            observation.set_route(Some("hijack_dns".into()), None);
+            observation.set_terminal_route(route.rule_index, "DNS 接管");
         }
     }
     let observation = endpoint.observation.clone();

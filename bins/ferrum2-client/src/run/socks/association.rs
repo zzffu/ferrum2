@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 use tokio::net::UdpSocket;
 
 use super::admission::{RequestDisposition, SocksUdpEndpoint, admit_request, receive_candidate};
-use super::dns_hijack::{DnsDisposition, answer_hijacked_udp, relay_hijacked_udp};
+use super::dns_hijack::{DnsDisposition, DnsRoute, answer_hijacked_udp, relay_hijacked_udp};
 use super::relay::relay_admitted;
 use crate::run::context::{ClientContext, ClientRouting};
 use crate::run::egress::ClientRequestOrigin;
@@ -175,27 +175,24 @@ pub(super) async fn classify_udp_association<IO: AsyncRead + AsyncWrite + Unpin>
                 else {
                     return;
                 };
-                match answer_hijacked_udp(
+                let route = DnsRoute {
+                    inbound,
+                    proxy: &proxy,
+                    rule_index: route_scratch.selected_rule_index(),
+                };
+                let disposition = answer_hijacked_udp(
                     &mut endpoint,
                     control,
                     cancellation,
-                    inbound,
-                    &proxy,
+                    route,
                     candidate,
                     context,
                 )
-                .await
-                {
+                .await;
+                match disposition {
                     DnsDisposition::Admitted => {
-                        relay_hijacked_udp(
-                            &mut endpoint,
-                            control,
-                            cancellation,
-                            context,
-                            inbound,
-                            &proxy,
-                        )
-                        .await;
+                        relay_hijacked_udp(&mut endpoint, control, cancellation, context, route)
+                            .await;
                         return;
                     }
                     DnsDisposition::Dropped => continue,

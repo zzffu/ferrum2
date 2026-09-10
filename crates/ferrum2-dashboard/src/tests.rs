@@ -99,6 +99,67 @@ fn old_leases_cannot_change_replacement_observations() {
 }
 
 #[test]
+fn selected_paths_and_closed_history_keep_the_admitted_catalog() {
+    let dashboard = Dashboard::new(true);
+    dashboard.set_connection_catalog(json!({
+        "outbounds": [{"tag": "first"}, {"tag": "second"}],
+        "selectors": [{"tag": "manual", "default": "second"}],
+        "route": {"final": "manual", "rules": [
+            {"domain_suffix": ["old.test"], "port": [443], "action": "route", "outbound": "manual"}
+        ]}
+    }));
+    let old = dashboard.begin(metadata());
+    dashboard.set_connection_catalog(json!({
+        "outbounds": [{"tag": "replacement"}],
+        "route": {"final": "replacement", "rules": []}
+    }));
+    // Selection can finish after catalog publication; only the captured hop order matters.
+    old.set_selected_route(Some(0), &[1, 0]);
+    let selected = dashboard.snapshot()["connections"][0].clone();
+    assert_eq!(selected["outbound"], "second → first");
+    let rule = selected["route"].as_str().unwrap();
+    assert!(rule.contains("domain_suffix=[\"old.test\"]"));
+    assert!(rule.contains("port=[443]"));
+    assert!(rule.contains("action=route"));
+    assert!(rule.contains("outbound=\"manual\""));
+    old.finish("completed");
+    let current = dashboard.begin(metadata());
+    current.set_selected_route(None, &[0]);
+    let snapshot = dashboard.snapshot();
+    assert_eq!(snapshot["history"][0]["route"], selected["route"]);
+    assert_eq!(snapshot["history"][0]["outbound"], selected["outbound"]);
+    assert_eq!(snapshot["connections"][0]["outbound"], "replacement");
+    assert!(
+        snapshot["connections"][0]["route"]
+            .as_str()
+            .unwrap()
+            .contains("route.final")
+    );
+}
+
+#[test]
+fn private_conditions_and_unknown_hops_are_not_invented() {
+    let dashboard = Dashboard::new(false);
+    dashboard.set_connection_catalog(json!({
+        "outbounds": [{"tag": "direct"}],
+        "route": {"final": "direct", "rules": [
+            {"domain": "private.test", "action": "reject"}
+        ]}
+    }));
+    let connection = dashboard.begin(metadata());
+    connection.set_selected_route(Some(0), &[0]);
+    let snapshot = dashboard.snapshot();
+    assert!(snapshot["connections"][0]["route"].is_null());
+    assert_eq!(snapshot["connections"][0]["outbound"], "direct");
+    connection.set_selected_route(None, &[0, 99]);
+    assert!(dashboard.snapshot()["connections"][0]["outbound"].is_null());
+    connection.set_tun_dns_route();
+    let snapshot = dashboard.snapshot();
+    assert!(snapshot["connections"][0]["route"].is_null());
+    assert_eq!(snapshot["connections"][0]["outbound"], "DNS 接管");
+}
+
+#[test]
 fn saturation_counts_bytes_and_retention_remains_bounded() {
     let dashboard = Dashboard::new(false);
     let connections: Vec<_> = (0..LIVE_LIMIT)
