@@ -189,6 +189,116 @@ pub enum RefreshResult {
     },
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ConnectionView {
+    pub id: String,
+    pub generation: String,
+    pub protocol: String,
+    pub inbound: String,
+    pub inbound_tag: Option<String>,
+    pub source: Option<String>,
+    pub target: Option<String>,
+    pub requested_domain: Option<String>,
+    pub catalog_id: Option<String>,
+    pub decision: Option<ConnectionDecisionView>,
+    pub started_ms: f64,
+    pub duration_ms: f64,
+    pub upload_bytes: String,
+    pub download_bytes: String,
+    pub state: String,
+    pub upload_rate: f64,
+    pub download_rate: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConnectionDecisionView {
+    pub kind: ConnectionDecisionKind,
+    pub rule_index: Option<usize>,
+    pub rule_generation: Option<String>,
+    pub hops: Vec<usize>,
+    pub sniff: ConnectionSniffView,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionDecisionKind {
+    Route,
+    Reject,
+    HijackDns,
+    TunDns,
+    Aborted,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConnectionSniffView {
+    pub status: ConnectionSniffStatus,
+    pub protocol: Option<ConnectionSniffProtocol>,
+    pub domain: Option<String>,
+    pub rule_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionSniffStatus {
+    NotRequested,
+    NotExecuted,
+    Matched,
+    NoMatch,
+    Invalid,
+    Timeout,
+    Limit,
+    Unavailable,
+    Cancelled,
+    ReadError,
+    Redacted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionSniffProtocol {
+    Dns,
+    Tls,
+    Http,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectionCatalogView {
+    pub id: String,
+    pub rules: Vec<ConnectionRuleView>,
+    pub final_outbound: Option<String>,
+    pub outbounds: Vec<ConnectionNameView>,
+    pub inbounds: Vec<ConnectionNameView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectionNameView {
+    pub index: usize,
+    pub tag: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectionRuleView {
+    pub index: usize,
+    pub origin: ConnectionRuleOrigin,
+    pub conditions: Vec<ConnectionConditionView>,
+    pub action: String,
+    pub outbound: Option<String>,
+    pub sniffers: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionRuleOrigin {
+    Configured,
+    Inbound,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectionConditionView {
+    pub field: String,
+    pub value: serde_json::Value,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

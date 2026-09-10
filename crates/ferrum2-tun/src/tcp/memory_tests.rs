@@ -61,6 +61,7 @@ fn memory_flow() -> (TcpFlow, tokio::io::DuplexStream, TcpSocketLease) {
     let (socket, peer) = tokio::io::duplex(1);
     let (flow, lease) = tcp_flow_from_stream(
         FlowSocket::Memory(socket),
+        "198.18.0.2:10000".parse().expect("original source"),
         "192.0.2.1:443".parse().expect("target"),
         1,
         &OwnerRegistry::new(),

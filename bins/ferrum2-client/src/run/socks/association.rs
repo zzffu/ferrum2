@@ -91,7 +91,7 @@ pub(super) async fn classify_udp_association<IO: AsyncRead + AsyncWrite + Unpin>
                 Err(_) => { record_udp_terminal(context, Stage::Relay, Reason::Receive, Outcome::Failed); return; }
             },
         };
-        let Ok(terminal) = routing.select_terminal_with_scratch(
+        let Ok(selection) = routing.select_terminal_with_scratch(
             inbound,
             Network::Udp,
             &candidate.target,
@@ -101,10 +101,14 @@ pub(super) async fn classify_udp_association<IO: AsyncRead + AsyncWrite + Unpin>
         ) else {
             return;
         };
-        match terminal {
+        match selection.terminal {
             ClientTerminalRoute::Reject => return,
             ClientTerminalRoute::Route(plan) => {
-                let observed_target = context.dashboard.as_ref().map(|_| candidate.target.clone());
+                let observed_target = context
+                    .dashboard
+                    .as_ref()
+                    .filter(|dashboard| dashboard.connection_details_enabled())
+                    .map(|_| candidate.target.clone());
                 let observed_plan = context.dashboard.as_ref().map(|_| plan.clone());
                 let prepared = {
                     let preparing = context.egress.prepare_udp_for_ingress(
@@ -138,15 +142,14 @@ pub(super) async fn classify_udp_association<IO: AsyncRead + AsyncWrite + Unpin>
                         endpoint.observation = context.observe(
                             "udp",
                             "socks5",
+                            inbound,
                             endpoint.source_addr(),
                             observed_target.as_ref(),
                         );
-                        if let Some(plan) = &observed_plan {
-                            crate::run::context::observe_route(
-                                endpoint.observation.as_ref(),
-                                plan,
-                                route_scratch.selected_rule_index(),
-                            );
+                        if let (Some(plan), Some(observation)) =
+                            (&observed_plan, &endpoint.observation)
+                        {
+                            observation.set_decision(selection.decision, plan.hops());
                         }
                         relay_admitted(
                             &mut endpoint,
@@ -178,7 +181,6 @@ pub(super) async fn classify_udp_association<IO: AsyncRead + AsyncWrite + Unpin>
                 let route = DnsRoute {
                     inbound,
                     proxy: &proxy,
-                    rule_index: route_scratch.selected_rule_index(),
                 };
                 let disposition = answer_hijacked_udp(
                     &mut endpoint,
@@ -187,6 +189,7 @@ pub(super) async fn classify_udp_association<IO: AsyncRead + AsyncWrite + Unpin>
                     route,
                     candidate,
                     context,
+                    Some(selection.decision),
                 )
                 .await;
                 match disposition {

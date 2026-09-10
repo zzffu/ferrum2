@@ -43,7 +43,7 @@ pub(super) async fn run(
                     primed = true;
                 } else { dashboard.set_process(None, None); }
                 dashboard.sample();
-                let encoded = Bytes::from(dashboard.snapshot().to_string());
+                let encoded = Bytes::from(dashboard.encode_snapshot());
                 *snapshot.write().unwrap_or_else(std::sync::PoisonError::into_inner) = encoded;
             }
         }

@@ -747,14 +747,14 @@ impl SystemTcp {
             if !valid || accepted.stream.set_nodelay(true).is_err() {
                 continue;
             }
-            let target = self.slots[slot]
+            let forward = self.slots[slot]
                 .as_ref()
                 .expect("accepted tuple mapping remains live")
-                .forward
-                .target;
+                .forward;
             let (flow, socket) = tcp_flow_from_stream(
                 accepted.stream,
-                target,
+                forward.source,
+                forward.target,
                 self.generation,
                 &self.registry,
                 self.socket_wake.clone(),

@@ -121,9 +121,11 @@ pub(in crate::run) fn process_root(
                 else {
                     return;
                 };
+                let source = flow.source();
                 tokio::select! {
                     _ = owner.cancelled() => {}
                     _ = run_tcp(
+                        source,
                         flow.target(),
                         flow,
                         cancellation,

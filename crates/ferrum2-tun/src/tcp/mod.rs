@@ -24,13 +24,19 @@ mod memory_tests;
 mod socket;
 pub(crate) use socket::FlowSocket;
 
-/// One non-cloneable application-side TUN TCP stream with an immutable original target.
+/// One non-cloneable application-side TUN TCP stream with immutable original endpoints.
 pub struct TcpFlow {
+    source: SocketAddr,
     target: SocketAddr,
     shared: Arc<FlowShared>,
 }
 
 impl TcpFlow {
+    /// Returns the numeric source captured from the initial IP packet.
+    pub const fn source(&self) -> SocketAddr {
+        self.source
+    }
+
     /// Returns the numeric destination captured from the initial IP packet.
     pub const fn target(&self) -> SocketAddr {
         self.target
@@ -274,6 +280,7 @@ struct FlowState {
 ))]
 pub(crate) fn tcp_flow_from_stream(
     stream: impl Into<FlowSocket>,
+    source: SocketAddr,
     target: SocketAddr,
     generation: u64,
     registry: &OwnerRegistry,
@@ -293,6 +300,7 @@ pub(crate) fn tcp_flow_from_stream(
     });
     (
         TcpFlow {
+            source,
             target,
             shared: Arc::clone(&shared),
         },
@@ -326,6 +334,7 @@ pub(crate) async fn tcp_flow_for_test(
     let (accepted, _) = accepted?;
     let (flow, lease) = tcp_flow_from_stream(
         accepted,
+        "198.18.0.2:10000".parse().expect("original test source"),
         target,
         1,
         &OwnerRegistry::new(),

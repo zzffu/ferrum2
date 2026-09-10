@@ -69,7 +69,8 @@ client 内嵌 React 仪表盘，提供连接、出站选择、路由、DNS、日
 cargo run -p ferrum2-client --locked -- --config client.toml --dashboard-listen 127.0.0.1:9090 --dashboard-token-file dashboard.token --dashboard-details
 ```
 
-使用打印的本机 URL，在页面输入令牌。省略 `--dashboard-details` 可隐藏连接地址；
+使用打印的本机 URL，在页面输入令牌。省略 `--dashboard-details` 不采集连接地址、
+请求／嗅探域名和详细规则条件。连接页可显示已有嗅探结果，但打开仪表盘不会自动开启嗅探。
 关闭页面不会停止代理。修改配置与重启使用现有运行时清理机制，不绕过 TUN 权限。
 
 ## 配置与文档

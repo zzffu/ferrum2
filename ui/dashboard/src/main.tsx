@@ -10,7 +10,8 @@ import {
 } from "react-router-dom";
 import { login, logout, poll, useDashboard } from "./store";
 import { Confirm, useAction } from "./components";
-import { Overview, Connections } from "./traffic";
+import { Overview } from "./traffic";
+import { Connections } from "./connections";
 import { Outbounds, RoutesPage, DnsPage } from "./domains";
 import { LogsPage, SettingsPage } from "./settings";
 import "./style.css";
@@ -123,7 +124,7 @@ function Shell() {
           <span
             className={`status-dot ${s?.state === "running" ? "online" : ""}`}
           />
-          <span>本地管理 · 协议 v1</span>
+          <span>本地管理 · 协议 v{s?.version ?? 2}</span>
           <button onClick={logout}>锁定</button>
         </div>
       </aside>

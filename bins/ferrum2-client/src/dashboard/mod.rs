@@ -45,7 +45,7 @@ pub(crate) fn run(path: PathBuf, options: Options) -> Result<(), &'static str> {
             .await
             .map_err(|_| "dashboard.bind")?;
         let address = listener.local_addr().map_err(|_| "dashboard.bind")?;
-        let snapshot = Arc::new(RwLock::new(Bytes::from(dashboard.snapshot().to_string())));
+        let snapshot = Arc::new(RwLock::new(Bytes::from(dashboard.encode_snapshot())));
         let (commands, requests) = mpsc::channel(16);
         let state = Arc::new(http::HttpState {
             address,

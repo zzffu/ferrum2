@@ -1,3 +1,4 @@
+use super::routing::TcpRouteOutcome;
 use super::*;
 
 #[tokio::test(start_paused = true)]
@@ -60,8 +61,30 @@ action = "reject"
     peer.write_all(wire).await.expect("write sniff prefix");
     peer.shutdown().await.expect("close sniff peer");
     let registry = OwnerRegistry::new();
+    let mut scratch = routing.route_scratch().expect("synchronous route scratch");
+    let synchronous = routing
+        .select_terminal_with_scratch(
+            0,
+            ferrum2_core::route::Network::Tcp,
+            &target,
+            None,
+            &metrics,
+            &mut scratch,
+        )
+        .expect("payload-free SOCKS selection");
+    assert!(matches!(
+        synchronous.terminal,
+        ClientTerminalRoute::Route(_)
+    ));
+    assert_eq!(
+        synchronous.decision.sniff.status,
+        ferrum2_dashboard::wire::ConnectionSniffStatus::NotExecuted
+    );
+    assert_eq!(synchronous.decision.sniff.rule_index, Some(0));
+    assert_eq!(synchronous.decision.sniff.protocol, None);
+    assert_eq!(synchronous.decision.sniff.domain, None);
 
-    let selection = routing
+    let TcpRouteOutcome::Selected(selection) = routing
         .select_tcp(
             0,
             &target,
@@ -72,8 +95,28 @@ action = "reject"
         )
         .await
         .expect("route scratch construction")
-        .expect("sniff selection");
+    else {
+        panic!("sniff selection aborted");
+    };
     assert!(matches!(selection.terminal, ClientTerminalRoute::Reject));
+    assert_eq!(
+        selection.decision.kind,
+        ferrum2_dashboard::wire::ConnectionDecisionKind::Reject
+    );
+    assert_eq!(selection.decision.rule_index, Some(1));
+    assert_eq!(selection.decision.sniff.rule_index, Some(0));
+    assert_eq!(
+        selection.decision.sniff.status,
+        ferrum2_dashboard::wire::ConnectionSniffStatus::Matched
+    );
+    assert_eq!(
+        selection.decision.sniff.protocol,
+        Some(ferrum2_dashboard::wire::ConnectionSniffProtocol::Http)
+    );
+    assert_eq!(
+        selection.decision.sniff.domain.as_deref(),
+        Some("replay.test")
+    );
     assert!(matches!(
         &selection.prefix,
         TcpRoutePrefix::Collected(prefix) if prefix.outcome() == SniffPrefixOutcome::Complete
@@ -126,7 +169,7 @@ action = "reject"
         let (mut flow, mut peer) = tokio::io::duplex(16_384);
         peer.write_all(&wire).await.expect("write sniff prefix");
         peer.shutdown().await.expect("close sniff peer");
-        let selection = routing
+        let TcpRouteOutcome::Selected(selection) = routing
             .select_tcp(
                 0,
                 &target,
@@ -137,7 +180,9 @@ action = "reject"
             )
             .await
             .expect("route scratch construction")
-            .expect("sniff falls through to final route");
+        else {
+            panic!("sniff fallback aborted");
+        };
         assert!(
             matches!(&selection.terminal, ClientTerminalRoute::Route(_)),
             "{name}"
@@ -172,12 +217,17 @@ action = "reject"
         _ = tokio::task::yield_now() => {}
     }
     tokio::time::advance(Duration::from_millis(1)).await;
-    let selection = selection
-        .await
-        .expect("route scratch construction")
-        .expect("timeout falls through to final route");
+    let TcpRouteOutcome::Selected(selection) = selection.await.expect("route scratch construction")
+    else {
+        panic!("timeout fallback aborted");
+    };
     peer.shutdown().await.expect("timeout EOF");
     assert!(matches!(&selection.terminal, ClientTerminalRoute::Route(_)));
+    assert_eq!(
+        selection.decision.sniff.status,
+        ferrum2_dashboard::wire::ConnectionSniffStatus::Timeout
+    );
+    assert_eq!(selection.decision.rule_index, None);
     assert!(matches!(
         &selection.prefix,
         TcpRoutePrefix::Collected(prefix) if prefix.outcome() == SniffPrefixOutcome::Timeout
@@ -192,37 +242,50 @@ action = "reject"
     drop(replay);
 
     let (mut cancelled, _) = tokio::io::duplex(1);
-    assert!(
-        routing
-            .select_tcp(
-                0,
-                &target,
-                &mut cancelled,
-                std::future::ready(()),
-                &registry,
-                &metrics,
-            )
-            .await
-            .expect("route scratch construction")
-            .is_none(),
-        "cancelled sniff cannot select a terminal"
+    let TcpRouteOutcome::Aborted(decision) = routing
+        .select_tcp(
+            0,
+            &target,
+            &mut cancelled,
+            std::future::ready(()),
+            &registry,
+            &metrics,
+        )
+        .await
+        .expect("route scratch construction")
+    else {
+        panic!("cancelled sniff selected a terminal");
+    };
+    assert_eq!(
+        decision.kind,
+        ferrum2_dashboard::wire::ConnectionDecisionKind::Aborted
     );
+    assert_eq!(
+        decision.sniff.status,
+        ferrum2_dashboard::wire::ConnectionSniffStatus::Cancelled
+    );
+    assert_eq!(decision.sniff.rule_index, Some(0));
+    assert_eq!(decision.rule_index, None);
     let mut failed = ScriptedIo::failing();
-    assert!(
-        routing
-            .select_tcp(
-                0,
-                &target,
-                &mut failed,
-                std::future::pending::<()>(),
-                &registry,
-                &metrics,
-            )
-            .await
-            .expect("route scratch construction")
-            .is_none(),
-        "read failure cannot select a terminal"
+    let TcpRouteOutcome::Aborted(decision) = routing
+        .select_tcp(
+            0,
+            &target,
+            &mut failed,
+            std::future::pending::<()>(),
+            &registry,
+            &metrics,
+        )
+        .await
+        .expect("route scratch construction")
+    else {
+        panic!("failed sniff selected a terminal");
+    };
+    assert_eq!(
+        decision.sniff.status,
+        ferrum2_dashboard::wire::ConnectionSniffStatus::ReadError
     );
+    assert_eq!(decision.rule_index, None);
     assert_eq!(active(registry.snapshot()), OwnerSnapshot::default());
 }
 
@@ -246,7 +309,7 @@ async fn tun_tcp_selector_is_snapshotted_once_before_open_and_never_reselected()
     };
     let target = TargetAddr::ip("192.0.2.1:443".parse().expect("target")).expect("target");
     let (mut first_flow, _) = tokio::io::duplex(1);
-    let first = routing
+    let TcpRouteOutcome::Selected(first) = routing
         .select_tcp(
             0,
             &target,
@@ -257,7 +320,9 @@ async fn tun_tcp_selector_is_snapshotted_once_before_open_and_never_reselected()
         )
         .await
         .expect("route scratch construction")
-        .expect("first selection");
+    else {
+        panic!("first selection aborted");
+    };
     let ClientTerminalRoute::Route(first) = first.terminal else {
         panic!("selector routes");
     };
@@ -266,7 +331,7 @@ async fn tun_tcp_selector_is_snapshotted_once_before_open_and_never_reselected()
     selector.switch("manual", "c-d").expect("selector switch");
     assert_eq!(first.hops(), &[0, 1], "live flow retains its snapshot");
     let (mut second_flow, _) = tokio::io::duplex(1);
-    let second = routing
+    let TcpRouteOutcome::Selected(second) = routing
         .select_tcp(
             0,
             &target,
@@ -277,7 +342,9 @@ async fn tun_tcp_selector_is_snapshotted_once_before_open_and_never_reselected()
         )
         .await
         .expect("route scratch construction")
-        .expect("second selection");
+    else {
+        panic!("second selection aborted");
+    };
     let ClientTerminalRoute::Route(second) = second.terminal else {
         panic!("selector routes");
     };

@@ -7,6 +7,11 @@ use std::time::{Duration, Instant};
 use ferrum2_config::{RouteAction, RouteProtocol, Sniffers};
 use ferrum2_core::route::{EgressPlanSnapshot, Network};
 use ferrum2_core::{DomainName, TargetAddr};
+use ferrum2_dashboard::wire::{
+    ConnectionDecisionKind as DecisionKind, ConnectionSniffProtocol as SniffProtocol,
+    ConnectionSniffStatus as SniffStatus,
+};
+use ferrum2_dashboard::{DecisionMetadata, SniffMetadata as ObservedSniff};
 use ferrum2_dns::{DnsProxy, ProxyIngress, ProxyTransport};
 use ferrum2_observability::{Metrics, RuleMatchResult, RuleMatchType, RuleProgram, RuleSource};
 use ferrum2_rule::{
@@ -26,10 +31,20 @@ pub(super) enum ClientTerminalRoute {
     Reject,
 }
 
+pub(super) struct RouteSelection {
+    pub(super) terminal: ClientTerminalRoute,
+    pub(super) decision: DecisionMetadata,
+}
+
+pub(super) enum TcpRouteOutcome {
+    Selected(TcpRouteSelection),
+    Aborted(DecisionMetadata),
+}
+
 pub(super) struct TcpRouteSelection {
     pub(super) terminal: ClientTerminalRoute,
     pub(super) prefix: TcpRoutePrefix,
-    pub(super) rule_index: Option<usize>,
+    pub(super) decision: DecisionMetadata,
 }
 
 pub(super) enum TcpRoutePrefix {
@@ -109,7 +124,7 @@ impl ClientRouting {
         payload: Option<&[u8]>,
         metrics: &Metrics,
         scratch: &mut RuleEvaluationScratch,
-    ) -> Result<ClientTerminalRoute, RuleCompileError> {
+    ) -> Result<RouteSelection, RuleCompileError> {
         let program = &self.program;
         let mut evaluation = program.evaluate_with_scratch(inbound, network, target, scratch);
         evaluation.enable_match_observation();
@@ -117,6 +132,7 @@ impl ClientRouting {
         let mut protocol = None;
         let mut domain = None;
         let mut sniffed = false;
+        let mut sniff = unrequested_sniff();
         loop {
             let started = Instant::now();
             let action = evaluation
@@ -127,6 +143,8 @@ impl ClientRouting {
             match action {
                 RouteProgramAction::Continue(RouteAction::Sniff(_)) if !sniffed => {
                     sniffed = true;
+                    sniff.rule_index = evaluation.selected_rule_index();
+                    sniff.status = SniffStatus::NotExecuted;
                     let Some(payload) = payload else {
                         continue;
                     };
@@ -155,16 +173,40 @@ impl ClientRouting {
                         } else {
                             SniffAttempt::Parsed {
                                 transport,
-                                progress: progress.clone(),
+                                progress: &progress,
                             }
                         },
                     );
-                    (protocol, domain) = route_metadata(progress);
+                    sniff.status = if limited {
+                        SniffStatus::Limit
+                    } else {
+                        sniff_status(&progress)
+                    };
+                    (protocol, domain) = route_metadata(progress, &mut sniff);
                 }
                 RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
-                RouteProgramAction::Continue(_) => return Ok(ClientTerminalRoute::Reject),
+                RouteProgramAction::Continue(_) => {
+                    return Ok(RouteSelection {
+                        decision: decision(
+                            DecisionKind::Reject,
+                            evaluation.selected_rule_index(),
+                            evaluation.snapshot_generation(),
+                            sniff,
+                        ),
+                        terminal: ClientTerminalRoute::Reject,
+                    });
+                }
                 RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
-                    return Ok(terminal(action));
+                    let terminal = terminal(action);
+                    return Ok(RouteSelection {
+                        decision: decision(
+                            terminal.kind(),
+                            evaluation.selected_rule_index(),
+                            evaluation.snapshot_generation(),
+                            sniff,
+                        ),
+                        terminal,
+                    });
                 }
             }
         }
@@ -178,7 +220,7 @@ impl ClientRouting {
         cancellation: C,
         registry: &ferrum2_runtime::OwnerRegistry,
         metrics: &Metrics,
-    ) -> Result<Option<TcpRouteSelection>, RuleCompileError>
+    ) -> Result<TcpRouteOutcome, RuleCompileError>
     where
         IO: AsyncRead + Unpin,
         C: Future,
@@ -193,6 +235,7 @@ impl ClientRouting {
         let mut domain = None;
         let mut prefix = TcpRoutePrefix::Empty;
         let mut sniffed = false;
+        let mut sniff = unrequested_sniff();
         tokio::pin!(cancellation);
         loop {
             let started = Instant::now();
@@ -204,6 +247,7 @@ impl ClientRouting {
             match action {
                 RouteProgramAction::Continue(RouteAction::Sniff(sniffers)) if !sniffed => {
                     sniffed = true;
+                    sniff.rule_index = evaluation.selected_rule_index();
                     let order = sniff_order(sniffers);
                     let mut complete = None;
                     let collected = collect_sniff_prefix(
@@ -249,29 +293,55 @@ impl ClientRouting {
                         | SniffPrefixOutcome::Unavailable => SniffProgress::NoMatch,
                         SniffPrefixOutcome::Cancelled | SniffPrefixOutcome::ReadError => {
                             record_sniff(metrics, SniffAttempt::TcpUnavailable);
-                            return Ok(None);
+                            sniff.status = match outcome {
+                                SniffPrefixOutcome::Cancelled => SniffStatus::Cancelled,
+                                _ => SniffStatus::ReadError,
+                            };
+                            return Ok(TcpRouteOutcome::Aborted(decision(
+                                DecisionKind::Aborted,
+                                None,
+                                evaluation.snapshot_generation(),
+                                sniff,
+                            )));
                         }
                     };
-                    record_sniff(
-                        metrics,
-                        SniffAttempt::tcp_collection(progress.clone(), outcome),
-                    );
-                    (protocol, domain) = route_metadata(progress);
+                    record_sniff(metrics, SniffAttempt::tcp_collection(&progress, outcome));
+                    sniff.status = match outcome {
+                        SniffPrefixOutcome::Complete => sniff_status(&progress),
+                        SniffPrefixOutcome::Timeout => SniffStatus::Timeout,
+                        SniffPrefixOutcome::Limit => SniffStatus::Limit,
+                        SniffPrefixOutcome::Unavailable => SniffStatus::Unavailable,
+                        SniffPrefixOutcome::Cancelled | SniffPrefixOutcome::ReadError => {
+                            unreachable!()
+                        }
+                    };
+                    (protocol, domain) = route_metadata(progress, &mut sniff);
                     prefix = TcpRoutePrefix::Collected(collected);
                 }
                 RouteProgramAction::Continue(RouteAction::Sniff(_)) => {}
                 RouteProgramAction::Continue(_) => {
-                    return Ok(Some(TcpRouteSelection {
+                    return Ok(TcpRouteOutcome::Selected(TcpRouteSelection {
                         terminal: ClientTerminalRoute::Reject,
                         prefix,
-                        rule_index: evaluation.selected_rule_index(),
+                        decision: decision(
+                            DecisionKind::Reject,
+                            evaluation.selected_rule_index(),
+                            evaluation.snapshot_generation(),
+                            sniff,
+                        ),
                     }));
                 }
                 RouteProgramAction::Terminal(action) | RouteProgramAction::Final(action) => {
-                    return Ok(Some(TcpRouteSelection {
-                        terminal: terminal(action),
+                    let terminal = terminal(action);
+                    return Ok(TcpRouteOutcome::Selected(TcpRouteSelection {
+                        decision: decision(
+                            terminal.kind(),
+                            evaluation.selected_rule_index(),
+                            evaluation.snapshot_generation(),
+                            sniff,
+                        ),
+                        terminal,
                         prefix,
-                        rule_index: evaluation.selected_rule_index(),
                     }));
                 }
             }
@@ -360,7 +430,10 @@ fn sniff_order(sniffers: &Sniffers) -> Vec<Protocol> {
     }
 }
 
-fn route_metadata(progress: SniffProgress) -> (Option<RouteProtocol>, Option<DomainName>) {
+fn route_metadata(
+    progress: SniffProgress,
+    sniff: &mut ObservedSniff,
+) -> (Option<RouteProtocol>, Option<DomainName>) {
     let (protocol, domain) = match progress {
         SniffProgress::Matched(SniffMetadata::Dns { domain }) => (RouteProtocol::Dns, Some(domain)),
         SniffProgress::Matched(SniffMetadata::Tls { domain }) => (RouteProtocol::Tls, domain),
@@ -369,9 +442,80 @@ fn route_metadata(progress: SniffProgress) -> (Option<RouteProtocol>, Option<Dom
             return (None, None);
         }
     };
-    match domain.map(|domain| DomainName::new(&domain)).transpose() {
-        Ok(domain) => (Some(protocol), domain),
+    sniff.protocol = Some(match protocol {
+        RouteProtocol::Dns => SniffProtocol::Dns,
+        RouteProtocol::Tls => SniffProtocol::Tls,
+        RouteProtocol::Http => SniffProtocol::Http,
+    });
+    match domain
+        .as_ref()
+        .map(|domain| DomainName::new(domain))
+        .transpose()
+    {
+        Ok(normalized) => {
+            sniff.domain = domain;
+            (Some(protocol), normalized)
+        }
         Err(_) => (None, None),
+    }
+}
+
+fn sniff_status(progress: &SniffProgress) -> SniffStatus {
+    match progress {
+        SniffProgress::Matched(_) => SniffStatus::Matched,
+        SniffProgress::Invalid => SniffStatus::Invalid,
+        SniffProgress::NoMatch | SniffProgress::NeedMore => SniffStatus::NoMatch,
+    }
+}
+
+fn unrequested_sniff() -> ObservedSniff {
+    ObservedSniff {
+        status: SniffStatus::NotRequested,
+        protocol: None,
+        domain: None,
+        rule_index: None,
+    }
+}
+
+fn decision(
+    kind: DecisionKind,
+    rule_index: Option<usize>,
+    rule_generation: Option<u64>,
+    sniff: ObservedSniff,
+) -> DecisionMetadata {
+    DecisionMetadata {
+        kind,
+        rule_index,
+        rule_generation,
+        sniff,
+    }
+}
+
+pub(super) fn tun_dns_decision() -> DecisionMetadata {
+    decision(DecisionKind::TunDns, None, None, unrequested_sniff())
+}
+
+impl ClientTerminalRoute {
+    fn kind(&self) -> DecisionKind {
+        match self {
+            Self::Route(_) => DecisionKind::Route,
+            Self::Reject => DecisionKind::Reject,
+            Self::HijackDns => DecisionKind::HijackDns,
+        }
+    }
+
+    pub(super) fn publish(
+        &self,
+        observation: Option<&ferrum2_dashboard::Connection>,
+        decision: DecisionMetadata,
+    ) {
+        if let Some(observation) = observation {
+            let hops = match self {
+                Self::Route(plan) => plan.hops(),
+                _ => &[],
+            };
+            observation.set_decision(decision, hops);
+        }
     }
 }
 

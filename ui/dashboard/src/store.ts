@@ -6,12 +6,16 @@ export interface Preferences {
   interval: number;
   dense: boolean;
   addresses: boolean;
+  connectionSource: boolean;
+  connectionDiagnostics: boolean;
 }
 const defaults: Preferences = {
   theme: "system",
   interval: 1000,
   dense: false,
   addresses: true,
+  connectionSource: false,
+  connectionDiagnostics: false,
 };
 function loadPreferences(): Preferences {
   try {
@@ -21,6 +25,12 @@ function loadPreferences(): Preferences {
       interval: [1000, 2000, 5000].includes(p.interval) ? p.interval : 1000,
       dense: typeof p.dense === "boolean" ? p.dense : false,
       addresses: typeof p.addresses === "boolean" ? p.addresses : true,
+      connectionSource:
+        typeof p.connectionSource === "boolean" ? p.connectionSource : false,
+      connectionDiagnostics:
+        typeof p.connectionDiagnostics === "boolean"
+          ? p.connectionDiagnostics
+          : false,
     };
   } catch {
     return defaults;
@@ -138,7 +148,7 @@ export async function poll(): Promise<void> {
       signal: controller.signal,
     });
     if (current !== epoch) return;
-    if (snapshot.version !== 1) throw new Error("UNSUPPORTED_PROTOCOL");
+    if (snapshot.version !== 2) throw new Error("UNSUPPORTED_PROTOCOL");
     const at = Date.now();
     const samples = state.samples
       .filter(

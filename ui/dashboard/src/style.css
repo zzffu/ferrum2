@@ -544,35 +544,6 @@ td button {
 td strong {
   font-weight: 550;
 }
-.connection-provenance {
-  min-width: 180px;
-  width: 24%;
-}
-.connection-outbound,
-.connection-route {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  line-height: 1.5;
-}
-.connection-outbound {
-  -webkit-line-clamp: 1;
-}
-.connection-route {
-  -webkit-line-clamp: 2;
-  margin-top: 4px;
-  color: var(--muted);
-}
-.connection-detail-provenance {
-  grid-template-columns: 64px minmax(0, 1fr);
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--line);
-  line-height: 1.7;
-}
-.connection-detail-provenance dd {
-  white-space: pre-wrap;
-}
 tr:last-child td {
   border-bottom: 0;
 }

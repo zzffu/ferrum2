@@ -1,95 +1,84 @@
 use serde_json::Value;
 
-/// Immutable generation metadata; concrete paths are supplied by the routing owner.
-#[derive(Default)]
-pub(crate) struct RouteCatalog {
-    rules: Vec<Option<String>>,
-    final_route: Option<String>,
-    outbounds: Vec<Option<String>>,
-}
+use crate::wire::{
+    ConnectionCatalogView, ConnectionConditionView, ConnectionNameView, ConnectionRuleOrigin,
+    ConnectionRuleView,
+};
 
-impl RouteCatalog {
-    pub(crate) fn new(catalog: &Value, details: bool) -> Self {
-        let outbounds = catalog["outbounds"]
+/// Only already-allowlisted configuration facts are admitted, never raw configuration.
+pub(crate) fn catalog(id: u64, catalog: &Value, details: bool) -> ConnectionCatalogView {
+    let names = |key: &str| {
+        catalog[key]
             .as_array()
-            .map(|rows| {
-                rows.iter()
-                    .map(|row| row["tag"].as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let rules = if details {
-            catalog["route"]["rules"]
-                .as_array()
-                .map(|rows| {
-                    rows.iter()
-                        .enumerate()
-                        .map(|(index, row)| {
-                            let fields = row.as_object()?;
-                            let conditions = fields
-                                .iter()
-                                .filter(|(key, _)| {
-                                    !matches!(
-                                        key.as_str(),
-                                        "action" | "outbound" | "server" | "sniffers"
-                                    )
-                                })
-                                .map(|(key, value)| format!("{key}={value}"))
-                                .collect::<Vec<_>>()
-                                .join("；");
-                            let action = fields.get("action")?.as_str()?;
-                            let mut result = format!(
-                                "规则 {}：{}；action={action}",
-                                index + 1,
-                                if conditions.is_empty() {
-                                    "全部匹配"
-                                } else {
-                                    &conditions
-                                }
-                            );
-                            for key in ["outbound", "server", "sniffers"] {
-                                if let Some(value) = fields.get(key) {
-                                    result.push_str(&format!("；{key}={value}"));
-                                }
-                            }
-                            Some(result)
-                        })
-                        .collect()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                Some(ConnectionNameView {
+                    index,
+                    tag: row["tag"].as_str()?.to_owned(),
                 })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let final_route = details
-            .then(|| {
-                catalog["route"]["final"]
-                    .as_str()
-                    .map(|tag| format!("默认路由（route.final）：{tag}"))
             })
-            .flatten();
-        Self {
-            rules,
-            final_route,
-            outbounds,
-        }
-    }
-
-    pub(crate) fn rule(&self, index: Option<usize>) -> Option<String> {
-        match index {
-            Some(index) => self.rules.get(index).cloned().flatten(),
-            None => self.final_route.clone(),
-        }
-    }
-
-    pub(crate) fn path(&self, hops: &[usize]) -> Option<String> {
-        let mut result = String::new();
-        for &hop in hops {
-            let tag = self.outbounds.get(hop)?.as_deref()?;
-            if !result.is_empty() {
-                result.push_str(" → ");
-            }
-            result.push_str(tag);
-        }
-        (!result.is_empty()).then_some(result)
+            .collect()
+    };
+    let rules = if details {
+        catalog["route"]["rules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let conditions = [
+                    "inbound",
+                    "network",
+                    "protocol",
+                    "rule_set",
+                    "port",
+                    "port_range",
+                    "domain",
+                    "domain_suffix",
+                    "domain_keyword",
+                    "ip",
+                    "ip_cidr",
+                ]
+                .into_iter()
+                .filter_map(|field| {
+                    row.get(field).map(|value| ConnectionConditionView {
+                        field: field.to_owned(),
+                        value: value.clone(),
+                    })
+                })
+                .collect();
+                Some(ConnectionRuleView {
+                    index,
+                    origin: if row["origin"] == "inbound" {
+                        ConnectionRuleOrigin::Inbound
+                    } else {
+                        ConnectionRuleOrigin::Configured
+                    },
+                    conditions,
+                    action: row["action"].as_str()?.to_owned(),
+                    outbound: row["outbound"].as_str().map(str::to_owned),
+                    sniffers: row["sniffers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect(),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ConnectionCatalogView {
+        id: id.to_string(),
+        rules,
+        final_outbound: details
+            .then(|| catalog["route"]["final"].as_str().map(str::to_owned))
+            .flatten(),
+        outbounds: names("outbounds"),
+        inbounds: names("inbounds"),
     }
 }

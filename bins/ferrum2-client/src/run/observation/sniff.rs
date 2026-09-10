@@ -2,18 +2,21 @@ use ferrum2_observability::{Metrics, Role, SniffOutcome, SniffProtocol, Transpor
 use ferrum2_runtime::SniffPrefixOutcome;
 use ferrum2_sniff::{Metadata, Progress};
 
-pub(in crate::run) enum SniffAttempt {
+pub(in crate::run) enum SniffAttempt<'a> {
     Parsed {
         transport: Transport,
-        progress: Progress,
+        progress: &'a Progress,
     },
     Limit(Transport),
     TcpTimeout,
     TcpUnavailable,
 }
 
-impl SniffAttempt {
-    pub(in crate::run) fn tcp_collection(progress: Progress, outcome: SniffPrefixOutcome) -> Self {
+impl<'a> SniffAttempt<'a> {
+    pub(in crate::run) fn tcp_collection(
+        progress: &'a Progress,
+        outcome: SniffPrefixOutcome,
+    ) -> Self {
         match outcome {
             SniffPrefixOutcome::Complete => Self::Parsed {
                 transport: Transport::Tcp,
@@ -28,7 +31,7 @@ impl SniffAttempt {
     }
 }
 
-pub(in crate::run) fn record_sniff(metrics: &Metrics, attempt: SniffAttempt) {
+pub(in crate::run) fn record_sniff(metrics: &Metrics, attempt: SniffAttempt<'_>) {
     let (transport, outcome, protocol) = match attempt {
         SniffAttempt::Parsed {
             transport,
@@ -68,8 +71,7 @@ mod tests {
 
     #[test]
     fn each_attempt_emits_one_transport_correct_redacted_counter() {
-        let mut cases = Vec::new();
-        for (progress, outcome, protocol) in [
+        let progress_cases = [
             (
                 Progress::Matched(Metadata::Dns {
                     domain: "private.example".into(),
@@ -94,16 +96,18 @@ mod tests {
             (Progress::NoMatch, "unknown", "none"),
             (Progress::NeedMore, "unknown", "none"),
             (Progress::Invalid, "invalid", "none"),
-        ] {
+        ];
+        let mut cases = Vec::new();
+        for (progress, outcome, protocol) in &progress_cases {
             for (transport, label) in [(Transport::Tcp, "tcp"), (Transport::Udp, "udp")] {
                 cases.push((
                     SniffAttempt::Parsed {
                         transport,
-                        progress: progress.clone(),
+                        progress,
                     },
                     label,
-                    outcome,
-                    protocol,
+                    *outcome,
+                    *protocol,
                 ));
             }
         }
@@ -116,7 +120,7 @@ mod tests {
             (SniffPrefixOutcome::Complete, "unknown"),
         ] {
             cases.push((
-                SniffAttempt::tcp_collection(Progress::NoMatch, end),
+                SniffAttempt::tcp_collection(&Progress::NoMatch, end),
                 "tcp",
                 label,
                 "none",

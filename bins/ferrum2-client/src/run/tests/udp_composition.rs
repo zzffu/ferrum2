@@ -352,6 +352,10 @@ fn client_udp_route_publishes_program_and_match_observations() {
          [[route.rules]]\n\
          network = \"udp\"\n\
          port = 53\n\
+         action = \"sniff\"\n\
+         [[route.rules]]\n\
+         protocol = \"dns\"\n\
+         domain = \"query.example\"\n\
          action = \"reject\"\n"
     );
     std::fs::write(&path, source).expect("UDP route metrics config");
@@ -371,18 +375,39 @@ fn client_udp_route_publishes_program_and_match_observations() {
     let target = TargetAddr::ip("192.0.2.1:53".parse().expect("UDP route target"))
         .expect("validated UDP route target");
     let mut scratch = routing.route_scratch().expect("route scratch construction");
+    let mut query = Message::new(7, MessageType::Query, OpCode::Query);
+    query.add_query(Query::query(
+        Name::from_ascii("query.example.").expect("query name"),
+        RecordType::A,
+    ));
+    let payload = query.to_vec().expect("DNS wire");
     let terminal = routing.select_terminal_with_scratch(
         0,
         ferrum2_core::route::Network::Udp,
         &target,
-        Some(b"payload"),
+        Some(&payload),
         &metrics,
         &mut scratch,
     );
-    assert!(matches!(terminal, Ok(ClientTerminalRoute::Reject)));
+    let selection = terminal.expect("route selection");
+    assert!(matches!(selection.terminal, ClientTerminalRoute::Reject));
+    assert_eq!(selection.decision.rule_index, Some(1));
+    assert_eq!(selection.decision.sniff.rule_index, Some(0));
+    assert_eq!(
+        selection.decision.sniff.status,
+        ferrum2_dashboard::wire::ConnectionSniffStatus::Matched
+    );
+    assert_eq!(
+        selection.decision.sniff.protocol,
+        Some(ferrum2_dashboard::wire::ConnectionSniffProtocol::Dns)
+    );
+    assert_eq!(
+        selection.decision.sniff.domain.as_deref(),
+        Some("query.example.")
+    );
     let encoded = metrics.encode_text().expect("client UDP route metrics");
     for expected in [
-        "ferrum2_rule_program_rules{program=\"route\"} 1",
+        "ferrum2_rule_program_rules{program=\"route\"} 2",
         "ferrum2_route_match_total{source=\"inline\",type=\"scalar\",result=\"matched\"}",
     ] {
         assert!(

@@ -15,7 +15,6 @@ pub(super) enum DnsDisposition {
 pub(super) struct DnsRoute<'a> {
     pub(super) inbound: usize,
     pub(super) proxy: &'a DnsProxy,
-    pub(super) rule_index: Option<usize>,
 }
 
 pub(super) async fn relay_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
@@ -40,7 +39,16 @@ pub(super) async fn relay_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
             received = receive_candidate(endpoint, context) => match received { Ok(Some(candidate)) => candidate, Ok(None) => continue, Err(_) => return },
         };
         if matches!(
-            answer_hijacked_udp(endpoint, control, cancellation, route, candidate, context).await,
+            answer_hijacked_udp(
+                endpoint,
+                control,
+                cancellation,
+                route,
+                candidate,
+                context,
+                None
+            )
+            .await,
             DnsDisposition::Terminated
         ) {
             return;
@@ -55,6 +63,7 @@ pub(super) async fn answer_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
     route: DnsRoute<'_>,
     candidate: CandidateRequest,
     context: &ClientContext,
+    decision: Option<ferrum2_dashboard::DecisionMetadata>,
 ) -> DnsDisposition {
     let idle_timeout = context.runtime.idle_timeout;
     let deadline = endpoint.idle_deadline(idle_timeout);
@@ -85,7 +94,11 @@ pub(super) async fn answer_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
         return DnsDisposition::Dropped;
     };
     let observed_target = if endpoint.observation.is_none() {
-        context.dashboard.as_ref().map(|_| candidate.target.clone())
+        context
+            .dashboard
+            .as_ref()
+            .filter(|dashboard| dashboard.connection_details_enabled())
+            .map(|_| candidate.target.clone())
     } else {
         None
     };
@@ -97,11 +110,12 @@ pub(super) async fn answer_hijacked_udp<IO: AsyncRead + AsyncWrite + Unpin>(
         endpoint.observation = context.observe(
             "udp",
             "socks5",
+            route.inbound,
             endpoint.source_addr(),
             observed_target.as_ref(),
         );
-        if let Some(observation) = &endpoint.observation {
-            observation.set_terminal_route(route.rule_index, "DNS 接管");
+        if let (Some(observation), Some(decision)) = (&endpoint.observation, decision) {
+            observation.set_decision(decision, &[]);
         }
     }
     let observation = endpoint.observation.clone();

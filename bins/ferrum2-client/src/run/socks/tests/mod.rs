@@ -346,6 +346,7 @@ async fn udp_chain_rejects_before_admission_and_uses_fixed_buffers(hop_count: us
             &mut route_scratch,
         )
         .expect("eight-hop route selection")
+        .terminal
     else {
         panic!("eight-hop route terminal")
     };

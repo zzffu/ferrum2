@@ -1,24 +1,64 @@
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde_json::{Value, json};
 use tokio::sync::watch;
 
+use crate::wire::{
+    ConnectionCatalogView, ConnectionDecisionKind, ConnectionDecisionView, ConnectionSniffProtocol,
+    ConnectionSniffStatus, ConnectionSniffView, ConnectionView,
+};
 use crate::{CANCELLATION_LIMIT, Generation, HISTORY_LIMIT, LIVE_LIMIT, lock};
 
-/// Metadata observed at the real flow/association admission seam; unknown endpoints stay None.
+/// Facts captured at admission; endpoint rendering belongs to the sampler.
 pub struct ConnectionMetadata {
     pub protocol: &'static str,
     pub inbound: &'static str,
-    pub source: Option<String>,
-    pub target: Option<String>,
+    pub inbound_id: Option<usize>,
+    pub source: Option<SocketAddr>,
+    pub target: Option<ConnectionTarget>,
+}
+
+#[derive(Clone)]
+pub enum ConnectionTarget {
+    Socket(SocketAddr),
+    Domain { name: String, port: u16 },
+}
+
+#[derive(Clone)]
+pub struct DecisionMetadata {
+    pub kind: ConnectionDecisionKind,
+    pub rule_index: Option<usize>,
+    pub rule_generation: Option<u64>,
+    pub sniff: SniffMetadata,
+}
+
+#[derive(Clone)]
+pub struct SniffMetadata {
+    pub status: ConnectionSniffStatus,
+    pub protocol: Option<ConnectionSniffProtocol>,
+    pub domain: Option<String>,
+    pub rule_index: Option<usize>,
+}
+
+#[derive(Clone)]
+struct Facts {
+    target: Option<ConnectionTarget>,
+    decision: Option<(DecisionMetadata, Vec<usize>)>,
+}
+
+#[derive(Clone)]
+struct Final {
+    at: Instant,
+    state: String,
+    upload: u64,
+    download: u64,
 }
 
 struct Attribution {
-    target: Option<String>,
-    route: Option<String>,
-    outbound: Option<String>,
+    facts: Arc<Facts>,
+    final_state: Option<Final>,
 }
 
 pub(crate) struct Record {
@@ -26,7 +66,9 @@ pub(crate) struct Record {
     generation: u64,
     protocol: &'static str,
     inbound: &'static str,
-    source: Option<String>,
+    inbound_id: Option<usize>,
+    source: Option<SocketAddr>,
+    pub(crate) catalog: Option<Arc<ConnectionCatalogView>>,
     attribution: Mutex<Attribution>,
     started: Instant,
     started_ms: u64,
@@ -47,7 +89,7 @@ impl Record {
         let upload = self.upload.load(Ordering::Relaxed);
         let download = self.download.load(Ordering::Relaxed);
         let mut previous = lock(&self.sampled);
-        let elapsed = now.duration_since(previous.0).as_secs_f64();
+        let elapsed = now.saturating_duration_since(previous.0).as_secs_f64();
         if elapsed > 0.0 {
             self.upload_rate.store(
                 (upload.saturating_sub(previous.1) as f64 / elapsed).to_bits(),
@@ -61,25 +103,96 @@ impl Record {
         }
     }
 
-    pub(crate) fn view(&self, now: Instant, state: &str) -> Value {
-        let attribution = lock(&self.attribution);
-        json!({
-            "id": self.id,
-            "generation": self.generation.to_string(),
-            "protocol": self.protocol,
-            "inbound": self.inbound,
-            "source": self.source,
-            "target": attribution.target,
-            "route": attribution.route,
-            "outbound": attribution.outbound,
-            "started_ms": self.started_ms,
-            "duration_ms": now.duration_since(self.started).as_millis() as u64,
-            "upload_bytes": self.upload.load(Ordering::Relaxed).to_string(),
-            "download_bytes": self.download.load(Ordering::Relaxed).to_string(),
-            "upload_rate": f64::from_bits(self.upload_rate.load(Ordering::Relaxed)),
-            "download_rate": f64::from_bits(self.download_rate.load(Ordering::Relaxed)),
-            "state": state,
-        })
+    pub(crate) fn view(&self, now: Instant, active: bool) -> ConnectionView {
+        let (facts, final_state) = {
+            let attribution = lock(&self.attribution);
+            (attribution.facts.clone(), attribution.final_state.clone())
+        };
+        let target = facts.target.as_ref().map(|target| match target {
+            ConnectionTarget::Socket(address) => address.to_string(),
+            ConnectionTarget::Domain { name, port } => format!("{name}:{port}"),
+        });
+        let requested_domain = match &facts.target {
+            Some(ConnectionTarget::Domain { name, .. }) => Some(name.clone()),
+            _ => None,
+        };
+        let decision = facts
+            .decision
+            .as_ref()
+            .map(|(decision, hops)| ConnectionDecisionView {
+                kind: decision.kind,
+                rule_index: decision.rule_index,
+                rule_generation: decision
+                    .rule_generation
+                    .map(|generation| generation.to_string()),
+                hops: hops.clone(),
+                sniff: ConnectionSniffView {
+                    status: decision.sniff.status,
+                    protocol: decision.sniff.protocol,
+                    domain: decision.sniff.domain.clone(),
+                    rule_index: decision.sniff.rule_index,
+                },
+            });
+        let inbound_tag = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| {
+                catalog
+                    .inbounds
+                    .iter()
+                    .find(|name| Some(name.index) == self.inbound_id)
+            })
+            .map(|name| name.tag.clone());
+        ConnectionView {
+            id: self.id.clone(),
+            generation: self.generation.to_string(),
+            protocol: self.protocol.to_owned(),
+            inbound: self.inbound.to_owned(),
+            inbound_tag,
+            source: self.source.map(|address| address.to_string()),
+            target,
+            requested_domain,
+            catalog_id: self.catalog.as_ref().map(|catalog| catalog.id.clone()),
+            decision,
+            started_ms: self.started_ms as f64,
+            duration_ms: final_state
+                .as_ref()
+                .map_or(now, |final_state| final_state.at)
+                .saturating_duration_since(self.started)
+                .as_millis() as f64,
+            upload_bytes: final_state
+                .as_ref()
+                .map_or_else(|| self.upload.load(Ordering::Relaxed), |state| state.upload)
+                .to_string(),
+            download_bytes: final_state
+                .as_ref()
+                .map_or_else(
+                    || self.download.load(Ordering::Relaxed),
+                    |state| state.download,
+                )
+                .to_string(),
+            // Membership was captured atomically. A concurrently retired row may remain
+            // active for this snapshot, but can never also appear in its history.
+            state: if active {
+                "active".to_owned()
+            } else {
+                final_state
+                    .as_ref()
+                    .expect("history is sealed")
+                    .state
+                    .clone()
+            },
+            upload_rate: if final_state.is_some() {
+                0.0
+            } else {
+                f64::from_bits(self.upload_rate.load(Ordering::Relaxed))
+            },
+            download_rate: if final_state.is_some() {
+                0.0
+            } else {
+                f64::from_bits(self.download_rate.load(Ordering::Relaxed))
+            },
+        }
     }
 }
 
@@ -88,7 +201,6 @@ struct Lease {
     record: Arc<Record>,
     tracked: bool,
     details: bool,
-    catalog: Arc<crate::attribution::RouteCatalog>,
     finished: AtomicBool,
     cancel_epoch: u64,
 }
@@ -97,6 +209,15 @@ impl Lease {
     fn finish(&self, state: &str) {
         if self.finished.swap(true, Ordering::AcqRel) {
             return;
+        }
+        let now = Instant::now();
+        if self.tracked {
+            lock(&self.record.attribution).final_state = Some(Final {
+                at: now,
+                state: state.to_owned(),
+                upload: self.record.upload.load(Ordering::Relaxed),
+                download: self.record.download.load(Ordering::Relaxed),
+            });
         }
         let mut registry = lock(&self.generation.registry);
         registry.active -= 1;
@@ -116,9 +237,7 @@ impl Lease {
         if registry.history.len() == HISTORY_LIMIT {
             registry.history.pop_front();
         }
-        registry
-            .history
-            .push_back((now, self.record.view(now, state)));
+        registry.history.push_back((now, self.record.clone()));
     }
 }
 
@@ -128,8 +247,7 @@ impl Drop for Lease {
     }
 }
 
-/// Cloneable flow/association lease. Explicit finish is idempotent; dropping its final
-/// owner retires it as `closed`. Cancellation is sticky and independent from retirement.
+/// Cloneable lease. Finish follows stopped I/O owners; the final owner otherwise retires it.
 #[derive(Clone)]
 pub struct Connection(Arc<Lease>);
 
@@ -139,19 +257,35 @@ impl Connection {
         sequence: u64,
         details: bool,
         metadata: ConnectionMetadata,
-        catalog: Arc<crate::attribution::RouteCatalog>,
+        catalog: Option<Arc<ConnectionCatalogView>>,
     ) -> Self {
         let started = Instant::now();
+        let id = format!("{}:{sequence}", generation.id);
+        let mut registry = lock(&generation.registry);
+        let tracked = registry.live.len() < LIVE_LIMIT;
+        let capture_details = tracked && details;
         let record = Arc::new(Record {
-            id: format!("{}:{sequence}", generation.id),
+            id,
             generation: generation.id,
             protocol: metadata.protocol,
             inbound: metadata.inbound,
-            source: if details { metadata.source } else { None },
+            inbound_id: if tracked { metadata.inbound_id } else { None },
+            source: if capture_details {
+                metadata.source
+            } else {
+                None
+            },
+            catalog: if tracked { catalog } else { None },
             attribution: Mutex::new(Attribution {
-                target: if details { metadata.target } else { None },
-                route: None,
-                outbound: None,
+                facts: Arc::new(Facts {
+                    target: if capture_details {
+                        metadata.target
+                    } else {
+                        None
+                    },
+                    decision: None,
+                }),
+                final_state: None,
             }),
             started,
             started_ms: started.duration_since(generation.started).as_millis() as u64,
@@ -162,7 +296,6 @@ impl Connection {
             upload_rate: AtomicU64::new(0),
             download_rate: AtomicU64::new(0),
         });
-        let mut registry = lock(&generation.registry);
         let cancel_epoch = *generation.cancel_epoch.borrow();
         registry.active += 1;
         match metadata.protocol {
@@ -170,13 +303,11 @@ impl Connection {
             "udp" => registry.udp_active += 1,
             _ => {}
         }
-        let tracked = if registry.live.len() < LIVE_LIMIT {
+        if tracked {
             registry.live.insert(record.id.clone(), record.clone());
-            true
         } else {
             generation.omitted.fetch_add(1, Ordering::Relaxed);
-            false
-        };
+        }
         if registry.cancellation.len() < CANCELLATION_LIMIT {
             registry
                 .cancellation
@@ -188,51 +319,51 @@ impl Connection {
             record,
             tracked,
             details,
-            catalog,
             cancel_epoch,
             finished: AtomicBool::new(false),
         }))
     }
 
-    /// Stable, generation-qualified identity for explicit cancellation commands.
+    /// Stable generation-qualified cancellation identity.
     pub fn id(&self) -> String {
         self.0.record.id.clone()
     }
 
-    /// Updates the observed target, discarding it entirely when detail capture is disabled.
-    pub fn set_target(&self, target: Option<String>) {
-        if self.0.details {
-            lock(&self.0.record.attribution).target = target;
+    /// Captures an observed target only while the visible lease remains live.
+    pub fn set_target(&self, target: Option<ConnectionTarget>) {
+        if !self.0.details || !self.0.tracked {
+            return;
         }
-    }
-
-    /// Records the real route and outbound attribution; it never evaluates or changes routing.
-    pub fn set_route(&self, route: Option<String>, outbound: Option<String>) {
         let mut attribution = lock(&self.0.record.attribution);
-        attribution.route = route;
-        attribution.outbound = outbound;
+        if self.0.finished.load(Ordering::Acquire) {
+            return;
+        }
+        Arc::make_mut(&mut attribution.facts).target = target;
     }
 
-    /// Records the concrete selected hop indices, never a selector's later current value.
-    pub fn set_selected_route(&self, rule_index: Option<usize>, hops: &[usize]) {
-        self.set_route(self.0.catalog.rule(rule_index), self.0.catalog.path(hops));
+    /// Publishes captured routing evidence. Concrete plans contain at most eight hops.
+    pub fn set_decision(&self, mut decision: DecisionMetadata, hops: &[usize]) {
+        if !self.0.tracked {
+            return;
+        }
+        let mut attribution = lock(&self.0.record.attribution);
+        if self.0.finished.load(Ordering::Acquire) {
+            return;
+        }
+        if hops.len() > 8 {
+            return;
+        }
+        if !self.0.details {
+            decision.rule_index = None;
+            decision.sniff = SniffMetadata {
+                status: ConnectionSniffStatus::Redacted,
+                protocol: None,
+                domain: None,
+                rule_index: None,
+            };
+        }
+        Arc::make_mut(&mut attribution.facts).decision = Some((decision, hops.to_vec()));
     }
-
-    /// Records a terminal policy action without pretending it opened an outbound.
-    pub fn set_terminal_route(&self, rule_index: Option<usize>, outbound: &'static str) {
-        self.set_route(self.0.catalog.rule(rule_index), Some(outbound.to_owned()));
-    }
-
-    /// TUN synthetic DNS preprocessing bypasses the ordinary route program.
-    pub fn set_tun_dns_route(&self) {
-        self.set_route(
-            self.0
-                .details
-                .then(|| "TUN 配置 DNS 拦截（合成 DNS 地址，端口 53）".to_owned()),
-            Some("DNS 接管".to_owned()),
-        );
-    }
-
     /// Adds successfully transferred upload bytes. No shared table lock is acquired.
     pub fn upload(&self, bytes: usize) {
         if bytes != 0 && !self.0.finished.load(Ordering::Acquire) {

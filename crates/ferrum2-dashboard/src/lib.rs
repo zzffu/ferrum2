@@ -6,9 +6,12 @@
 mod attribution;
 mod connection;
 mod io;
+mod snapshot;
 pub mod wire;
 
-pub use connection::{Connection, ConnectionMetadata};
+pub use connection::{
+    Connection, ConnectionMetadata, ConnectionTarget, DecisionMetadata, SniffMetadata,
+};
 pub use io::{Direction, ObservedIo};
 
 use std::collections::{BTreeMap, VecDeque};
@@ -38,7 +41,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Default)]
 struct Registry {
     live: BTreeMap<String, Arc<Record>>,
-    history: VecDeque<(Instant, Value)>,
+    history: VecDeque<(Instant, Arc<Record>)>,
     cancellation: BTreeMap<String, Weak<Record>>,
     active: usize,
     tcp_active: usize,
@@ -81,17 +84,18 @@ impl Generation {
     }
 }
 
+#[derive(Clone)]
 struct State {
     generation: Arc<Generation>,
     runtime: String,
     error: Option<String>,
-    catalog: Value,
-    connection_catalog: Arc<attribution::RouteCatalog>,
-    domains: Value,
-    resources: Value,
+    catalog: Arc<Value>,
+    connection_catalog: Option<Arc<wire::ConnectionCatalogView>>,
+    domains: Arc<Value>,
+    resources: Arc<Value>,
     cpu: Option<f64>,
     memory: Option<u64>,
-    logs: VecDeque<Value>,
+    logs: VecDeque<Arc<Value>>,
     log_sequence: u64,
     sampled: Instant,
     sampled_upload: u64,
@@ -104,6 +108,7 @@ struct Inner {
     details: bool,
     started: Instant,
     sequence: AtomicU64,
+    catalog_sequence: AtomicU64,
     state: Mutex<State>,
 }
 
@@ -119,14 +124,15 @@ impl Dashboard {
             details,
             started: Instant::now(),
             sequence: AtomicU64::new(0),
+            catalog_sequence: AtomicU64::new(0),
             state: Mutex::new(State {
                 generation: Arc::new(Generation::new(0)),
                 runtime: "stopped".into(),
                 error: None,
-                catalog: Value::Null,
-                connection_catalog: Arc::default(),
-                domains: json!({}),
-                resources: json!({}),
+                catalog: Arc::new(Value::Null),
+                connection_catalog: None,
+                domains: Arc::new(json!({})),
+                resources: Arc::new(json!({})),
                 cpu: None,
                 memory: None,
                 logs: VecDeque::new(),
@@ -146,11 +152,11 @@ impl Dashboard {
     pub fn start_generation(&self, generation: u64) {
         let mut state = lock(&self.0.state);
         state.generation = Arc::new(Generation::new(generation));
-        state.connection_catalog = Arc::default();
+        state.connection_catalog = None;
         state.runtime = "starting".into();
         state.error = None;
-        state.domains = json!({});
-        state.resources = json!({});
+        state.domains = Arc::new(json!({}));
+        state.resources = Arc::new(json!({}));
         state.sampled = Instant::now();
         state.sampled_upload = 0;
         state.sampled_download = 0;
@@ -171,7 +177,7 @@ impl Dashboard {
 
     /// Publishes the caller's redacted catalog matching the browser protocol.
     pub fn set_catalog(&self, catalog: Value) {
-        lock(&self.0.state).catalog = catalog;
+        lock(&self.0.state).catalog = Arc::new(catalog);
     }
 
     /// Whether sensitive connection endpoints and route conditions may be captured.
@@ -179,21 +185,25 @@ impl Dashboard {
         self.0.details
     }
 
-    /// Captures immutable names and rule descriptions for subsequently admitted connections.
-    /// This private projection is never published as the browser's configuration catalog.
+    /// Captures immutable indexed configuration facts for subsequent admissions.
     pub fn set_connection_catalog(&self, catalog: Value) {
-        lock(&self.0.state).connection_catalog =
-            Arc::new(attribution::RouteCatalog::new(&catalog, self.0.details));
+        let generation = lock(&self.0.state).generation.clone();
+        let id = self.0.catalog_sequence.fetch_add(1, Ordering::Relaxed);
+        let catalog = Arc::new(attribution::catalog(id, &catalog, self.0.details));
+        let mut state = lock(&self.0.state);
+        if Arc::ptr_eq(&state.generation, &generation) {
+            state.connection_catalog = Some(catalog);
+        }
     }
 
     /// Publishes observations/capabilities from the current generation's real domain owners.
     pub fn set_domains(&self, domains: Value) {
-        lock(&self.0.state).domains = domains;
+        lock(&self.0.state).domains = Arc::new(domains);
     }
 
     /// Publishes measured resource state; unavailable fields must be null or absent.
     pub fn set_resources(&self, resources: Value) {
-        lock(&self.0.state).resources = resources;
+        lock(&self.0.state).resources = Arc::new(resources);
     }
 
     /// Publishes measured CPU percent and resident memory bytes; unknown values remain null.
@@ -217,8 +227,14 @@ impl Dashboard {
             state.sampled_download = download;
             state.sampled = now;
         }
-        lock(&state.generation.registry).prune(now);
-        for record in lock(&state.generation.registry).live.values() {
+        let generation = state.generation.clone();
+        drop(state);
+        let records: Vec<_> = {
+            let mut registry = lock(&generation.registry);
+            registry.prune(now);
+            registry.live.values().cloned().collect()
+        };
+        for record in records {
             record.sample(now);
         }
     }
@@ -242,7 +258,7 @@ impl Dashboard {
         if state.logs.len() == LOG_LIMIT {
             state.logs.pop_front();
         }
-        state.logs.push_back(entry);
+        state.logs.push_back(Arc::new(entry));
     }
 
     /// Creates a flow/association lease. Saturation omits only detail storage, never counters.
@@ -289,44 +305,14 @@ impl Dashboard {
         registry.active
     }
 
-    /// Returns protocol-v1 JSON without altering the shared traffic sample.
+    /// Returns protocol-v2 JSON without altering the shared traffic sample.
     pub fn snapshot(&self) -> Value {
-        let state = lock(&self.0.state);
-        let generation = &state.generation;
-        let mut registry = lock(&generation.registry);
-        let now = Instant::now();
-        registry.prune(now);
-        let connections: Vec<Value> = registry
-            .live
-            .values()
-            .map(|record| record.view(now, "active"))
-            .collect();
-        let history: Vec<&Value> = registry.history.iter().map(|(_, value)| value).collect();
-        json!({
-            "version": 1,
-            "generation": generation.id.to_string(),
-            "state": state.runtime,
-            "error": state.error,
-            "details": self.0.details,
-            "uptime_ms": generation.started.elapsed().as_millis() as u64,
-            "traffic": {
-                "upload_bytes": generation.upload.load(Ordering::Relaxed).to_string(),
-                "download_bytes": generation.download.load(Ordering::Relaxed).to_string(),
-                "upload_rate": state.upload_rate,
-                "download_rate": state.download_rate,
-            },
-            "process": {"cpu_percent": state.cpu, "memory_bytes": state.memory.map(|value| value.to_string())},
-            "connections": connections,
-            "history": history,
-            "active_connections": registry.active,
-            "active_tcp": registry.tcp_active,
-            "active_udp": registry.udp_active,
-            "omitted_connections": generation.omitted.load(Ordering::Relaxed),
-            "logs": state.logs,
-            "resources": state.resources,
-            "catalog": state.catalog,
-            "domains": state.domains,
-        })
+        serde_json::to_value(snapshot::Snapshot::capture(self)).expect("snapshot serialization")
+    }
+
+    /// Encodes directly from structured rows, outside registry and state locks.
+    pub fn encode_snapshot(&self) -> Vec<u8> {
+        serde_json::to_vec(&snapshot::Snapshot::capture(self)).expect("snapshot serialization")
     }
 }
 

@@ -142,6 +142,7 @@ final = "resolver"
     }));
     let cancellation = cancellation_receiver.await.expect("active cancellation");
 
+    let source: SocketAddr = "198.18.0.2:10000".parse().expect("original TCP source");
     let target: SocketAddr = "192.0.2.53:53".parse().expect("DNS target");
     let (flow, mut peer) = tokio::io::duplex(64);
     peer.write_all(&[0, 1, 0])
@@ -149,6 +150,7 @@ final = "resolver"
         .expect("malformed DNS frame");
     peer.shutdown().await.expect("DNS request half-close");
     run_tcp(
+        source,
         target,
         flow,
         cancellation.clone(),
@@ -244,6 +246,7 @@ final = "resolver"
     });
     let (flow, mut peer) = tokio::io::duplex(64);
     let direct = tokio::spawn(run_tcp(
+        source,
         direct_target,
         flow,
         cancellation.clone(),

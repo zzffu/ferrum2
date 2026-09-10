@@ -8,12 +8,15 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::run::context::{ClientContext, ClientRouting};
 use crate::run::egress::ClientRequestOrigin;
-use crate::run::routing::{ClientTerminalRoute, ReplayIo, relay_hijacked_tcp};
+use crate::run::routing::{
+    ClientTerminalRoute, ReplayIo, TcpRouteOutcome, relay_hijacked_tcp, tun_dns_decision,
+};
 
 use super::udp::{SyntheticDns, wait_for_session_cancellation};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_tcp<IO>(
+    source: SocketAddr,
     target: SocketAddr,
     mut flow: IO,
     mut cancellation: ProcessCancellation,
@@ -26,10 +29,16 @@ pub(super) async fn run_tcp<IO>(
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let observed_target = TargetAddr::ip(target).ok();
-    let observation = context.observe("tcp", "tun", None, observed_target.as_ref());
+    let observation = context.observe(
+        "tcp",
+        "tun",
+        inbound,
+        Some(source),
+        observed_target.as_ref(),
+    );
     if synthetic_dns.matches(target) {
         if let Some(observation) = &observation {
-            observation.set_tun_dns_route();
+            observation.set_decision(tun_dns_decision(), &[]);
         }
         let Some(proxy) = context
             .dns
@@ -60,7 +69,7 @@ pub(super) async fn run_tcp<IO>(
         return;
     };
     let mut process_cancelled = cancellation.clone();
-    let Ok(Some(selection)) = routing
+    let Ok(outcome) = routing
         .select_tcp(
             inbound,
             &target,
@@ -79,18 +88,34 @@ pub(super) async fn run_tcp<IO>(
     else {
         return;
     };
+    let selection = match outcome {
+        TcpRouteOutcome::Selected(selection) => selection,
+        TcpRouteOutcome::Aborted(decision) => {
+            if let Some(observation) = &observation {
+                let state = if decision.sniff.status
+                    == ferrum2_dashboard::wire::ConnectionSniffStatus::Cancelled
+                {
+                    "cancelled"
+                } else {
+                    "io"
+                };
+                observation.set_decision(decision, &[]);
+                observation.finish(state);
+            }
+            return;
+        }
+    };
+    selection
+        .terminal
+        .publish(observation.as_ref(), selection.decision);
     let mut flow = ReplayIo::new(flow, selection.prefix);
     match selection.terminal {
         ClientTerminalRoute::Reject => {
             if let Some(observation) = &observation {
-                observation.set_terminal_route(selection.rule_index, "拒绝");
                 observation.finish("rejected");
             }
         }
         ClientTerminalRoute::HijackDns => {
-            if let Some(observation) = &observation {
-                observation.set_terminal_route(selection.rule_index, "DNS 接管");
-            }
             let Some(proxy) = context
                 .dns
                 .as_ref()
@@ -116,7 +141,6 @@ pub(super) async fn run_tcp<IO>(
             .await;
         }
         ClientTerminalRoute::Route(plan) => {
-            crate::run::context::observe_route(observation.as_ref(), &plan, selection.rule_index);
             let opened = tokio::select! {
                 () = crate::run::context::observation_cancelled(observation.as_ref()) => {
                     if let Some(observation) = &observation { observation.finish("cancelled"); }
@@ -146,8 +170,7 @@ pub(super) async fn run_tcp<IO>(
                 .relay_tcp(
                     &mut flow,
                     &mut opened,
-                    // TcpFlow exposes only the original destination, not the application source.
-                    None,
+                    Some(source),
                     &target,
                     async {
                         tokio::select! {

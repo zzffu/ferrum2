@@ -542,6 +542,41 @@ async fn accept_requires_current_epoch_and_exact_peer_before_publication() {
 }
 
 #[tokio::test]
+async fn translated_accept_publishes_original_source_and_port() {
+    let quarantine = Arc::new(Mutex::new(PortQuarantine::default()));
+    let (mut system, mut flows) = test_system(1, 60_000, quarantine);
+    system
+        .configure_packet_bindings((Some((LOCAL_V4, 30)), None), (Some(LISTENER_V4_PORT), None))
+        .expect("test binding");
+    let original_source = SocketAddr::new(IpAddr::V4(LOCAL_V4), 10_000);
+    let original_target = SocketAddr::new(IpAddr::V4(TARGET_V4), 443);
+    let mut syn = ipv4_syn(original_target.port(), 3);
+    let parsed = parse_complete(&syn);
+    system.rewrite(&mut syn, parsed, true, 10).expect("SYN");
+    let translated = parse_complete(&syn);
+    let translated_peer =
+        SocketAddr::new(translated.source, u16::from_be_bytes([syn[24], syn[25]]));
+    assert_ne!(translated_peer.ip(), original_source.ip());
+    assert_ne!(translated_peer.port(), original_source.port());
+    let (accepted, _peer) = connected_pair().await.expect("injected accepted pair");
+    system
+        .accepted_sender
+        .try_send(AcceptedSocket {
+            epoch: system.bindings[0].epoch,
+            local: SocketAddr::new(translated.destination, LISTENER_V4_PORT),
+            peer: translated_peer,
+            stream: accepted.into(),
+        })
+        .expect("queue translated accept");
+    assert!(system.expire(11));
+    let flow = flows.try_recv().expect("admitted original flow");
+    assert_eq!(
+        (flow.source(), flow.target()),
+        (original_source, original_target)
+    );
+}
+
+#[tokio::test]
 async fn fenced_abort_after_delivered_fin_keeps_original_tuple_until_reset_delivery() {
     let (mut system, mut flows) =
         test_system(3, 60_000, Arc::new(Mutex::new(PortQuarantine::default())));

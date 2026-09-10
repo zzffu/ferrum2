@@ -216,6 +216,13 @@ pub(super) fn connection_catalog(source: &str) -> Result<Value, ConfigStoreError
 fn project_catalog(source: &str, connection_details: bool) -> Result<Value, ConfigStoreError> {
     validate(source)?;
     let mut root: toml::Value = toml::from_str(source).map_err(|_| ConfigStoreError::Invalid)?;
+    let mut inbounds = rows(root.get("inbounds"), &["tag", "outbound"]);
+    if let Some(tun) = root.get("tun") {
+        inbounds
+            .as_array_mut()
+            .expect("projected inbound rows")
+            .push(project(Some(tun), &["tag", "outbound"]));
+    }
     let mut route = project(root.get("route"), &["final", "auto_detect_interface"]);
     route["rules"] = rows(
         root.get("route").and_then(|v| v.get("rules")),
@@ -261,6 +268,25 @@ fn project_catalog(source: &str, connection_details: bool) -> Result<Value, Conf
                 );
         }
     }
+    if connection_details && root.get("route").is_none() {
+        // The compiler creates one ingress-match rule per declared inbound in this order.
+        // Preserve that identity without presenting it as an explicit route.rules entry.
+        route["rules"] = Value::Array(
+            inbounds
+                .as_array()
+                .expect("projected inbound rows")
+                .iter()
+                .map(|inbound| {
+                    json!({
+                        "origin": "inbound",
+                        "inbound": inbound["tag"],
+                        "action": "route",
+                        "outbound": inbound["outbound"],
+                    })
+                })
+                .collect(),
+        );
+    }
     route["rule_set"] = rows(
         root.get("route").and_then(|v| v.get("rule_set")),
         &["tag", "type", "format", "update_interval_seconds"],
@@ -290,7 +316,7 @@ fn project_catalog(source: &str, connection_details: bool) -> Result<Value, Conf
         value
     });
     let result = json!({
-        "inbounds": rows(root.get("inbounds"), &["tag", "outbound"]),
+        "inbounds": inbounds,
         "outbounds": rows(root.get("outbounds"), &["tag", "type", "method", "domain_strategy"]),
         "selectors": rows(root.get("selectors"), &["tag", "outbounds", "default"]),
         "chains": rows(root.get("chains"), &["tag", "hops"]),
@@ -454,6 +480,51 @@ mod tests {
         assert_eq!(store.read().unwrap().source, edited);
         assert_ne!(saved.revision, before.revision);
         assert_eq!(saved.revision, store.read().unwrap().revision);
+    }
+
+    #[test]
+    fn implicit_ingress_routes_keep_tun_index_and_configuration_origin() {
+        let source = "schema_version = 2\n\
+            [[inbounds]]\ntag = 'socks-in'\nlisten = '127.0.0.1:1080'\noutbound = 'direct'\n\
+            [tun]\ntag = 'tun-in'\nadapter_name = 'catalog-only'\nipv4_address = '198.18.0.2/30'\noutbound = 'direct'\n\
+            [[outbounds]]\ntag = 'direct'\ntype = 'direct'\n";
+        let private = connection_catalog(source).unwrap();
+        assert_eq!(
+            private["inbounds"],
+            json!([
+                {"tag": "socks-in", "outbound": "direct"},
+                {"tag": "tun-in", "outbound": "direct"}
+            ])
+        );
+        assert_eq!(
+            private["route"]["rules"],
+            json!([
+                {"origin": "inbound", "inbound": "socks-in", "action": "route", "outbound": "direct"},
+                {"origin": "inbound", "inbound": "tun-in", "action": "route", "outbound": "direct"}
+            ])
+        );
+        assert!(
+            catalog(source).unwrap()["route"]["rules"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn detailed_route_conditions_never_enter_the_public_catalog() {
+        let source = format!(
+            "{VALID}[[route.rules]]\ndomain_suffix = 'private-route.invalid'\naction = 'route'\noutbound = 'direct'\n"
+        );
+        let public = catalog(&source).unwrap();
+        assert_eq!(
+            public["route"]["rules"],
+            json!([{"action": "route", "outbound": "direct"}])
+        );
+        assert_eq!(
+            connection_catalog(&source).unwrap()["route"]["rules"],
+            json!([{"domain_suffix": "private-route.invalid", "action": "route", "outbound": "direct"}])
+        );
     }
 
     #[test]

@@ -38,6 +38,7 @@ impl ClientContext {
         &self,
         protocol: &'static str,
         inbound: &'static str,
+        inbound_id: usize,
         source: Option<std::net::SocketAddr>,
         target: Option<&ferrum2_core::TargetAddr>,
     ) -> Option<ferrum2_dashboard::Connection> {
@@ -45,8 +46,27 @@ impl ClientContext {
             dashboard.begin(ferrum2_dashboard::ConnectionMetadata {
                 protocol,
                 inbound,
-                source: source.map(|source| source.to_string()),
-                target: target.map(render_target),
+                inbound_id: Some(inbound_id),
+                source: dashboard
+                    .connection_details_enabled()
+                    .then_some(source)
+                    .flatten(),
+                target: target
+                    .filter(|_| dashboard.connection_details_enabled())
+                    .map(|target| match target.host() {
+                        ferrum2_core::TargetHostRef::Ip(ip) => {
+                            ferrum2_dashboard::ConnectionTarget::Socket(std::net::SocketAddr::new(
+                                ip,
+                                target.port().get(),
+                            ))
+                        }
+                        ferrum2_core::TargetHostRef::Domain(name) => {
+                            ferrum2_dashboard::ConnectionTarget::Domain {
+                                name: name.to_owned(),
+                                port: target.port().get(),
+                            }
+                        }
+                    }),
             })
         })
     }
@@ -147,25 +167,6 @@ impl ClientContext {
             },
         });
         result
-    }
-}
-
-pub(super) fn render_target(target: &ferrum2_core::TargetAddr) -> String {
-    match target.host() {
-        ferrum2_core::TargetHostRef::Ip(ip) => {
-            std::net::SocketAddr::new(ip, target.port().get()).to_string()
-        }
-        ferrum2_core::TargetHostRef::Domain(domain) => format!("{domain}:{}", target.port()),
-    }
-}
-
-pub(super) fn observe_route(
-    observation: Option<&ferrum2_dashboard::Connection>,
-    plan: &ferrum2_core::route::EgressPlanSnapshot,
-    rule_index: Option<usize>,
-) {
-    if let Some(observation) = observation {
-        observation.set_selected_route(rule_index, plan.hops());
     }
 }
 

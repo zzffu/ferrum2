@@ -96,12 +96,12 @@ pub(super) async fn client_connection(
         initial_payload: _,
         reply,
     } = session;
-    let observation = context.observe("tcp", "socks5", peer_addr, Some(&target));
+    let observation = context.observe("tcp", "socks5", inbound, peer_addr, Some(&target));
     let Ok(mut route_scratch) = routing.route_scratch() else {
         let _ = reply.failed(ConnectErrorKind::Other).await;
         return;
     };
-    let Ok(terminal) = routing.select_terminal_with_scratch(
+    let Ok(selection) = routing.select_terminal_with_scratch(
         inbound,
         Network::Tcp,
         &target,
@@ -112,28 +112,19 @@ pub(super) async fn client_connection(
         let _ = reply.failed(ConnectErrorKind::Other).await;
         return;
     };
-    let plan = match terminal {
-        // Attribution is from this one selected path, never a second evaluation.
-        ClientTerminalRoute::Route(plan) => {
-            crate::run::context::observe_route(
-                observation.as_ref(),
-                &plan,
-                route_scratch.selected_rule_index(),
-            );
-            plan
-        }
+    selection
+        .terminal
+        .publish(observation.as_ref(), selection.decision);
+    let plan = match selection.terminal {
+        ClientTerminalRoute::Route(plan) => plan,
         ClientTerminalRoute::Reject => {
             if let Some(observation) = &observation {
-                observation.set_terminal_route(route_scratch.selected_rule_index(), "拒绝");
                 observation.finish("rejected");
             }
             let _ = reply.failed(ConnectErrorKind::PolicyDenied).await;
             return;
         }
         ClientTerminalRoute::HijackDns => {
-            if let Some(observation) = &observation {
-                observation.set_terminal_route(route_scratch.selected_rule_index(), "DNS 接管");
-            }
             let Some(proxy) = context
                 .dns
                 .as_ref()

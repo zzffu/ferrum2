@@ -1,0 +1,235 @@
+.connection-filters {
+  gap: 8px;
+}
+.connection-filters select {
+  max-width: 240px;
+}
+.connection-list-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.connection-list-meta p {
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.connection-list-meta strong {
+  color: var(--text);
+}
+.connection-columns {
+  font-size: 12px;
+}
+.connection-columns > div {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0;
+}
+.connection-table td {
+  vertical-align: top;
+  padding: 10px 8px;
+}
+.connection-table .connection-target {
+  min-width: 155px;
+  width: 23%;
+}
+.connection-table .connection-provenance {
+  min-width: 150px;
+  width: 21%;
+}
+.connection-target-button {
+  color: var(--text);
+  background: none;
+  border: 0;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.connection-origin {
+  color: var(--accent);
+  font-size: 10px;
+}
+.connection-address {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.connection-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.connection-badges span {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 5px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.connection-badges .observed {
+  color: var(--accent);
+}
+.connection-traffic {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.connection-traffic small {
+  font-size: 10px;
+}
+html:has(.connection-detail[open]) {
+  overflow: hidden;
+}
+.connection-detail {
+  position: fixed;
+  inset: 0 0 0 auto;
+  margin: 0;
+  width: min(600px, 94vw);
+  height: 100dvh;
+  max-height: 100dvh;
+  max-width: 100vw;
+  overflow-y: auto;
+  padding: 24px;
+  color: var(--text);
+  background: var(--surface);
+  border: 0;
+  border-left: 1px solid var(--line);
+  box-shadow: -12px 0 70px #0005;
+}
+.connection-outbound,
+.connection-route {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.connection-outbound {
+  -webkit-line-clamp: 1;
+}
+.connection-route {
+  -webkit-line-clamp: 2;
+  margin-top: 4px;
+  color: var(--muted);
+}
+.connection-detail::backdrop {
+  background: #0007;
+  backdrop-filter: blur(3px);
+}
+.connection-detail > header {
+  position: sticky;
+  top: -24px;
+  background: var(--surface);
+  padding: 16px 0;
+  z-index: 1;
+}
+.connection-detail header h2 {
+  margin-bottom: 5px;
+}
+.connection-detail section {
+  border-bottom: 1px solid var(--line);
+  padding: 20px 0 8px;
+}
+.connection-detail h3 {
+  color: var(--accent);
+}
+.connection-detail dl {
+  grid-template-columns: 100px minmax(0, 1fr);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.connection-detail dd {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.connection-detail .structured {
+  max-height: none;
+}
+.connection-detail > details {
+  margin-top: 22px;
+}
+.connection-hops {
+  padding-left: 20px;
+  margin: 0;
+}
+.connection-hops li {
+  padding-bottom: 6px;
+}
+@media (max-width: 1100px) {
+  .connection-table {
+    min-width: 850px;
+  }
+}
+@media (max-width: 700px) {
+  .toolbar.connection-filters > input {
+    flex: 1 0 100%;
+    width: 100%;
+  }
+  .connection-filters select {
+    min-width: 0;
+    max-width: 100%;
+    flex: 1 1 100px;
+  }
+  .connection-table-scroll {
+    overflow: visible;
+  }
+  .connection-table,
+  .connection-table tbody {
+    display: block;
+    min-width: 0;
+  }
+  .connection-table thead {
+    display: none;
+  }
+  .connection-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    padding: 8px;
+  }
+  .connection-table td {
+    display: block;
+    max-width: none;
+    min-width: 0;
+    width: auto;
+    padding: 7px;
+    border: 0;
+  }
+  .connection-table td::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: 10px;
+    margin-bottom: 4px;
+  }
+  .connection-table .connection-target,
+  .connection-table .connection-provenance {
+    grid-column: 1 / -1;
+    min-width: 0;
+    width: auto;
+  }
+  .connection-table .connection-target-button {
+    font-size: 14px;
+  }
+  .connection-detail {
+    width: 100vw;
+    padding: 16px;
+  }
+  .connection-detail > header {
+    top: -16px;
+  }
+  .connection-detail dl {
+    grid-template-columns: 85px minmax(0, 1fr);
+  }
+}

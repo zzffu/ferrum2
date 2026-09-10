@@ -222,9 +222,11 @@ pub(super) fn trial(scenario: &str, mode: &str) -> Result<String, &'static str> 
     let socket = FlowSocket::Memory(socket);
     let measurement = if wrapped {
         let registry = OwnerRegistry::new();
+        let source = ([198, 18, 0, 2], 10_000).into();
         let target = ([198, 18, 0, 1], 443).into();
         let (mut flow, lease) =
-            tcp_flow_from_stream(socket, target, 1, &registry, OwnerWake::default());
+            tcp_flow_from_stream(socket, source, target, 1, &registry, OwnerWake::default());
+        assert_eq!(flow.source(), source);
         assert_eq!(flow.target(), target);
         assert_eq!(lease.generation(), 1);
         let measurement = measure(&mut flow, peer, &payload, pending, windows);

@@ -45,10 +45,10 @@ pub(in crate::run::tun) fn select_udp_target_generation_stable(
         return Err(ferrum2_rule::RuleCompileError::Internal);
     }
     match &plan {
-        TunUdpPlan::Route { .. } | TunUdpPlan::HijackDns => request
+        TunUdpPlan::Route { .. } | TunUdpPlan::HijackDns(_) => request
             .metrics
             .tun_udp_association_route(TunUdpAssociationRouteResult::Success),
-        TunUdpPlan::Reject => request
+        TunUdpPlan::Reject(_) => request
             .metrics
             .tun_udp_association_route(TunUdpAssociationRouteResult::Rejected),
         // Synthetic DNS is preprocessing for the same source-keyed association. Its first
@@ -65,7 +65,7 @@ fn select_udp_target_with_scratch(
     if is_synthetic_dns_target(request.target, request.synthetic_dns) {
         return Ok(TunUdpPlan::SyntheticDns);
     }
-    let terminal = request.routing.select_terminal_with_scratch(
+    let selection = request.routing.select_terminal_with_scratch(
         request.inbound,
         Network::Udp,
         request.target,
@@ -73,10 +73,12 @@ fn select_udp_target_with_scratch(
         request.metrics,
         scratch,
     )?;
-    let selected = match terminal {
+    let selected = match selection.terminal {
         ClientTerminalRoute::Route(plan) => {
             let Some(target) = request.target.as_socket_addr() else {
-                return Ok(TunUdpPlan::Reject);
+                let mut decision = selection.decision;
+                decision.kind = ferrum2_dashboard::wire::ConnectionDecisionKind::Reject;
+                return Ok(TunUdpPlan::Reject(decision));
             };
             let encoded_target_len = match target {
                 SocketAddr::V4(_) => 7,
@@ -91,10 +93,11 @@ fn select_udp_target_with_scratch(
             TunUdpPlan::Route {
                 snapshot: plan,
                 request_payload_bound,
+                decision: selection.decision,
             }
         }
-        ClientTerminalRoute::HijackDns => TunUdpPlan::HijackDns,
-        ClientTerminalRoute::Reject => TunUdpPlan::Reject,
+        ClientTerminalRoute::HijackDns => TunUdpPlan::HijackDns(selection.decision),
+        ClientTerminalRoute::Reject => TunUdpPlan::Reject(selection.decision),
     };
     Ok(selected)
 }
@@ -158,13 +161,16 @@ pub(super) struct RouteEgress {
     pub(super) cancelled: tokio::sync::watch::Receiver<bool>,
     request_payload_bound: usize,
     observed_path: Option<ferrum2_core::route::EgressPlanSnapshot>,
-    observed_rule: Option<usize>,
 }
 
 impl RouteEgress {
-    pub(super) fn observe_path(&self, observation: &ferrum2_dashboard::Connection) {
+    pub(super) fn observe_decision(
+        &self,
+        observation: &ferrum2_dashboard::Connection,
+        decision: ferrum2_dashboard::DecisionMetadata,
+    ) {
         if let Some(plan) = &self.observed_path {
-            crate::run::context::observe_route(Some(observation), plan, self.observed_rule);
+            observation.set_decision(decision, plan.hops());
         }
     }
 
@@ -174,7 +180,6 @@ impl RouteEgress {
         first_target: &TargetAddr,
         snapshot: ferrum2_core::route::EgressPlanSnapshot,
         request_payload_bound: usize,
-        observed_rule: Option<usize>,
     ) -> Option<Self> {
         if !services.current(Some(generation)) {
             return None;
@@ -209,7 +214,6 @@ impl RouteEgress {
             cancelled,
             request_payload_bound,
             observed_path,
-            observed_rule,
         })
     }
 

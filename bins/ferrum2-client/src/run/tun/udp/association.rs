@@ -37,10 +37,11 @@ pub(in crate::run::tun) enum TunUdpPlan {
     Route {
         snapshot: EgressPlanSnapshot,
         request_payload_bound: usize,
+        decision: ferrum2_dashboard::DecisionMetadata,
     },
     SyntheticDns,
-    HijackDns,
-    Reject,
+    HijackDns(ferrum2_dashboard::DecisionMetadata),
+    Reject(ferrum2_dashboard::DecisionMetadata),
 }
 
 pub(in crate::run::tun) const fn target_payload_within_bound(
@@ -64,7 +65,6 @@ pub(super) struct DispatchServices {
 pub(super) struct OrdinaryGeneration {
     pub(super) value: RouteGeneration,
     pub(super) changed: RouteGenerationChange,
-    rule_index: Option<usize>,
 }
 
 enum OrdinaryTerminal {
@@ -82,6 +82,26 @@ enum OrdinaryPolicy {
 }
 
 impl OrdinaryPolicy {
+    fn publish(
+        &self,
+        decision: Option<ferrum2_dashboard::DecisionMetadata>,
+        observation: Option<&ferrum2_dashboard::Connection>,
+    ) {
+        let Self::Selected { terminal, .. } = self else {
+            if let Some(observation) = observation {
+                observation.set_decision(crate::run::routing::tun_dns_decision(), &[]);
+            }
+            return;
+        };
+        if let (Some(decision), Some(observation)) = (decision, observation) {
+            match terminal {
+                OrdinaryTerminal::Route(route) => route.observe_decision(observation, decision),
+                OrdinaryTerminal::Reject | OrdinaryTerminal::HijackDns => {
+                    observation.set_decision(decision, &[])
+                }
+            }
+        }
+    }
     fn generation(&self) -> Option<&OrdinaryGeneration> {
         match self {
             Self::Unselected => None,
@@ -135,7 +155,11 @@ impl DispatchServices {
             })
     }
 
-    async fn select_ordinary(&self, target: SocketAddr, payload: &[u8]) -> Option<OrdinaryPolicy> {
+    async fn select_ordinary(
+        &self,
+        target: SocketAddr,
+        payload: &[u8],
+    ) -> Option<(OrdinaryPolicy, ferrum2_dashboard::DecisionMetadata)> {
         let Ok(mut scratch) = self.routing.route_scratch() else {
             self.context
                 .metrics
@@ -158,53 +182,42 @@ impl DispatchServices {
         let mut generation = OrdinaryGeneration {
             value,
             changed: self.routing.watch_route_generation_from(value),
-            rule_index: scratch.selected_rule_index(),
         };
-        let terminal = match plan {
+        let (terminal, decision) = match plan {
             TunUdpPlan::Route {
                 snapshot,
                 request_payload_bound,
+                decision,
             } => {
-                crate::run::context::observe_route(
-                    self.observation.as_ref(),
-                    &snapshot,
-                    scratch.selected_rule_index(),
-                );
                 if !target_payload_within_bound(payload.len(), request_payload_bound) {
                     return None;
                 }
-                OrdinaryTerminal::Route(Box::new(
+                let terminal = OrdinaryTerminal::Route(Box::new(
                     RouteEgress::prepare(
                         self,
                         &mut generation,
                         &target,
                         snapshot,
                         request_payload_bound,
-                        scratch.selected_rule_index(),
                     )
                     .await?,
-                ))
+                ));
+                (terminal, decision)
             }
-            TunUdpPlan::HijackDns => {
-                if let Some(observation) = &self.observation {
-                    observation.set_terminal_route(scratch.selected_rule_index(), "DNS 接管");
-                }
+            TunUdpPlan::HijackDns(decision) => {
                 self.proxy.as_ref()?;
-                OrdinaryTerminal::HijackDns
+                (OrdinaryTerminal::HijackDns, decision)
             }
-            TunUdpPlan::Reject => {
-                if let Some(observation) = &self.observation {
-                    observation.set_terminal_route(scratch.selected_rule_index(), "拒绝");
-                }
-                OrdinaryTerminal::Reject
-            }
+            TunUdpPlan::Reject(decision) => (OrdinaryTerminal::Reject, decision),
             TunUdpPlan::SyntheticDns => return None,
         };
-        self.current(Some(&generation))
-            .then_some(OrdinaryPolicy::Selected {
+        self.current(Some(&generation)).then_some((
+            OrdinaryPolicy::Selected {
                 generation,
                 terminal,
-            })
+            },
+            decision,
+        ))
     }
 }
 
@@ -229,19 +242,19 @@ pub(in crate::run::tun) async fn run_udp(
         inbound,
         synthetic_dns,
     };
-    let ordinary = if synthetic_dns.matches(candidate.first_target()) {
+    let (ordinary, decision) = if synthetic_dns.matches(candidate.first_target()) {
         if services.proxy.is_none() {
             return;
         }
-        OrdinaryPolicy::Unselected
+        (OrdinaryPolicy::Unselected, None)
     } else {
-        let Some(policy) = services
+        let Some((policy, decision)) = services
             .select_ordinary(candidate.first_target(), candidate.first_payload())
             .await
         else {
             return;
         };
-        policy
+        (policy, Some(decision))
     };
     // First ordinary egress admission and request bounds are checked before the
     // native candidate commit. The association keeps the TUN packet ceiling so
@@ -252,33 +265,11 @@ pub(in crate::run::tun) async fn run_udp(
     services.observation = services.context.observe(
         "udp",
         "tun",
+        inbound,
         Some(observed_source),
         observed_target.as_ref(),
     );
-    if let Some(observation) = &services.observation {
-        match ordinary.terminal() {
-            Some(OrdinaryTerminal::Route(route)) => {
-                route.observe_path(observation);
-            }
-            Some(OrdinaryTerminal::HijackDns) => {
-                observation.set_terminal_route(
-                    ordinary
-                        .generation()
-                        .and_then(|generation| generation.rule_index),
-                    "DNS 接管",
-                );
-            }
-            Some(OrdinaryTerminal::Reject) => {
-                observation.set_terminal_route(
-                    ordinary
-                        .generation()
-                        .and_then(|generation| generation.rule_index),
-                    "拒绝",
-                );
-            }
-            None => observation.set_tun_dns_route(),
-        }
-    }
+    ordinary.publish(decision, services.observation.as_ref());
     let response_sink = association.response_sink();
     let peer_policy = association.peer_policy();
     TunUdpDispatch {
@@ -364,7 +355,7 @@ impl TunUdpDispatch {
             self.ordinary.terminal(),
         );
         if action == DatagramAction::SelectOrdinary {
-            let Some(policy) = self
+            let Some((policy, decision)) = self
                 .services
                 .select_ordinary(datagram.target(), datagram.payload())
                 .await
@@ -372,6 +363,8 @@ impl TunUdpDispatch {
                 return false;
             };
             self.ordinary = policy;
+            self.ordinary
+                .publish(Some(decision), self.services.observation.as_ref());
             action = match self.ordinary.terminal() {
                 Some(OrdinaryTerminal::Reject) => DatagramAction::Reject,
                 Some(OrdinaryTerminal::HijackDns) => DatagramAction::Dns,

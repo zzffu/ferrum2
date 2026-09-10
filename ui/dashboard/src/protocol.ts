@@ -1,22 +1,5 @@
-import type { Command } from "./wire";
+import type { Command, ConnectionView, ConnectionCatalogView } from "./wire";
 // Shared implementation contract. Decimal strings carry Rust u64 values.
-export interface ConnectionView {
-  id: string;
-  generation: string;
-  protocol: string;
-  inbound: string;
-  source: string | null;
-  target: string | null;
-  route: string | null;
-  outbound: string | null;
-  started_ms: number;
-  duration_ms: number;
-  upload_bytes: string;
-  download_bytes: string;
-  state: string;
-  upload_rate: number;
-  download_rate: number;
-}
 export interface LogView {
   id: string;
   elapsed_ms: number;
@@ -34,7 +17,7 @@ export interface Catalog {
   rocom: Record<string, unknown> | null;
 }
 export interface Snapshot {
-  version: 1;
+  version: 2;
   generation: string;
   state: "stopped" | "starting" | "running" | "stopping" | "failed";
   error: string | null;
@@ -49,6 +32,7 @@ export interface Snapshot {
   process: { cpu_percent: number | null; memory_bytes: string | null };
   connections: ConnectionView[];
   history: ConnectionView[];
+  connection_catalogs: ConnectionCatalogView[];
   omitted_connections: number;
   active_connections: number;
   active_tcp: number;
@@ -69,7 +53,13 @@ export interface Snapshot {
     capabilities?: Command["action"][];
   };
 }
-export type { Command, CommandRequest, CommandResult } from "./wire";
+export type {
+  Command,
+  CommandRequest,
+  CommandResult,
+  ConnectionView,
+  ConnectionCatalogView,
+} from "./wire";
 // HTTP: GET /api/snapshot, GET /api/config -> {source:string,revision:string,running_revision:string|null}
 // POST /api/command: CommandRequest -> {result:CommandResult}.
 // Failures -> {error:{code:string}}, status 400/401/403/409/413/429/500/503.

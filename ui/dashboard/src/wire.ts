@@ -55,3 +55,35 @@ export type RefreshResult =
   { status: "unchanged";  } |
   { status: "degraded"; retained_previous: boolean; reason: string; } |
   { status: "failed"; retained_previous: boolean; reason: string; };
+export interface ConnectionView { id: string; generation: string; protocol: string; inbound: string; inbound_tag: string | null; source: string | null; target: string | null; requested_domain: string | null; catalog_id: string | null; decision: ConnectionDecisionView | null; started_ms: number; duration_ms: number; upload_bytes: string; download_bytes: string; state: string; upload_rate: number; download_rate: number; }
+export interface ConnectionDecisionView { kind: ConnectionDecisionKind; rule_index: number | null; rule_generation: string | null; hops: Array<number>; sniff: ConnectionSniffView; }
+export type ConnectionDecisionKind =
+  "route" |
+  "reject" |
+  "hijack_dns" |
+  "tun_dns" |
+  "aborted";
+export interface ConnectionSniffView { status: ConnectionSniffStatus; protocol: ConnectionSniffProtocol | null; domain: string | null; rule_index: number | null; }
+export type ConnectionSniffStatus =
+  "not_requested" |
+  "not_executed" |
+  "matched" |
+  "no_match" |
+  "invalid" |
+  "timeout" |
+  "limit" |
+  "unavailable" |
+  "cancelled" |
+  "read_error" |
+  "redacted";
+export type ConnectionSniffProtocol =
+  "dns" |
+  "tls" |
+  "http";
+export interface ConnectionCatalogView { id: string; rules: Array<ConnectionRuleView>; final_outbound: string | null; outbounds: Array<ConnectionNameView>; inbounds: Array<ConnectionNameView>; }
+export interface ConnectionNameView { index: number; tag: string; }
+export interface ConnectionRuleView { index: number; origin: ConnectionRuleOrigin; conditions: Array<ConnectionConditionView>; action: string; outbound: string | null; sniffers: Array<string>; }
+export type ConnectionRuleOrigin =
+  "configured" |
+  "inbound";
+export interface ConnectionConditionView { field: string; value: unknown; }

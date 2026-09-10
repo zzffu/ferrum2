@@ -217,6 +217,7 @@ outbound = "manual"
             &mut route_scratch,
         )
         .expect("routed chain selection")
+        .terminal
     else {
         panic!("routed chain terminal")
     };
